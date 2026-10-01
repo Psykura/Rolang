@@ -16,7 +16,7 @@ design philosophy, core features and distinctive runtime behavior.
 - A C runtime core for ARC/GC, allocation, compiler checks and task scheduling.
 - 29 std modules covering collections, text, I/O, paths, processes, math and tasks;
   modules with C primitives keep their implementations beside their Rolang API.
-- A Genesis Compiler build entry point and relocatable installation.
+- A bootstrap build entry point and relocatable installation.
 
 Project/workspace/package management and LSP are planned in the
 [roadmap](docs/roadmap.md). The current public command is `rolangc`.
@@ -24,21 +24,20 @@ Project/workspace/package management and LSP are planned in the
 ## Requirements and build
 
 Use a 64-bit POSIX host, LLVM clang, a compatible C compiler/linker, make and a
-Genesis Compiler executable for your host platform. A Genesis Compiler is a
+bootstrap compiler executable for your host platform. The bootstrap compiler is a
 released Rolang compiler binary used to compile the current Rolang sources.
 
-Download the matching Genesis Compiler release asset, make it executable and
+Download the matching bootstrap compiler release asset, make it executable and
 pass its path to make:
 
 ~~~sh
-chmod +x /path/to/rolang-genesis
-make GENESIS=/path/to/rolang-genesis CLANG=/path/to/clang
+chmod +x /path/to/rolangc
+make GENESIS=/path/to/rolangc CLANG=/path/to/clang
 ~~~
 
 Alternatively, place the executable at genesis/rolangc and run make. The build
 compiles compiler/main.rl and its imports once at O3, then installs the result
 as bin/rolangc. CC defaults to CLANG; LTO needs a compatible linker.
-See [Genesis and releases](docs/genesis.md) for binary and source distribution.
 
 ## Quick start
 
@@ -94,7 +93,6 @@ See [compiler usage and artifacts](docs/compiler.md).
 | [Compiler](docs/compiler.md) | CLI, imports, .rlm, cache, targets and LTO |
 | [Architecture](compiler/README.md) | Compiler stages and runtime/ABI responsibilities |
 | [Runtime](runtime/README.md) | C core, standard-library companions and shared ABI |
-| [Genesis and releases](docs/genesis.md) | Initial compiler binary, source builds and release assets |
 | [Contributing](CONTRIBUTING.md) | Source layout and development workflow |
 | [Roadmap](docs/roadmap.md) | Standard library, management, distribution and editor work |
 
@@ -105,9 +103,9 @@ make rebuild GENESIS="$PWD/bin/rolangc" CLANG=/path/to/clang
 ~~~
 
 After the first build, the resulting compiler can compile subsequent source
-changes. Keep a released Genesis Compiler available for a clean build.
+changes. Keep a released bootstrap compiler available for a clean build.
 The language uses reference semantics even when an optimization replaces an
 allocation with scalars. Build and install instructions apply to each platform
-with a matching Genesis Compiler and compatible toolchain.
+with a matching bootstrap compiler and compatible toolchain.
 
 Rolang is licensed under [MIT](LICENSE).
