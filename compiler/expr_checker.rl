@@ -219,6 +219,14 @@ pub struct ExprChecker {
                     else { if let actual = arg.label { matches = actual.equals(param.internal_name); } else { matches = true; } }
                     if !matches { self.state.error(TypeErrorKind.wrong_arg_type(), f"argument {index + 1} label mismatch: expected {param.external_name ?? "<none>"}, got {arg.label ?? "<none>"}", data.arguments[index]); }
                 } } } }
+                if let names = self.requirement_generics(callee) {
+                    // Generic protocol requirement called through a constrained type parameter:
+                    // infer the method's own type parameters from the arguments.
+                    for index in 0..<argc { if let arg = self.argument(data.arguments[index]) { if let value = arg.value {
+                        let pattern = func.params.get(index);
+                        infer_resolved_type_arguments(self.state.type_table, pattern, self.state.infer_with_expected(value, pattern), names, mapping);
+                    } } }
+                }
                 for index in 0..<argc { if let arg = self.argument(data.arguments[index]) { if let value = arg.value {
                     let expected = self.state.generic_inference.substitute_type(func.params.get(index), mapping);
                     self.state.check_assignable(self.state.infer_with_expected(value, expected), expected, f"argument {index + 1}");
@@ -253,7 +261,7 @@ pub struct ExprChecker {
         if let data = decl { if data.generic_params.len() > 0 {
             let missing = self.unbound(data.generic_params, mapping);
             if missing.len() > 0 { self.state.error(TypeErrorKind.cannot_infer(), f"Cannot infer type parameter(s) {join_strings(missing, ", ")} of enum '{data.name}.{case_def.name}' from arguments; add a type annotation to the binding"); return type; }
-            self.state.generic_inference.check_generic_constraints(mapping, data.generic_params);
+            self.state.generic_inference.check_generic_constraints(mapping, data.generic_params, self.state.conformance_checker);
             if let info = self.state.type_table.get_type(type) { switch info.data { case .enum_type(let value): return self.state.type_table.make_enum(value.symbol_id, self.type_args(data.generic_params, mapping)); default: {} } }
         } }
         type
@@ -277,6 +285,26 @@ pub struct ExprChecker {
             case .member_access(let data): if let out = self.member_parts(data.object) { out.push(data.member); return out; }
             default: {}
         } } } nil
+    }
+    // Generic parameter names of the protocol requirement named by `callee` when its receiver
+    // is a protocol-constrained type parameter.
+    def requirement_generics(callee: NodeId) -> Dict<String, Bool>? {
+        guard let node = self.state.arena.get(callee) else { return nil; }
+        var access: MemberAccessAst? = nil; switch node.form { case .member_access(let value): access = value; default: {} }
+        guard let member = access else { return nil; }
+        guard let object = member.object else { return nil; }
+        guard let receiver = self.state.result.expr_types[object.id] else { return nil; }
+        guard let info = self.state.type_table.get_type(receiver) else { return nil; }
+        switch info.data { case .type_variable(let variable):
+            for bound in variable.bounds { if let protocol = self.state.type_table.get_type(bound) { switch protocol.data { case .protocol(let data):
+                for func in data.func_requirements { if func.name.equals(member.member) && func.generic_params.len() > 0 {
+                    let names = Dict<String, Bool>.with_capacity(4, 1); for name in func.generic_params { names[name] = true; } return names;
+                } }
+                default: {}
+            } } }
+            default: {}
+        }
+        nil
     }
     def protocol_member(protocol: TypeId, name: String, existential: Bool) -> TypeId? {
         if let info = self.state.type_table.get_type(protocol) { switch info.data { case .protocol(let data):
@@ -345,14 +373,43 @@ pub struct ExprChecker {
         } }
         self.state.error(TypeErrorKind.type_mismatch(), f"Type {self.state.type_table.format_type(type)} does not support subscripting", id); self.state.type_table.error_type
     }
+    // Type arguments of the contextual Vec/Dict type, looking through one optional layer.
+    def expected_collection_args(name: String, count: i32) -> FrozenVec<TypeId>? {
+        guard let expected = self.state.expected_type else { return nil; }
+        let type = self.state.type_table.get_optional_inner(expected) ?? expected;
+        if let info = self.state.type_table.get_type(type) { switch info.data {
+            case .struct_type(let value): if self.symbol_name(value.symbol_id).equals(name) && value.type_args.len() == count { return value.type_args; }
+            default: {}
+        } }
+        nil
+    }
     def array(data: ArrayLiteralAst) -> TypeId {
-        if data.elements.len() == 0 { return self.state.type_resolver.make_vec_type(self.state.type_table.make_type_variable("vec_elem")); }
+        if let args = self.expected_collection_args("Vec", 1) {
+            let element = args.get(0);
+            for index in 0..<data.elements.len() { let value = data.elements[index]; self.state.check_assignable(self.state.infer_with_expected(value, element), element, f"Vec element {index}", value); }
+            return self.state.type_resolver.make_vec_type(element);
+        }
+        if data.elements.len() == 0 {
+            self.state.error(TypeErrorKind.cannot_infer(), "Cannot infer the element type of an empty Vec literal; add a type annotation");
+            return self.state.type_table.error_type;
+        }
         let type = self.state.infer_expr(data.elements[0]);
         for index in 1..<data.elements.len() { let other = self.state.infer_expr(data.elements[index]); if !self.state.types_equal(type, other) && !self.state.type_table.is_error(other) { self.state.error(TypeErrorKind.type_mismatch(), f"Vec element at index {index} has type {self.state.type_table.format_type(other)}, expected {self.state.type_table.format_type(type)}"); } }
         self.state.type_resolver.make_vec_type(type)
     }
     def dict(data: DictLiteralAst) -> TypeId {
-        if data.entries.len() == 0 { return self.state.type_resolver.make_dict_type(self.state.type_table.make_type_variable("dict_key"), self.state.type_table.make_type_variable("dict_value")); }
+        if let args = self.expected_collection_args("Dict", 2) {
+            let key = args.get(0); let value = args.get(1);
+            for index in 0..<data.entries.len() { let entry = data.entries[index];
+                self.state.check_assignable(self.state.infer_with_expected(entry.0, key), key, f"Dict key {index}", entry.0);
+                self.state.check_assignable(self.state.infer_with_expected(entry.1, value), value, f"Dict value {index}", entry.1);
+            }
+            return self.state.type_resolver.make_dict_type(key, value);
+        }
+        if data.entries.len() == 0 {
+            self.state.error(TypeErrorKind.cannot_infer(), "Cannot infer the key and value types of an empty Dict literal; add a type annotation");
+            return self.state.type_table.error_type;
+        }
         let key = self.state.infer_expr(data.entries[0].0); let value = self.state.infer_expr(data.entries[0].1);
         for index in 1..<data.entries.len() {
             let k = self.state.infer_expr(data.entries[index].0); let v = self.state.infer_expr(data.entries[index].1);
@@ -471,14 +528,22 @@ pub struct ExprChecker {
             for name in fields { if !seen.contains(name) { self.state.error(TypeErrorKind.type_mismatch(), f"missing field '{name}' in struct literal for '{value.name}'"); } }
         }
         for id in data.arguments { if let arg = self.argument(id) { if let value = arg.value {
-            if let label = arg.label { let arg_type = self.state.infer_expr(value); if let annotation = annotations[label] { self.state.generic_inference.infer_type_node_generics(annotation, arg_type, names, mapping); } }
+            if let label = arg.label {
+                var field_expected: TypeId? = nil;
+                if let annotation = annotations[label] {
+                    let field_type = self.state.generic_inference.substitute_type(self.state.resolve_type(annotation), mapping);
+                    if !self.state.type_table.is_error(field_type) && !self.state.type_table.has_type_variables(field_type) { field_expected = field_type; }
+                }
+                let arg_type = self.state.infer_with_expected(value, field_expected);
+                if let annotation = annotations[label] { self.state.generic_inference.infer_type_node_generics(annotation, arg_type, names, mapping); }
+            }
             else { self.state.error(TypeErrorKind.type_mismatch(), "Struct literal fields must be labeled", id); }
         } } }
         var result = type;
         if let value = decl { if value.generic_params.len() > 0 {
             let missing = self.unbound(value.generic_params, mapping);
             if missing.len() > 0 { self.state.error(TypeErrorKind.cannot_infer(), f"Cannot infer type parameter(s) {join_strings(missing, ", ")} of struct '{value.name}' from arguments; add explicit type arguments or a type annotation"); }
-            else { self.state.generic_inference.check_generic_constraints(mapping, value.generic_params); if let sid = symbol { result = self.state.type_table.make_struct(sid, self.type_args(value.generic_params, mapping)); } }
+            else { self.state.generic_inference.check_generic_constraints(mapping, value.generic_params, self.state.conformance_checker); if let sid = symbol { result = self.state.type_table.make_struct(sid, self.type_args(value.generic_params, mapping)); } }
         } }
         for id in data.arguments { if let arg = self.argument(id) { if let value = arg.value {
             let actual = self.state.result.expr_types[value.id] ?? self.state.infer_expr(value);
@@ -548,13 +613,31 @@ pub struct ExprChecker {
     }
     def optional_chain(id: NodeId, data: OptionalChainAst) -> TypeId {
         let type = self.state.infer_expr(data.object); let base = self.state.type_table.get_optional_inner(type) ?? type;
-        if let field = self.state.member_resolver.get_field(base, data.member) { self.field_visibility(field, id); return self.state.type_table.make_optional(field.type_id); }
-        // An empty call suffix keeps the
-        // optional method signature; a nonempty call yields its return type.
-        if let method = self.state.member_resolver.get_method(base, data.member) {
-            if let suffix = data.suffix { switch suffix { case .call(let args): if args.len() > 0 { if let func = self.state.type_table.get_function_data(method.signature) { return self.state.type_table.make_optional(func.return_type); } } default: {} } }
-            return self.state.type_table.make_optional(method.signature);
+        var has_field = false; if let field = self.state.member_resolver.get_field(base, data.member) { has_field = true; }
+        var has_suffix = false; if let suffix = data.suffix { has_suffix = true; }
+        if has_field || has_suffix {
+            // Check `object?.field`, `object?.member(args)` and `object?.member[indices]` as an ordinary
+            // expression on a binding of the unwrapped object; HIR wraps it in the optional match.
+            var span: Span? = nil; if let node = self.state.arena.get(id) { span = node.span; }
+            let holder = self.state.arena.add(NodeForm.identifier(IdentifierAst { name: "__opt_chain" }), span);
+            let binding = self.state.symbol_table.create_symbol("__opt_chain", SymbolKind.variable(), Namespace.value()).id;
+            self.state.node_symbols[holder.id] = binding; self.state.type_env[binding.id] = base;
+            let member = self.state.arena.add(NodeForm.member_access(MemberAccessAst { object: holder, member: data.member }), span);
+            var content = member;
+            if let suffix = data.suffix { switch suffix {
+                case .call(let args): content = self.state.arena.add(NodeForm.call(CallAst { callee: member, arguments: args, is_interpolation: false }), span);
+                case .index(let indices): content = self.state.arena.add(NodeForm.subscript(SubscriptAst { object: member, indices }), span);
+            } }
+            self.state.lowered_expressions[id.id] = content;
+            let result = self.infer_expr(content);
+            if self.state.type_table.is_error(result) { return result; }
+            if result == self.state.type_table.void_type { self.state.error(TypeErrorKind.invalid_operation(), f"Optional chaining cannot call '{data.member}' because it returns Void; unwrap the value with if let", id); return self.state.type_table.error_type; }
+            // An optional result is not wrapped again, so `a?.b?.c` chains through optional members.
+            if let inner = self.state.type_table.get_optional_inner(result) { return result; }
+            return self.state.type_table.make_optional(result);
         }
+        // Without a call suffix, a method member is an optional function value.
+        if let method = self.state.member_resolver.get_method(base, data.member) { return self.state.type_table.make_optional(method.signature); }
         self.state.error(TypeErrorKind.undefined_member(), f"Type {self.state.type_table.format_type(base)} has no member '{data.member}'", id); self.state.type_table.error_type
     }
 }

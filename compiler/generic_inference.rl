@@ -219,8 +219,8 @@ pub struct GenericInference {
         }
         inferred
     }
-    pub def check_generic_constraints(inferred: Dict<String, TypeId>, params: Vec<NodeId>) -> Void {
-        let checker = ConformanceChecker.new(self.arena, self.type_table, self.symbol_table);
+    // `checker` must be the checker that has seen extension conformances.
+    pub def check_generic_constraints(inferred: Dict<String, TypeId>, params: Vec<NodeId>, checker: ConformanceChecker) -> Void {
         for id in params {
             guard let node = self.arena.get(id) else { continue; }
             switch node.form {

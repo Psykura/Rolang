@@ -227,7 +227,7 @@ pub struct HirBuilder {
             case .ternary_op(let data): return self.arena.add(HirForm.ternary(HirTernaryData { type_id, condition: self.expr(data.condition), then_expr: self.expr(data.then_expr), else_expr: self.expr(data.else_expr) }));
             case .call(let data): return self.call(ref, data);
             case .member_access(let data): return self.member(ref, data);
-            case .optional_chain(let data): return self.optional_chain(data, type_id);
+            case .optional_chain(let data): return self.optional_chain(ref, data, type_id);
             case .subscript(let data):
                 if let lowered = self.result.lowered_expressions[ref.id] { return self.expr(lowered); }
                 let object = self.expr(data.object); let indices = Vec<HirId>.new(); for index in data.indices { indices.push(self.expr(index)); }
@@ -342,8 +342,25 @@ pub struct HirBuilder {
         let some = self.arena.add(HirForm.var_ref(HirVarData { type_id: inner, name, symbol_id: sid })); let none = self.expr(data.right);
         self.arena.add(HirForm.optional_match(HirOptionalMatchData { type_id: type, scrutinee, inner_type: inner, some_binding: sid, some_expr: some, none_expr: none }))
     }
-    def optional_chain(data: OptionalChainAst, type: TypeId) -> HirId {
+    // The checker rewrites field, call and subscript chains to an ordinary expression whose
+    // receiver is the `__opt_chain` binding of the unwrapped object.
+    def chain_binding(content: NodeId) -> NodeId? {
+        guard let node = self.ast.get(content) else { return nil; }
+        var member: NodeId? = nil;
+        switch node.form { case .member_access: member = content; case .call(let data): member = data.callee; case .subscript(let data): member = data.object; default: {} }
+        if let ref = member { if let child = self.ast.get(ref) { switch child.form { case .member_access(let access): return access.object; default: {} } } }
+        nil
+    }
+    def optional_chain(id: NodeId, data: OptionalChainAst, type: TypeId) -> HirId {
         let scrutinee = self.expr(data.object); let inner = self.type_table.get_optional_inner(self.hir_type(scrutinee)) ?? self.hir_type(scrutinee);
+        if let lowered = self.result.lowered_expressions[id.id] { if let holder = self.chain_binding(lowered) { if let sid = self.node_symbols[holder.id] {
+            let content = self.expr(lowered); let content_type = self.hir_type(content);
+            // An optional member value is already the chain result.
+            var some = content;
+            if content_type != type { some = self.arena.add(HirForm.optional_some(HirOptionalSomeData { type_id: type, value: content, inner_type: content_type })); }
+            let none = self.arena.add(HirForm.optional_none(HirOptionalNoneData { type_id: type, inner_type: self.type_table.get_optional_inner(type) ?? content_type }));
+            return self.arena.add(HirForm.optional_match(HirOptionalMatchData { type_id: type, scrutinee, inner_type: inner, some_binding: sid, some_expr: some, none_expr: none }));
+        } } }
         let name = self.temp("__opt"); let sid = self.temp_symbol(name);
         let temp = self.arena.add(HirForm.var_ref(HirVarData { type_id: inner, name, symbol_id: sid }));
         let field_type = self.type_table.get_optional_inner(type) ?? type;

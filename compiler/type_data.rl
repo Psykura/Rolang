@@ -59,9 +59,11 @@ pub struct FuncRequirement {
     pub let return_type: TypeId;
     pub let is_async: Bool = false;
     pub let is_static: Bool = false;
+    // Method generic parameter names; params/return_type refer to them as type variables.
+    pub let generic_params: FrozenVec<String>;
     pub static def new(name: String, params: Vec<TypeId>, return_type: TypeId,
-                       is_async: Bool = false, is_static: Bool = false) -> FuncRequirement {
-        FuncRequirement { name, params: FrozenVec<TypeId>.new(params), return_type, is_async, is_static }
+                       is_async: Bool = false, is_static: Bool = false, generic_params: Vec<String> = Vec<String>.new()) -> FuncRequirement {
+        FuncRequirement { name, params: FrozenVec<TypeId>.new(params), return_type, is_async, is_static, generic_params: FrozenVec<String>.new(generic_params) }
     }
 }
 pub struct PropRequirement {

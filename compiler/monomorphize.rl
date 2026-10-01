@@ -88,6 +88,8 @@ pub struct Monomorphizer {
     let struct_originals: Dict<i32, HirId>;
     let enum_originals: Dict<i32, HirId>;
     let method_owners: Dict<i32, SymbolId>;
+    // Generic methods keyed by "<type symbol>:<method name>", for calls whose receiver was a type parameter.
+    let generic_methods: Dict<String, SymbolId>;
     let method_order: Vec<i32>;
     let special_symbols: Dict<String, SymbolId>;
     let function_queue: Vec<InstanceKey>;
@@ -104,7 +106,7 @@ pub struct Monomorphizer {
             errors: Vec<String>.new(), functions: Dict<String, HirInstance>.with_capacity(16, 1), structs: Dict<String, HirInstance>.with_capacity(16, 1), enums: Dict<String, HirInstance>.with_capacity(16, 1),
             function_order: Vec<String>.new(), struct_order: Vec<String>.new(), enum_order: Vec<String>.new(),
             originals: Dict<i32, HirId>.with_capacity(16, 0), struct_originals: Dict<i32, HirId>.with_capacity(16, 0), enum_originals: Dict<i32, HirId>.with_capacity(16, 0),
-            method_owners: Dict<i32, SymbolId>.with_capacity(16, 0), method_order: Vec<i32>.new(), special_symbols: Dict<String, SymbolId>.with_capacity(16, 1),
+            method_owners: Dict<i32, SymbolId>.with_capacity(16, 0), generic_methods: Dict<String, SymbolId>.with_capacity(16, 1), method_order: Vec<i32>.new(), special_symbols: Dict<String, SymbolId>.with_capacity(16, 1),
             function_queue: Vec<InstanceKey>.new(), struct_queue: Vec<InstanceKey>.new(), enum_queue: Vec<InstanceKey>.new(),
             queued_functions: Dict<String, Bool>.with_capacity(16, 1), queued_structs: Dict<String, Bool>.with_capacity(16, 1), queued_enums: Dict<String, Bool>.with_capacity(16, 1),
             layout: LayoutService.new(input.ast, input.type_table, input.symbol_table, resolver), resolver, max_instantiations: 100000 };
@@ -132,7 +134,9 @@ pub struct Monomorphizer {
             var methods = Vec<HirId>.new(); var owner: SymbolId? = nil; var is_type = false;
             switch node.form { case .struct_type(let data): methods = data.methods; owner = data.symbol_id; is_type = true; case .enum_type(let data): methods = data.methods; owner = data.symbol_id; is_type = true; case .extension(let data): methods = data.methods; default: {} }
             if (pass == 0 && !is_type) || (pass == 1 && is_type) { continue; }
+            var type_symbol = owner; switch node.form { case .extension(let data): type_symbol = self.type_symbol(data.extended_type); default: {} }
             for method in methods { if let func = self.func(method) {
+                if let tsid = type_symbol { if self.decl_params(func.symbol_id).len() > 0 { self.generic_methods[f"{tsid.id}:{func.name}"] = func.symbol_id; } }
                 if let sid = owner { if self.decl_params(func.symbol_id).len() > 0 { self.method_owners[func.symbol_id.id] = sid; self.method_order.push(func.symbol_id.id); self.originals[func.symbol_id.id] = method; } }
                 else {
                     if let symbol = self.symbols.get_symbol(func.symbol_id) { if let decl = symbol.decl_node {
@@ -375,9 +379,18 @@ pub struct Monomorphizer {
         }
         self.arena.add(HirForm.call(HirCallData { type_id: new_type, callee, arguments: args, callee_symbol: sid }))
     }
+    def type_symbol(type: TypeId) -> SymbolId? {
+        if let info = self.types.get_type(type) { switch info.data { case .struct_type(let d): return d.symbol_id; case .enum_type(let d): return d.symbol_id; default: {} } }
+        nil
+    }
     def specialize_method_call(id: HirId, data: HirMethodCallData, subst: TypeSubstitution, new_type: TypeId) -> HirId {
         let receiver = self.clone_node(data.receiver, subst); let args = self.arguments(data.arguments, subst); var method_symbol = data.method_symbol;
-        if let sid = data.method_symbol { if let owner = self.method_owners[sid.id] { if let original_id = self.originals[sid.id] { if let original = self.func(original_id) {
+        var generic_symbol = data.method_symbol;
+        if let known = data.method_symbol {} else {
+            // A protocol requirement called on a type parameter now has a concrete receiver.
+            if let tsid = self.type_symbol(subst.apply(self.arena.type_of(data.receiver, self.types.error_type), self.types)) { generic_symbol = self.generic_methods[f"{tsid.id}:{data.method_name}"]; }
+        }
+        if let sid = generic_symbol { if let owner = self.method_owners[sid.id] { if let original_id = self.originals[sid.id] { if let original = self.func(original_id) {
             let initial = Dict<String, TypeId>.with_capacity(16, 1); var owner_args = Vec<TypeId>.new();
             if let info = self.types.get_type(subst.apply(self.arena.type_of(data.receiver, self.types.error_type), self.types)) { switch info.data { case .struct_type(let d): owner_args = d.type_args.to_vec(); case .enum_type(let d): owner_args = d.type_args.to_vec(); default: {} } }
             let owner_names = self.generic_names(owner); for i in 0..<owner_names.len() { if i < owner_args.len() { initial[owner_names[i]] = owner_args[i]; } }

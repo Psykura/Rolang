@@ -103,8 +103,11 @@ other numeric conversions use `as`.
 
 Tuples store positional or named components. `[T]` denotes a vector type,
 `[K: V]` denotes a dictionary type, and `(T) -> U` denotes a function type.
-Annotations are needed where inference lacks sufficient context, such as
-some empty collections.
+Annotations are needed where inference lacks sufficient context. Collection
+literals take their element types from the expected variable, parameter, return
+or field type, so `[]`, `[:]` and `[A { .. }, B { .. }]` for `[any P]` are
+accepted there; an empty literal without such a type is an error. A value of
+type `T` converts to every optional layer of `(T?)?`.
 
 Declarations without an initializer produce the language's default state:
 numeric zero, false, nil for optionals and an empty String. Managed aggregate
@@ -195,6 +198,9 @@ Switch is available as a statement or expression. Enum construction can use
 `T?` represents a value or `nil`. `if let` binds a present value, `guard let`
 requires one and keeps the binding after the guard, `??` supplies a fallback,
 and `?.` performs optional chaining. A guard's else branch must leave the path.
+Chaining covers fields, method calls and subscripts (`a?.items[0]`,
+`a?.find(key)`); an optional member is not wrapped again, so `a?.next?.value`
+has type `T?`. Chained calls must not return Void.
 
 Postfix `?` in a function returning an optional unwraps a present value or
 returns nil. It evaluates the operand once and runs pending synchronous defers.
@@ -269,8 +275,12 @@ are rejected. A wrapper struct provides a separate nominal identity.
 
 Protocols declare method or property requirements, can inherit requirements,
 and can be combined as generic constraints. Extensions add methods or
-conformance without adding stored fields. `any P` boxes a conforming object
-with its witness table for dynamic dispatch.
+conformance without adding stored fields; extension conformance satisfies
+generic constraints on functions and types. A requirement may be a generic
+method (`def map<U>(f: (i32) -> U) -> U;`); a witness declares the same number
+of generic parameters, and calls through a constrained type parameter infer them
+from the arguments. `any P` boxes a conforming object with its witness table for
+dynamic dispatch.
 
 <!-- example: protocols -->
 ~~~rolang
@@ -301,6 +311,8 @@ Function values can be stored in fields, passed to functions and returned.
 Closures use explicit typed parameters or infer them from a contextual signature.
 Captured values are stored in a managed closure object; captured managed objects
 retain reference semantics and remain alive while owned by the closure.
+Because captures are copies, assigning to a captured variable inside a closure
+is an error; keep shared mutable state in a struct field.
 
 <!-- example: closures -->
 ~~~rolang

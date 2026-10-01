@@ -28,9 +28,12 @@ pub struct ConformanceChecker {
     pub let symbol_table: SymbolTable;
     let cache: Dict<String, ConformanceResult>;
     let extensions: Vec<ConformanceExtension>;
+    // Witness method generic parameters, mapped to the requirement's type variables.
+    var generic_scope: Dict<String, TypeId>;
     pub static def new(arena: AstArena, type_table: TypeTable, symbol_table: SymbolTable) -> ConformanceChecker {
         ConformanceChecker { arena, type_table, symbol_table,
-            cache: Dict<String, ConformanceResult>.with_capacity(16, 1), extensions: Vec<ConformanceExtension>.new() }
+            cache: Dict<String, ConformanceResult>.with_capacity(16, 1), extensions: Vec<ConformanceExtension>.new(),
+            generic_scope: Dict<String, TypeId>.with_capacity(4, 1) }
     }
     pub def register_extension(concrete: TypeId, protocol: TypeId, symbol: SymbolId) -> Void {
         var found = false;
@@ -176,14 +179,23 @@ pub struct ConformanceChecker {
         if func.params.len() != requirement.params.len() {
             return f"parameter count mismatch: expected {requirement.params.len()}, got {func.params.len()}";
         }
+        if func.generic_params.len() != requirement.generic_params.len() {
+            return f"generic parameter count mismatch: expected {requirement.generic_params.len()}, got {func.generic_params.len()}";
+        }
+        self.generic_scope = Dict<String, TypeId>.with_capacity(4, 1);
+        defer { self.generic_scope = Dict<String, TypeId>.with_capacity(4, 1); }
+        for index in 0..<func.generic_params.len() { if let node = self.arena.get(func.generic_params[index]) { switch node.form {
+            case .generic_param(let param): self.generic_scope[param.name] = self.type_table.make_type_variable(requirement.generic_params.get(index));
+            default: {}
+        } } }
         for index in 0..<func.params.len() {
             let actual = self.param_type(func.params[index]);
             let expected = requirement.params.get(index);
-            if actual != expected { return f"parameter {index + 1} type mismatch: expected {self.type_table.format_type(expected)}, got {self.type_table.format_type(actual)}"; }
+            if !self.type_table.types_equal(actual, expected) { return f"parameter {index + 1} type mismatch: expected {self.type_table.format_type(expected)}, got {self.type_table.format_type(actual)}"; }
         }
         var actual = self.type_table.void_type;
         if let node = func.return_type { actual = self.resolve_ast_type(node); }
-        if actual != requirement.return_type {
+        if !self.type_table.types_equal(actual, requirement.return_type) {
             return f"return type mismatch: expected {self.type_table.format_type(requirement.return_type)}, got {self.type_table.format_type(actual)}";
         }
         nil
@@ -202,6 +214,7 @@ pub struct ConformanceChecker {
         switch node.form {
             case .builtin_type(let data): return self.type_table.get_builtin(data.name) ?? self.type_table.error_type;
             case .named_type(let data):
+                if data.generic_args.len() == 0 { if let scoped = self.generic_scope[data.name] { return scoped; } }
                 var symbol_id = self.symbol_table.get_builtin(data.name);
                 if let builtin = symbol_id {} else { symbol_id = self.symbol_table.get_type_symbol(data.name); }
                 let args = Vec<TypeId>.new();

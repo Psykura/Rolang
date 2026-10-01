@@ -286,6 +286,40 @@ pub struct TypeTable {
             case .never: return "Never";
         }
     }
+    // Structural type equality; type variables compare by name.
+    pub def types_equal(left: TypeId, right: TypeId) -> Bool {
+        if left == right { return true; }
+        guard let a = self.get_type(left) else { return false; }
+        guard let b = self.get_type(right) else { return false; }
+        switch a.data {
+            case .type_variable(let x): switch b.data { case .type_variable(let y): return x.name.equals(y.name); default: {} }
+            case .optional(let x): switch b.data { case .optional(let y): return self.types_equal(x, y); default: {} }
+            case .struct_type(let x):
+                switch b.data {
+                    case .struct_type(let y):
+                        if let symbol = x.symbol_id {
+                            if let other = y.symbol_id { return symbol == other && self.equal_list(x.type_args, y.type_args); }
+                        } else {
+                            if let other = y.symbol_id { return false; }
+                            let xf = x.anon_fields ?? FrozenVec<TupleField>.empty(); let yf = y.anon_fields ?? FrozenVec<TupleField>.empty();
+                            if xf.len() != yf.len() { return false; }
+                            for index in 0..<xf.len() { if !self.types_equal(xf.get(index).type_id, yf.get(index).type_id) { return false; } }
+                            return true;
+                        }
+                    default: {}
+                }
+            case .enum_type(let x): switch b.data { case .enum_type(let y): return x.symbol_id == y.symbol_id && self.equal_list(x.type_args, y.type_args); default: {} }
+            case .function(let x): switch b.data { case .function(let y): return x.is_async == y.is_async && self.equal_list(x.params, y.params) && self.types_equal(x.return_type, y.return_type); default: {} }
+            case .closure(let x): switch b.data { case .closure(let y): return x.is_async == y.is_async && self.equal_list(x.params, y.params) && self.equal_list(x.captures, y.captures) && self.types_equal(x.return_type, y.return_type); default: {} }
+            default: {}
+        }
+        false
+    }
+    def equal_list(left: FrozenVec<TypeId>, right: FrozenVec<TypeId>) -> Bool {
+        if left.len() != right.len() { return false; }
+        for index in 0..<left.len() { if !self.types_equal(left.get(index), right.get(index)) { return false; } }
+        true
+    }
 }
 
 def if_async(value: Bool) -> String { if value { return "async "; } "" }

@@ -886,6 +886,13 @@ pub struct MirFunctionBuilder {
         let outer = Dict<i32, TypeId>.with_capacity(16, 0);
         for local in self.locals { if let sid = local.symbol_id { outer[sid.id] = local.type_id; } }
         let captures = analyze_captures(self.hir, data, outer, self.symbols);
+        // Captures are copies, so an assignment inside the closure would silently not reach the outer variable.
+        for id in self.hir.preorder(data.body) { if let node = self.hir.get(id) { switch node.form { case .assign(let assign): if let target = self.hir.get(assign.target) { switch target.form {
+            case .var_ref(let ref): for capture in captures { if capture.symbol_id == ref.symbol_id {
+                self.errors.push(f"Cannot assign to captured variable '{capture.name}' inside a closure; closures capture values, so keep shared mutable state in a struct field");
+            } }
+            default: {}
+        } } default: {} } } }
         let name = f"__lambda_{self.func.symbol_id.id}_{self.func.name}_{self.next_value_id}"; self.next_value_id += 1;
         let capture_values = Vec<MirOperand>.new(); let capture_types = Vec<TypeId>.new();
         for capture in captures { if let local = self.bindings[capture.symbol_id.id] {
