@@ -1,0 +1,611 @@
+# The Rolang language
+
+Rolang is a statically typed, ahead-of-time compiled language for native
+applications and compiler/tooling workloads. It uses LLVM for machine-code
+optimization and a C runtime for its current operating-system and memory ABI.
+The compiler, front-end services and standard library interfaces are written in
+Rolang.
+
+This guide covers the implemented language. The [project README](../README.md)
+contains installation and compiler commands; the [std guide](../std/README.md)
+lists libraries. Package management and a broader redesigned std are
+[development work](../docs/roadmap.md).
+
+## Design philosophy
+
+### Automatic lifetimes with consistent reference semantics
+
+Structs, enums, strings, closures and task handles are managed references.
+Assignment shares an object. ARC handles normal ownership changes; a cycle
+collector reclaims unreachable reference cycles. The same model applies to
+ordinary data and compiler AST/HIR/MIR objects.
+
+`let` controls rebinding, while field declarations control mutation. Explicit
+copying is visible in source. Managed fields do not require manual retain,
+release or free calls.
+
+### Type-directed convenience and explicit boundaries
+
+Local inference, contextual lambdas, generic inference, field shorthand and
+tail expressions reduce repetition. Type checking still determines the types,
+call targets and conversions before execution. Visibility, optional absence,
+error propagation, async suspension and unsafe operations have explicit syntax.
+
+### Compose behavior through protocols and extensions
+
+Structs and payload enums model data. Protocols describe method/property
+requirements; extensions add behavior and conformance. Generics specialize
+concrete uses, while `any Protocol` supports runtime dispatch.
+
+### Make control flow and failure inspectable
+
+Exhaustive patterns describe all enum/optional cases. `Result<T, E>` carries
+recoverable errors as data. `try` and postfix `?` propagate failure through
+ordinary control flow, including required cleanup. Runtime panics handle
+conditions such as integer division by zero and invalid vector indices.
+
+### Optimize without changing observable semantics
+
+Inlining, scalar replacement and ownership optimizations preserve aliases,
+mutation, destruction and numerical behavior. LLVM and LTO optimize generated
+code. Optimizations are implementation choices, not a promise that every
+allocation disappears or that every workload has the same performance.
+
+### Develop the language through its own compiler
+
+The compiler exercises payload enums, generics, closures, protocols, collections,
+text builders and explicit IDs. Building the compiler with a released compiler
+keeps source-language changes connected to real compiler workloads.
+
+## Features at a glance
+
+| Area | Features |
+| --- | --- |
+| Types | Fixed-width integers, f32/f64, Bool, Void, tuples, optionals and function types |
+| Data | Structs, payload enums, generic types, transparent aliases and default initialization |
+| Functions | Methods, static methods, tail expressions, named/default arguments and closures |
+| Control | if/while/for, ranges, switch statements/expressions, guards, patterns and defer |
+| Abstraction | Generic constraints, protocols, properties, extensions and existential dispatch |
+| Failure | Optional binding/chaining/coalescing and Result/optional propagation |
+| Text | Byte-oriented strings, raw/multiline literals, interpolation and builders |
+| Lifetimes | ARC, synchronous cycle GC, release/trace hooks and shallow clone |
+| Async | State machines, spawn, repeatable awaits, cancellation, timers and socket streams |
+| Interop | Unsafe contexts, RawPtr, C declarations and layout/type built-ins |
+| Modules | File/dotted imports, aliases, public exports, re-exports and compiled .rlm |
+| Compilation | Typed HIR/MIR, specialization, ownership passes, LLVM text, cache and LTO |
+
+## Bindings, types and shared objects
+
+`let` freezes a binding; `var` permits rebinding. A `let` reference can still
+mutate `var` fields. A `let` field cannot be assigned after construction.
+Plain assignment shares managed objects; it does not duplicate their contents.
+
+<!-- example: bindings -->
+~~~rolang
+struct Counter { var value: i32; }
+
+def main() -> i32 {
+    let first = Counter { value: 1 };
+    let second = first;
+    second.value += 1;
+    var total = 40;
+    total += first.value;
+    if total == 42 { return 0; }
+    1
+}
+~~~
+
+Primitive types are `i8/i16/i32/i64`, `u8/u16/u32/u64`, `f32/f64`, `Bool` and
+`Void`. `RawPtr` is the low-level interop pointer type. Integer and floating
+literal types can be supplied by context; ordinary inferred numeric literals
+default to i32 and f64. The compiler permits supported integer widening;
+other numeric conversions use `as`.
+
+Tuples store positional or named components. `[T]` denotes a vector type,
+`[K: V]` denotes a dictionary type, and `(T) -> U` denotes a function type.
+Annotations are needed where inference lacks sufficient context, such as
+some empty collections.
+
+Declarations without an initializer produce the language's default state:
+numeric zero, false, nil for optionals and an empty String. Managed aggregate
+defaults are built by lowering; this does not expose uninitialized storage.
+
+## Functions, named arguments and tail expressions
+
+Functions use `def`. A final expression provides the return value; explicit
+`return` remains available. Ordinary parameter names may be used as labels.
+Default parameters are evaluated when omitted. Explicit external labels
+declared by a signature must be respected, and arguments follow declaration order.
+
+<!-- example: functions -->
+~~~rolang
+def scale(value: i32, factor: i32 = 2) -> i32 { value * factor }
+
+def main() -> i32 {
+    let first = scale(21);
+    let second = scale(value: 14, factor: 3);
+    if first == 42 && second == 42 { return 0; }
+    1
+}
+~~~
+
+Instance methods access `self`; `static def` methods are called on a type.
+Function-value signatures also describe higher-order callbacks.
+
+## Structs, field shorthand and copying
+
+Struct literals name fields. An in-scope variable can supply a field with the
+same name. Methods can mutate shared `var` fields. Operator methods such as
+`__add__` and `__sub__` implement source operators for user types.
+
+Built-in `.clone()` creates a separate outer object and retains managed fields:
+it is a shallow copy. Nested reference fields continue to share their objects.
+Types requiring a deep or resource-specific copy should expose their own API.
+
+<!-- example: clone -->
+~~~rolang
+struct Counter { var value: i32; }
+struct Box { var counter: Counter; var tag: i32; }
+
+def main() -> i32 {
+    let counter = Counter { value: 1 };
+    let first = Box { counter, tag: 10 };
+    let second = first.clone();
+    second.tag = 20;
+    second.counter.value = 42;
+    if first.tag == 10 && first.counter.value == 42 { return 0; }
+    1
+}
+~~~
+
+## Enums, patterns and exhaustive switch
+
+Enum cases can carry typed payloads. Patterns bind those payloads, match nested
+optionals/enum cases, and may add `where` guards. Guarded or partial patterns do
+not establish complete coverage. A value-producing switch needs compatible arm
+types and exhaustive coverage; the input is evaluated once.
+
+<!-- example: patterns -->
+~~~rolang
+enum Token { case number(i32); case empty; }
+
+def read(token: Token) -> i32 {
+    switch token {
+        case .number(let n) where n > 0: n;
+        case .number(let n): -n;
+        case .empty: 0;
+    }
+}
+
+def main() -> i32 {
+    let name = switch Token.number(42) {
+        case .number(let n): f"value={n}";
+        case .empty: "empty";
+    };
+    if read(Token.number(-42)) == 42 && name.equals("value=42") { return 0; }
+    1
+}
+~~~
+
+Switch is available as a statement or expression. Enum construction can use
+`Type.case(...)` or a contextually typed dot shorthand.
+
+## Optionals, guards and propagation
+
+`T?` represents a value or `nil`. `if let` binds a present value, `guard let`
+requires one and keeps the binding after the guard, `??` supplies a fallback,
+and `?.` performs optional chaining. A guard's else branch must leave the path.
+
+Postfix `?` in a function returning an optional unwraps a present value or
+returns nil. It evaluates the operand once and runs pending synchronous defers.
+
+<!-- example: optionals -->
+~~~rolang
+struct Item { var value: i32; }
+
+def increment(value: i32?) -> i32? {
+    let n = value?;
+    n + 1
+}
+
+def read(value: Item?) -> i32 {
+    guard let item = value else { return 0; }
+    item.value
+}
+
+def main() -> i32 {
+    let item: Item? = Item { value: 42 };
+    if let unexpected = increment(nil) { return 2; }
+    if (increment(41) ?? 0) == 42 && read(item) == 42
+        && (item?.value ?? 0) == 42 { return 0; }
+    1
+}
+~~~
+
+## Result-based errors
+
+`std.result` defines `Result<T, E>` with `ok(value: T)` and `err(error: E)`.
+`try value` and `value?` unwrap success or return the error from the current
+function. Success types may change between functions; the error type must match.
+Custom two-case enums with the matching single-payload ok/err shape can also
+participate. Library combinators include map, map_err, and_then and unwrap_or.
+
+<!-- example: results -->
+~~~rolang
+import std.result
+
+def read(valid: Bool) -> Result<i32, String> {
+    if valid { return Result<i32, String>.ok(value: 21); }
+    Result<i32, String>.err(error: "missing")
+}
+
+def twice(valid: Bool) -> Result<i32, String> {
+    let n = try read(valid);
+    Result<i32, String>.ok(value: n * 2)
+}
+
+def main() -> i32 {
+    switch twice(true) {
+        case .ok(let n): if n != 42 { return 1; }
+        case .err(let error): return 2;
+    }
+    if is_err(twice(false)) { return 0; }
+    3
+}
+~~~
+
+Errors are typed values, and propagation follows explicit control flow.
+Panics abort the process and are not caught through Result.
+
+## Generics, aliases, protocols and extensions
+
+Generic functions, structs, enums and methods specialize lazily for concrete
+types. Inference uses arguments, callbacks, receiver types and return context.
+Constraints check protocol requirements before code generation.
+
+`typealias` is transparent, including generic aliases; it does not create a
+distinct type or prevent mixing values of the underlying type. Recursive aliases
+are rejected. A wrapper struct provides a separate nominal identity.
+
+Protocols declare method or property requirements, can inherit requirements,
+and can be combined as generic constraints. Extensions add methods or
+conformance without adding stored fields. `any P` boxes a conforming object
+with its witness table for dynamic dispatch.
+
+<!-- example: protocols -->
+~~~rolang
+protocol Readable { def read() -> i32; }
+struct Item { var value: i32; }
+extension Item: Readable { def read() -> i32 { self.value } }
+struct Box<T> { var value: T; def get() -> T { self.value } }
+typealias Wrapped<T> = Box<T>;
+
+def read_static<T: Readable>(value: T) -> i32 { value.read() }
+def read_dynamic(value: any Readable) -> i32 { value.read() }
+
+def main() -> i32 {
+    let item = Item { value: 42 };
+    let boxed = Wrapped<Item> { value: item };
+    if read_static(boxed.get()) == 42 && read_dynamic(item) == 42 { return 0; }
+    1
+}
+~~~
+
+Generic calls resolve concrete methods statically; existential calls use the
+witness table. Use each representation according to the data being stored and
+the dispatch behavior needed.
+
+## Closures and higher-order functions
+
+Function values can be stored in fields, passed to functions and returned.
+Closures use explicit typed parameters or infer them from a contextual signature.
+Captured values are stored in a managed closure object; captured managed objects
+retain reference semantics and remain alive while owned by the closure.
+
+<!-- example: closures -->
+~~~rolang
+def make_adder(base: i32) -> (i32) -> i32 {
+    { n: i32 in base + n }
+}
+def apply(f: (i32) -> i32, value: i32) -> i32 { f(value) }
+def twice(n: i32) -> i32 { n * 2 }
+
+def main() -> i32 {
+    let add = make_adder(40);
+    let contextual: (i32) -> i32 = { n in n + 1 };
+    if add(2) == 42 && apply(twice, 21) == 42 && contextual(41) == 42 { return 0; }
+    1
+}
+~~~
+
+The alternate form `(n: i32) -> i32 { n + 1 }` is also supported.
+Named synchronous, non-generic safe functions can be adapted to function values.
+Use wrappers for generic/unsafe functions. Async closures and dynamic async
+protocol calls are outside the current async implementation.
+
+## Collections, tuples, ranges and iteration
+
+`Vec<T>`, `Dict<K, V>` and `String` are imported implicitly for ordinary source
+files, together with the range foundation. Nonempty literals use their elements
+and context to infer types. Tuples support destructuring, including nested
+bindings and discarded components.
+
+`..<` excludes the upper range bound; `...` includes it. Bounds are i32;
+descending ranges are empty. Vector/string slices clamp bounds and return
+copies; managed vector elements stay shared, and string indices count bytes.
+Slice assignment and omitted bounds are not implemented.
+
+<!-- example: iteration -->
+~~~rolang
+import std.iterator
+
+def main() -> i32 {
+    let values = [1, 2, 3, 4];
+    let (base, _) = (30, 99);
+    let selected = values.iter().filter({ n in n > 1 }).map({ n in n * 2 }).collect();
+    let first = selected[0..<2];
+    var sum = base;
+    for value in first { sum += value; }
+    let counts = ["answer": sum + 2];
+    if (counts["answer"] ?? 0) == 42 { return 0; }
+    1
+}
+~~~
+
+Dict preserves insertion order; get/remove return optional values. keys/values/
+entries produce snapshots owning their references. Structural mutation during
+live iteration is not supported. `HashMap<K, V>` accepts explicit hash/equality
+callbacks for structural keys.
+
+`Iter<T>` is lazy and single-pass. Aliases share its cursor; its first nil ends
+iteration permanently. map/filter/take/zip/enumerate compose adapters, and
+collect/fold consume them. Optionals inside an iterator are distinct from its
+end marker.
+
+## Text, interpolation and compiler-writing utilities
+
+String literals contain UTF-8 bytes, including embedded NUL. Current len, char_at,
+byte_at, substring and slice APIs count bytes; char classification is ASCII.
+They do not provide Unicode scalar/grapheme indexing.
+
+Ordinary quoted literals process escapes. Raw literals preserve backslashes;
+triple-quoted literals preserve newlines and indentation. Explicit `f"..."`
+interpolation evaluates fields once from left to right through to_string.
+`{{` and `}}` emit literal braces. Precision/alignment format specifiers are
+not part of the interpolation grammar.
+
+<!-- example: text -->
+~~~rolang
+import std.string_builder
+import std.interner
+
+def main() -> i32 {
+    let path = r"C:\compiler\cache";
+    let text = "hé\0llo";
+    let builder = StringBuilder.new();
+    builder.append(f"{{{42}}}");
+    let names = StringInterner.new();
+    let first = names.intern("token");
+    if names.intern("token") == first && builder.to_string().equals("{42}")
+        && text.len() == 7 && text.byte_at(3) == 0 && path.contains(r"\") { return 0; }
+    1
+}
+~~~
+
+StringBuilder grows a reusable byte buffer and returns independent snapshots.
+StringInterner provides stable IDs scoped to one interner. CodeWriter adds
+indentation-aware source output; c_quote escapes generated C byte strings.
+Interpolation is formatting, so code generators must use the appropriate
+escaping function when embedding data into another language.
+
+## Control flow, defer and cleanup
+
+if, while and for use lexical scopes. break/continue exit the corresponding
+loop path. defer runs in reverse registration order on normal synchronous
+scope exits, returns and supported propagation paths.
+
+<!-- example: defer -->
+~~~rolang
+struct Counter { var value: i32; }
+
+def sum(counter: Counter) -> i32 {
+    defer { counter.value += 1; }
+    var total = 0;
+    for n in 0..<10 {
+        if n == 3 { continue; }
+        if n == 8 { break; }
+        total += n;
+    }
+    total
+}
+def main() -> i32 {
+    let counter = Counter { value: 0 };
+    if sum(counter) == 25 && counter.value == 1 { return 0; }
+    1
+}
+~~~
+
+Suspended async cancellation has different cleanup behavior, described below.
+
+## Memory management and resource hooks
+
+Managed structs/enums have reference semantics and normally allocate on the
+heap. Primitive values remain ordinary scalar values. The compiler inserts
+ownership operations and the runtime releases managed fields. Scalar replacement
+may remove a nonescaping aggregate allocation while preserving its behavior.
+
+An instance `__release__() -> Void` hook can release external resources before
+managed fields are released. The ABI requires the exact method shape; it is
+validated even for types that are never allocated. A static
+`__gc_trace__(payload: RawPtr, callback: RawPtr, context: RawPtr) -> Void` hook
+lets runtime-backed containers expose references to the cycle collector.
+These hooks are runtime integration contracts, not ordinary cleanup calls.
+
+The cycle collector uses synchronous generational trial deletion. It handles
+unreachable reference cycles, including supported closure/task/container graphs.
+Collection can pause execution, and cyclic resources can be destroyed later
+than acyclic ones. Release hooks run before fields are reclaimed, and the runtime
+accounts for objects retained again during destruction.
+
+Compiler/runtime optimizations include:
+
+- Lifetime/CFG-aware retain-release removal and borrowing of safe read-only uses.
+- Type-graph analysis excluding proven acyclic types from cycle-GC candidates.
+- Per-type field cleanup and enum-tag filtering.
+- Pool allocation for small objects and no-init allocation when every live field
+  is immediately initialized.
+- Inlining/scalar replacement that preserves escapes, aliases and custom hooks.
+
+These affect implementation cost; source reference semantics remain unchanged.
+Panics such as division by zero, invalid vector indices and cancelled-task result
+awaits abort the process.
+
+## Async, tasks, cancellation and socket I/O
+
+Async functions lower to heap frames and resume state machines.
+One cooperative scheduler runs ready work; timers and POSIX poll readiness
+suspend tasks without busy-spinning. CPU-bound work must yield explicitly
+to let other tasks run.
+
+<!-- example: async -->
+~~~rolang
+import std.task
+
+def work(n: i32) async -> i32 {
+    await yield_now();
+    n * 2
+}
+
+def main() async -> i32 {
+    let task = spawn work(21);
+    let first = await task;
+    let second = await task;
+    if first == 42 && second == 42 && task.done() { return 0; }
+    1
+}
+~~~
+
+An ordinary async call awaits its child; spawn returns a Task immediately.
+Arguments are evaluated at spawn time; execution starts when the scheduler
+gets control. Task copies share one handle and completed results are repeatably
+awaitable. Spawn is also allowed in synchronous code.
+
+| Operation | Behavior |
+| --- | --- |
+| `await task` | Obtain its result; a cancelled task panics |
+| `task.done()/cancelled()` | Inspect completion/cancellation |
+| `task.cancel()` | Cancel unfinished work between resume steps |
+| `await task.wait()` | Wait for completion status without unwrapping a result |
+| `task.wait_blocking()` | Synchronous scheduler bridge |
+| `await sleep(ms)/yield_now()` | Suspend on a timer/yield point |
+
+Dropping the final task reference cancels unfinished work. Cancellation releases
+the suspended frame, retained values and applicable implicit child dependencies;
+it does not preempt executing code or reverse completed side effects.
+**Cancellation discards pending defers in the suspended continuation.**
+Resources requiring cancellation cleanup should be owned by managed objects
+with release hooks. Returning from main cancels remaining tasks.
+Self-await and cyclic task dependencies panic.
+
+std.async_io supplies AsyncStream, AsyncPipe and AsyncListener:
+reads/writes and connect/accept are async; local socket pairs and TCP numeric
+IPv4/IPv6 addresses are supported. I/O returns Result values with POSIX errno
+errors. Read boundaries are byte boundaries; an empty successful read indicates
+EOF or a zero-length request. A failed write may already have sent a prefix.
+Use one reader/writer per stream when ordering matters.
+
+Current filesystem/console I/O is blocking. DNS, TLS and asynchronous regular-file
+I/O are not implemented. Task timers/socket readiness require the POSIX runtime.
+See the [async API guide](async.md).
+
+## Unsafe interop and runtime type operations
+
+C functions use `extern "C" def`. Calling external or unsafe functions and
+performing RawPtr operations require an unsafe context. That context does not
+implicitly extend into closures. Explicit casts and ownership transfers at
+FFI boundaries must match the C/runtime representation.
+
+<!-- example: unsafe -->
+~~~rolang
+extern "C" def rt_gc_collect();
+
+def main() -> i32 {
+    unsafe { rt_gc_collect(); }
+    0
+}
+~~~
+
+Layout/type built-ins include size_of, align_of and type_id_of. Runtime casts
+use the compiler's concrete type identities and descriptors; optional cast
+forms represent a failed check as nil. ABI types and runtime IDs must not be
+invented by callers or treated as portable serialized identities.
+
+## Modules, visibility and compiled libraries
+
+Each source file is a module. Quoted imports resolve relative files and include
+roots; dotted imports such as `import std.io` resolve module paths. Canonical
+paths distinguish same-named modules in different directories.
+
+Declarations and fields need `pub` to be available to other modules. Imports
+may use aliases; `pub import` re-exports public declarations. Source dependency
+cycles are rejected. -I adds roots and --stdlib selects a root containing std/.
+
+`.rlm` bundles source/generic metadata, native objects or LLVM bitcode,
+dependency identities and checksums. Consumers can instantiate generics with
+their own types after library source is removed. ABI/target/checksum mismatches
+are errors. Source and compiled module behavior share visibility and type
+identity rules. The Rolang module format is `rolang-module-1` with the
+`rolang-abi-1` ABI tag.
+
+See [compiled artifacts and CLI](../docs/compiler.md) for examples and resource
+layout. Workspace manifests/package resolution are planned tooling, separate
+from the implemented source import mechanism.
+
+## Compiler design and numerical behavior
+
+The pipeline is:
+
+~~~text
+Source/import graph
+  → typed AST and symbols
+  → typed HIR
+  → generic specialization
+  → CFG MIR and closure lifting
+  → output-parameter initialization cleanup
+  → async lowering and ownership/optimization passes
+  → LLVM IR text
+  → clang object/assembly generation
+  → native linking or full/ThinLTO
+~~~
+
+AST, HIR and MIR use separate stable node identities within their arenas.
+Typed side tables carry resolution/checking/lowering information. Ordinary
+in-process IDs are different from the stable recursive identities used in
+compiled module ABI records.
+
+O0 performs required lowering and ownership work. O1 adds ARC optimization;
+O2/O3 also permit MIR inlining and scalar replacement. Full/ThinLTO can optimize
+Rolang and C runtime bitcode together.
+
+Integer division handles zero and the signed minimum/-1 case; shifts mask their
+counts. Floating-to-integer conversion uses saturating lowering. Mixed floating
+comparisons use proper widening. The f64 remainder fast path is guarded and
+falls back to libm fmod when the proof does not hold; fast-math is not enabled
+for this path.
+
+Selected Vec/Dict scalar access and String byte/ASCII access have direct LLVM
+fast paths. Bounds, null behavior and managed ownership are preserved. Aggregate
+or managed cases use runtime accessors when direct lowering is not applicable.
+
+## Standard library and current development scope
+
+The bundled library covers collections, byte-oriented text/builders, Optional/
+Result combinators, math, files/paths/processes, task control, async socket I/O,
+hashing and test assertions. [All 29 modules](../std/README.md) are listed with
+their current responsibilities.
+
+New library design will establish explicit error/ownership/encoding/platform
+contracts before expanding JSON/TOML, time, randomness, networking and
+serialization. Native project management, dependencies, registries and LSP are
+tracked in the roadmap. The initial validated execution platform is macOS arm64;
+broader target support requires platform-specific compilation and execution.

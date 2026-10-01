@@ -1,0 +1,9 @@
+/bin/
+/build/
+/dist/
+/genesis/
+*.o
+*.rlm
+*.mir
+*.out
+.DS_Store
