@@ -49,6 +49,14 @@ pub def to_method_name(op: String) -> String {
         default: "";
     }
 }
+pub def to_unary_method_name(op: String) -> String {
+    switch op {
+        case "-": "__neg__";
+        case "+": "__pos__";
+        case "~": "__invert__";
+        default: "";
+    }
+}
 pub def binary_op(op: String) -> BinOpKind? {
     switch op {
         case "+": BinOpKind.add();

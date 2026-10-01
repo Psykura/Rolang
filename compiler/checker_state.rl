@@ -225,6 +225,23 @@ pub struct CheckerState {
         }
         nil
     }
+    // `indices` must match the leading parameters of a __get__/__set__ method; `extra` counts trailing value parameters.
+    pub def check_subscript_indices(func: FunctionTypeData, indices: Vec<NodeId>, extra: i32, method: String, id: NodeId) -> Void {
+        let expected = func.params.len() - extra;
+        if expected != indices.len() { self.error(TypeErrorKind.wrong_arg_count(), f"{method} takes {expected} index value(s), got {indices.len()}", id); return; }
+        for index in 0..<indices.len() { if let actual = self.result.expr_types[indices[index].id] {
+            self.check_assignable(actual, func.params.get(index), f"subscript index {index + 1}", indices[index]);
+        } }
+    }
+    pub def try_unary_overload(id: NodeId, operand: TypeId, op: String) -> TypeId? {
+        let name = to_unary_method_name(op);
+        if name.is_empty() { return nil; }
+        guard let method = self.member_resolver.get_method(operand, name) else { return nil; }
+        guard let data = self.type_table.get_function_data(method.signature) else { return nil; }
+        if data.params.len() != 0 { return nil; }
+        self.result.operator_targets[id.id] = CalleeId { kind: CalleeKind.method(), symbol_id: method.symbol_id, case_name: nil };
+        data.return_type
+    }
     pub def binary_types(left: TypeId, op: String, right: TypeId, emit_error: Bool = true) -> TypeId {
         let table = self.type_table;
         if is_arithmetic_op(op) {

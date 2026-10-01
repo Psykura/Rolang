@@ -3,7 +3,8 @@ pub import "checker_state.rl"
 import std.collections
 pub struct DeclChecker {
     pub let state: CheckerState;
-    pub static def new(state: CheckerState) -> DeclChecker { DeclChecker { state } }
+    let collected_protocols: Dict<i32, Bool>;
+    pub static def new(state: CheckerState) -> DeclChecker { DeclChecker { state, collected_protocols: Dict<i32, Bool>.with_capacity(16, 0) } }
     pub def run(program: NodeId) -> Void {
         if let node = self.state.arena.get(program) {
             switch node.form { case .program(let data):
@@ -30,6 +31,8 @@ pub struct DeclChecker {
             case .struct_decl: self.state.type_table.make_struct(symbol);
             case .enum_decl: self.state.type_table.make_enum(symbol);
             case .protocol_decl(let data):
+                if self.collected_protocols.contains(symbol.id) { return; }
+                self.collected_protocols[symbol.id] = true;
                 let funcs = Vec<FuncRequirement>.new(); let props = Vec<PropRequirement>.new();
                 for member in data.members {
                     if let child = self.state.arena.get(member) {
@@ -44,7 +47,38 @@ pub struct DeclChecker {
                         }
                     }
                 }
+                for parent in self.parent_protocols(data.constraints) { self.inherit(parent, funcs, props); }
                 self.state.type_table.make_protocol(symbol, funcs, props);
+            default: {}
+        }
+    }
+    // Parent protocols from `protocol B: A` (stored as `where Self: A`). Symbols are used instead of
+    // resolved types so a parent is collected before its protocol type is first created.
+    def parent_protocols(constraints: Vec<NodeId>) -> Vec<SymbolId> {
+        let parents = Vec<SymbolId>.new();
+        for id in constraints { if let node = self.state.arena.get(id) { switch node.form { case .constraint(let constraint):
+            var is_self = false;
+            if let subject = constraint.subject { switch subject { case .type_ref(let ref): if let child = self.state.arena.get(ref) { switch child.form { case .named_type(let named): is_self = named.name.equals("Self"); default: {} } } default: {} } }
+            if is_self { for bound in constraint.bounds {
+                var parent: SymbolId? = nil;
+                if let sid = self.state.node_symbols[bound.id] { if let symbol = self.state.symbol_table.get_symbol(sid) { switch symbol.kind { case .protocol: parent = sid; default: {} } } }
+                if let sid = parent { parents.push(sid); }
+                else { self.state.error(TypeErrorKind.type_mismatch(), f"{self.state.type_table.format_type(self.state.resolve_type(bound))} is not a protocol and cannot be inherited", bound); }
+            } }
+            default: {}
+        } } }
+        parents
+    }
+    // Adds a parent's requirements that the child does not redeclare, collecting the parent first.
+    def inherit(parent: SymbolId, funcs: Vec<FuncRequirement>, props: Vec<PropRequirement>) -> Void {
+        if let symbol = self.state.symbol_table.get_symbol(parent) { if let decl = symbol.decl_node { if let node = self.state.arena.get(decl) { switch node.form {
+            case .protocol_decl(let data): if data.name.equals(symbol.name) { self.collect_type(decl); }
+            default: {}
+        } } } }
+        guard let info = self.state.type_table.get_type(self.state.type_table.get_protocol_type(parent)) else { return; }
+        switch info.data { case .protocol(let data):
+            for func in data.func_requirements { var present = false; for own in funcs { if own.name.equals(func.name) { present = true; } } if !present { funcs.push(func); } }
+            for prop in data.prop_requirements { var present = false; for own in props { if own.name.equals(prop.name) { present = true; } } if !present { props.push(prop); } }
             default: {}
         }
     }

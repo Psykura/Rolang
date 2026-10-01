@@ -464,6 +464,7 @@ pub struct NameResolver {
             case .lambda(let data):
                 self.push_scope(ScopeKind.lambda());
                 for pair in data.params { self.resolve_type(pair.1); self.bind_pattern(pair.0, false); }
+                self.resolve_type(data.return_type);
                 for stmt in data.body { self.resolve_stmt(stmt); }
                 self.pop_scope();
             case .struct_literal(let data):

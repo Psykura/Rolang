@@ -214,6 +214,11 @@ pub struct HirBuilder {
             case .binary_op(let data):
                 if data.op.equals("??") { return self.coalesce(data, type_id); }
                 let left = self.expr(data.left); let right = self.expr(data.right);
+                if data.op.equals("==") || data.op.equals("!=") {
+                    var value: HirId? = nil;
+                    if self.hir_type(right) == self.type_table.nil_type { value = left; } else if self.hir_type(left) == self.type_table.nil_type { value = right; }
+                    if let optional = value { if let inner = self.type_table.get_optional_inner(self.hir_type(optional)) { return self.presence_test(optional, inner, data.op.equals("!=")); } }
+                }
                 if let target = self.result.operator_targets[ref.id] {
                     let args = Vec<(String?, HirId)>.new(); let label: String? = nil; args.push((label, right));
                     var name = to_method_name(data.op); if name.is_empty() { name = data.op; }
@@ -222,6 +227,10 @@ pub struct HirBuilder {
                 return self.arena.add(HirForm.binary_op(HirBinaryOpData { type_id, left, op: data.op, right }));
             case .unary_op(let data):
                 let operand = self.expr(data.operand);
+                if let target = self.result.operator_targets[ref.id] {
+                    return self.arena.add(HirForm.method_call(HirMethodCallData { type_id, receiver: operand, method_name: to_unary_method_name(data.op), arguments: Vec<(String?, HirId)>.new(), method_symbol: target.symbol_id, is_static: false }));
+                }
+                if data.op.equals("+") { return operand; }
                 if data.op.equals("try") { return self.arena.add(HirForm.try_expr(HirTryExprData { type_id, expr: operand, result_type: type_id, error_type: self.result.propagation_error_types[ref.id] })); }
                 return self.arena.add(HirForm.unary_op(HirUnaryOpData { type_id, op: data.op, operand }));
             case .ternary_op(let data): return self.arena.add(HirForm.ternary(HirTernaryData { type_id, condition: self.expr(data.condition), then_expr: self.expr(data.then_expr), else_expr: self.expr(data.else_expr) }));
@@ -247,12 +256,22 @@ pub struct HirBuilder {
                 return self.arena.add(HirForm.dict(HirDictData { type_id, entries, key_type, value_type }));
             case .lambda(let data):
                 let params = Vec<HirId>.new(); let signature = self.type_table.get_function_data(type_id);
+                let destructure = Vec<HirId>.new();
                 for index in 0..<data.params.len() {
                     let pair = data.params[index]; var param_type = self.type_table.error_type; if let func = signature { if index < func.params.len() { param_type = func.params.get(index); } }
-                    var name = "__param"; if let child = self.ast.get(pair.0) { switch child.form { case .identifier_pattern(let p): name = p.name; default: {} } }
-                    params.push(self.arena.add(HirForm.param(HirParamData { name, symbol_id: self.symbol(pair.0, name, SymbolKind.parameter(), Namespace.value()), type_id: param_type, external_name: nil, has_default: false })));
+                    var name: String? = nil; if let child = self.ast.get(pair.0) { switch child.form { case .identifier_pattern(let p): name = p.name; default: {} } }
+                    if let simple = name {
+                        params.push(self.arena.add(HirForm.param(HirParamData { name: simple, symbol_id: self.symbol(pair.0, simple, SymbolKind.parameter(), Namespace.value()), type_id: param_type, external_name: nil, has_default: false })));
+                    } else {
+                        // A pattern parameter such as `(a, b)` binds its components at the start of the body.
+                        let temp = self.temp("__param"); let sid = self.temp_symbol(temp);
+                        params.push(self.arena.add(HirForm.param(HirParamData { name: temp, symbol_id: sid, type_id: param_type, external_name: nil, has_default: false })));
+                        self.project_bindings(pair.0, self.arena.add(HirForm.var_ref(HirVarData { type_id: param_type, name: temp, symbol_id: sid })), destructure, false);
+                    }
                 }
-                return self.arena.add(HirForm.lambda(HirLambdaData { type_id, params, body: self.statements(data.body), captures: Vec<SymbolId>.new() }));
+                var body = self.statements(data.body);
+                if destructure.len() > 0 { if let node = self.arena.get(body) { switch node.form { case .block(let block): for stmt in block.statements { destructure.push(stmt); } body = self.arena.add(HirForm.block(HirBlockData { statements: destructure })); default: {} } } }
+                return self.arena.add(HirForm.lambda(HirLambdaData { type_id, params, body, captures: Vec<SymbolId>.new() }));
             case .struct_literal(let data):
                 var sid = SymbolId { id: -1 }; if let info = self.type_table.get_type(type_id) { switch info.data { case .struct_type(let value): sid = value.symbol_id ?? sid; default: {} } }
                 return self.arena.add(HirForm.struct_init(HirStructInitData { type_id, struct_type: type_id, struct_symbol: sid, arguments: self.arguments(data.arguments) }));
@@ -316,7 +335,7 @@ pub struct HirBuilder {
                         let name = self.temp("__opt_" + member.member); let sid = self.temp_symbol(name);
                         var some: HirId; var none: HirId; var type = bool_type;
                         if member.member.equals("unwrap_or") { type = inner; some = self.arena.add(HirForm.var_ref(HirVarData { type_id: inner, name, symbol_id: sid })); if arguments.len() > 0 { none = arguments[0].1; } else { none = self.error_expr(); } }
-                        else { let present = member.member.equals("is_some"); some = self.arena.add(HirForm.literal(HirLiteralData { type_id: bool_type, value: HirValue.boolean(present), kind: "bool" })); none = self.arena.add(HirForm.literal(HirLiteralData { type_id: bool_type, value: HirValue.boolean(!present), kind: "bool" })); }
+                        else { return self.presence_test(receiver, inner, member.member.equals("is_some")); }
                         return self.arena.add(HirForm.optional_match(HirOptionalMatchData { type_id: type, scrutinee: receiver, inner_type: inner, some_binding: sid, some_expr: some, none_expr: none }));
                     }
                 }
@@ -341,6 +360,14 @@ pub struct HirBuilder {
         let name = self.temp("__coal"); let sid = self.temp_symbol(name);
         let some = self.arena.add(HirForm.var_ref(HirVarData { type_id: inner, name, symbol_id: sid })); let none = self.expr(data.right);
         self.arena.add(HirForm.optional_match(HirOptionalMatchData { type_id: type, scrutinee, inner_type: inner, some_binding: sid, some_expr: some, none_expr: none }))
+    }
+    // Bool that is `present` when the optional holds a value and `!present` when it is nil.
+    def presence_test(optional: HirId, inner: TypeId, present: Bool) -> HirId {
+        let bool_type = self.type_table.get_builtin("Bool") ?? self.type_table.error_type;
+        let sid = self.temp_symbol(self.temp("__opt_present"));
+        let some = self.arena.add(HirForm.literal(HirLiteralData { type_id: bool_type, value: HirValue.boolean(present), kind: "bool" }));
+        let none = self.arena.add(HirForm.literal(HirLiteralData { type_id: bool_type, value: HirValue.boolean(!present), kind: "bool" }));
+        self.arena.add(HirForm.optional_match(HirOptionalMatchData { type_id: bool_type, scrutinee: optional, inner_type: inner, some_binding: sid, some_expr: some, none_expr: none }))
     }
     // The checker rewrites field, call and subscript chains to an ordinary expression whose
     // receiver is the `__opt_chain` binding of the unwrapped object.

@@ -64,6 +64,17 @@ pub def continues_condition_expression(word: String) -> Bool {
 // Keywords are contextual identifiers in the reference grammar. Only treat
 // `switch` as syntax when a body follows its scrutinee, rather than rejecting
 // expressions such as `switch + 1` or a function named `switch`.
+// `(` at `index` starts a closure when its matching `)` is followed by `->`.
+def arrow_lambda_ahead(tokens: Vec<LexToken>, index: i32) -> Bool {
+    var depth = 0; var look = index;
+    while look < tokens.len() {
+        let word = tokens[look].text;
+        if word.equals("(") || word.equals("[") { depth += 1; }
+        else if word.equals(")") || word.equals("]") { depth -= 1; if depth == 0 { return look + 1 < tokens.len() && tokens[look + 1].text.equals("->"); } }
+        look += 1;
+    }
+    false
+}
 def braced_switch_ahead(tokens: Vec<LexToken>, index: i32) -> Bool {
     // A type named `switch` can introduce a struct literal. A switch
     // scrutinee cannot start with generic type arguments.
@@ -697,6 +708,10 @@ struct ExpressionCursor {
             boundary += 1;
         }
         if boundary >= self.tokens.len() { self.fail("switch body"); return nil; }
+        self.parse_expression_until(boundary, "switch value")
+    }
+    // Parses the tokens from the cursor up to `boundary` as one complete expression.
+    def parse_expression_until(boundary: i32, what: String) -> NodeId? {
         let limit = self.tokens[boundary];
         let prefix = Vec<LexToken>.new();
         for position in 0..<boundary { prefix.push(self.tokens[position]); }
@@ -707,7 +722,7 @@ struct ExpressionCursor {
         let result = parse_expression_prefix(prefix, self.arena, self.index);
         if let problem = result.error { self.error = problem; return nil; }
         if result.remaining.len() > 0 || result.next_index != boundary {
-            self.fail("switch value");
+            self.fail(what);
             return nil;
         }
         self.index = boundary;
@@ -715,6 +730,36 @@ struct ExpressionCursor {
         self.end_line = previous.end_line;
         self.end_column = previous.end_column;
         result.expression
+    }
+    // `if c { a } else if d { b } else { c }` in expression position is a chain of ternaries;
+    // each branch holds exactly one expression.
+    def parse_if_expr(start: Span) -> NodeId? {
+        self.take();
+        if self.spelling().equals("let") || self.spelling().equals("var") { self.fail("a Bool condition (`if let` is a statement; use switch for a value)"); return nil; }
+        var boundary = self.index; var nesting = 0;
+        while boundary < self.tokens.len() {
+            let word = self.tokens[boundary].text;
+            if word.equals("{") && nesting == 0 { break; }
+            if word.equals("(") || word.equals("[") { nesting += 1; }
+            else if word.equals(")") || word.equals("]") { nesting -= 1; }
+            boundary += 1;
+        }
+        if boundary >= self.tokens.len() { self.fail("if expression branch"); return nil; }
+        guard let condition = self.parse_expression_until(boundary, "if condition") else { return nil; }
+        guard let then_expr = self.parse_if_branch() else { return nil; }
+        if !self.match_text("else") { self.fail("'else' (an if expression needs both branches)"); return nil; }
+        var else_expr: NodeId? = nil;
+        if self.spelling().equals("if") { else_expr = self.parse_if_expr(self.current().span); }
+        else { else_expr = self.parse_if_branch(); }
+        guard let otherwise = else_expr else { return nil; }
+        self.make(NodeForm.ternary_op(TernaryOpAst { condition, then_expr, else_expr: otherwise }), start)
+    }
+    def parse_if_branch() -> NodeId? {
+        if !self.expect("{") { return nil; }
+        guard let value = self.parse_expression() else { return nil; }
+        if !self.spelling().equals("}") { self.fail("'}' (if expression branches hold a single expression)"); return nil; }
+        self.take();
+        value
     }
     def parse_switch_pattern() -> NodeId? {
         let result = parse_pattern_prefix(self.tokens, self.arena, self.index);
@@ -768,12 +813,13 @@ struct ExpressionCursor {
         if !self.expect("}") { return nil; }
         self.make(NodeForm.switch_expr(SwitchExprAst { value, cases }), start)
     }
-    def parse_lambda_expr() -> NodeId? {
+    def parse_lambda_expr(arrow: Bool = false) -> NodeId? {
         let cursor = StatementCursor {
             tokens: self.tokens, arena: self.arena, index: self.index,
             end_line: self.end_line, end_column: self.end_column, error: nil
         };
-        let expression = cursor.parse_lambda();
+        var expression: NodeId? = nil;
+        if arrow { expression = cursor.parse_arrow_lambda(); } else { expression = cursor.parse_lambda(); }
         if let problem = cursor.error { self.error = problem; return nil; }
         self.index = cursor.index;
         self.end_line = cursor.end_line;
@@ -853,9 +899,11 @@ struct ExpressionCursor {
             self.take();
             return self.make(form, start);
         }
+        if self.spelling().equals("(") && arrow_lambda_ahead(self.tokens, self.index) { return self.parse_lambda_expr(true); }
         if self.spelling().equals("(") { return self.parse_parenthesized(start); }
         if self.spelling().equals("[") { return self.parse_collection(start); }
         if self.spelling().equals("switch") && braced_switch_ahead(self.tokens, self.index) { return self.parse_switch_expr(start); }
+        if self.spelling().equals("if") { return self.parse_if_expr(start); }
         if self.spelling().equals("{") { return self.parse_lambda_expr(); }
         if self.typed_primary_ahead() { return self.parse_typed_primary(start); }
         if self.at_identifier() {
@@ -1257,7 +1305,38 @@ struct StatementCursor {
         guard let body = self.parse_braced_body() else { return nil; }
         if !self.expect("}") { return nil; }
         promote_tail_switch(self.arena, body);
-        self.make(NodeForm.lambda(LambdaAst { params, body }), start)
+        self.make(NodeForm.lambda(LambdaAst { params, body, return_type: nil }), start)
+    }
+    // `(a: i32, b) -> i32 { body }`; parameter types may come from context, and
+    // `(a) -> { body }` infers the return type.
+    def parse_arrow_lambda() -> NodeId? {
+        let start = self.current().span;
+        if !self.expect("(") { return nil; }
+        let params = Vec<(NodeId, NodeId?)>.new();
+        if !self.spelling().equals(")") {
+            while true {
+                guard let pattern = self.parse_pattern() else { return nil; }
+                var annotation: NodeId? = nil;
+                if self.match_text(":") {
+                    guard let type_node = self.parse_type() else { return nil; }
+                    annotation = type_node;
+                }
+                params.push((pattern, annotation));
+                if !self.match_text(",") { break; }
+            }
+        }
+        if !self.expect(")") { return nil; }
+        if !self.expect("->") { return nil; }
+        var return_type: NodeId? = nil;
+        if !self.spelling().equals("{") {
+            guard let declared = self.parse_type() else { return nil; }
+            return_type = declared;
+        }
+        if !self.expect("{") { return nil; }
+        guard let body = self.parse_braced_body() else { return nil; }
+        if !self.expect("}") { return nil; }
+        promote_tail_switch(self.arena, body);
+        self.make(NodeForm.lambda(LambdaAst { params, body, return_type }), start)
     }
     def parse_if() -> NodeId? {
         let start = self.current().span;

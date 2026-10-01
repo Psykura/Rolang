@@ -138,8 +138,13 @@ Function-value signatures also describe higher-order callbacks.
 ## Structs, field shorthand and copying
 
 Struct literals name fields. An in-scope variable can supply a field with the
-same name. Methods can mutate shared `var` fields. Operator methods such as
-`__add__` and `__sub__` implement source operators for user types.
+same name. Methods can mutate shared `var` fields. Operator methods implement
+source operators for user types: `__add__`, `__sub__`, `__mul__`, `__truediv__`,
+`__mod__`, `__eq__`, `__ne__`, `__lt__`, `__le__`, `__gt__`, `__ge__`, `__and__`,
+`__or__`, `__xor__`, `__lshift__` and `__rshift__` take the right operand;
+`__neg__`, `__pos__` and `__invert__` implement unary `-`, `+` and `~`.
+`x[i, j]` calls `__get__(i, j)` and `x[i, j] = v` calls `__set__(i, j, v)`;
+`for` uses `__iter__` and `__next__`.
 
 Built-in `.clone()` creates a separate outer object and retains managed fields:
 it is a shallow copy. Nested reference fields continue to share their objects.
@@ -190,14 +195,17 @@ def main() -> i32 {
 }
 ~~~
 
-Switch is available as a statement or expression. Enum construction can use
-`Type.case(...)` or a contextually typed dot shorthand.
+Switch is available as a statement or expression. `if c { a } else { b }` is
+also an expression, including `else if` chains, when each branch holds a single
+expression. Enum construction can use `Type.case(...)` or a contextually typed
+dot shorthand.
 
 ## Optionals, guards and propagation
 
 `T?` represents a value or `nil`. `if let` binds a present value, `guard let`
 requires one and keeps the binding after the guard, `??` supplies a fallback,
-and `?.` performs optional chaining. A guard's else branch must leave the path.
+and `?.` performs optional chaining. `x == nil` and `x != nil` test for a value.
+A guard's else branch must leave the path.
 Chaining covers fields, method calls and subscripts (`a?.items[0]`,
 `a?.find(key)`); an optional member is not wrapped again, so `a?.next?.value`
 has type `T?`. Chained calls must not return Void.
@@ -273,8 +281,10 @@ Constraints check protocol requirements before code generation.
 distinct type or prevent mixing values of the underlying type. Recursive aliases
 are rejected. A wrapper struct provides a separate nominal identity.
 
-Protocols declare method or property requirements, can inherit requirements,
-and can be combined as generic constraints. Extensions add methods or
+Protocols declare method or property requirements, can inherit requirements
+(`protocol B: A, C`), and can be combined as generic constraints. A struct or
+enum can declare conformances with its definition (`struct S: P, Q { ... }`),
+which is equivalent to an empty `extension S: P, Q {}`. Extensions add methods or
 conformance without adding stored fields; extension conformance satisfies
 generic constraints on functions and types. A requirement may be a generic
 method (`def map<U>(f: (i32) -> U) -> U;`); a witness declares the same number
@@ -330,7 +340,11 @@ def main() -> i32 {
 }
 ~~~
 
-The alternate form `(n: i32) -> i32 { n + 1 }` is also supported.
+The arrow form `(n: i32) -> i32 { n + 1 }` declares the return type. Parameter
+types may be omitted when the context supplies them, and the return type may be
+omitted to infer it: `values.map((x) -> { x * 2 })`, `() -> { counter.tick(); }`.
+Closure parameters can be patterns, as in `((a, b)) -> { a + b }` for a tuple
+argument.
 Named synchronous, non-generic safe functions can be adapted to function values.
 Use wrappers for generic/unsafe functions. Async closures and dynamic async
 protocol calls are outside the current async implementation.
@@ -376,7 +390,8 @@ end marker.
 
 ## Text, interpolation and compiler-writing utilities
 
-String literals contain UTF-8 bytes, including embedded NUL. Current len, char_at,
+String literals contain UTF-8 bytes, including embedded NUL. `==`, `!=`, `<`,
+`<=`, `>` and `>=` compare strings byte-wise. Current len, char_at,
 byte_at, substring and slice APIs count bytes; char classification is ASCII.
 They do not provide Unicode scalar/grapheme indexing.
 

@@ -41,6 +41,7 @@ pub def parse_program_tokens(tokens: Vec<LexToken>, arena: AstArena) -> ProgramP
                 return ProgramParseResult { program: nil, error: "missing declaration" };
             }
             items.push(item);
+            for extra in result.extra { items.push(extra); }
             index = result.next_index;
         } else {
             let result = parse_statement_prefix(tokens, arena, index);

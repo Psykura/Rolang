@@ -2,6 +2,8 @@
 pub import "mir_forms.rl"
 pub import "types.rl"
 pub import "symbols.rl"
+// Formats a defect detected after type checking, as opposed to an error in the program.
+pub def internal_compiler_error(message: String) -> String { "internal compiler error: " + message + " (this is a compiler bug; please report it)" }
 
 pub struct MirLocal {
     pub let id: MirLocalId;

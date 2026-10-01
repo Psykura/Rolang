@@ -133,6 +133,7 @@ pub struct DictLiteralAst {
 pub struct LambdaAst {
     pub var params: Vec<(NodeId, NodeId?)>;
     pub var body: Vec<NodeId>;
+    pub var return_type: NodeId?;
 }
 pub struct StructLiteralAst {
     pub var type_name: NodeId?;
@@ -644,6 +645,7 @@ pub enum NodeForm {
                 for pair in data.entries { result.push(pair.0); result.push(pair.1); }
             case .lambda(let data):
                 for pair in data.params { result.push(pair.0); if let child = pair.1 { result.push(child); } }
+                if let child = data.return_type { result.push(child); }
                 for child in data.body { result.push(child); }
             case .struct_literal(let data):
                 if let child = data.type_name { result.push(child); }

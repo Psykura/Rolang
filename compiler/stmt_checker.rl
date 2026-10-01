@@ -95,6 +95,13 @@ pub struct StmtChecker {
             }
         }
         let value_type = self.state.infer_expr(value);
+        if let node = self.state.arena.get(target) { switch node.form { case .subscript(let sub): if let object = sub.object { if let object_type = self.state.result.expr_types[object.id] {
+            if let setter = self.state.member_resolver.get_method(object_type, "__set__") { if let func = self.state.type_table.get_function_data(setter.signature) {
+                self.state.check_subscript_indices(func, sub.indices, 1, "__set__", target);
+            } } else if let getter = self.state.member_resolver.get_method(object_type, "__get__") {
+                self.state.error(TypeErrorKind.invalid_operation(), f"Type {self.state.type_table.format_type(object_type)} does not support subscript assignment; define __set__", target);
+            }
+        } } default: {} } }
         if data.op.equals("=") { self.state.check_assignable(value_type, target_type, "assignment", id); }
         else {
             let op = compound_to_base_op(data.op);

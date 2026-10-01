@@ -92,6 +92,14 @@ pub struct String {
         return self.concat(other);
     }
 
+    // Byte-wise content comparison for ==, != and ordering operators.
+    pub def __eq__(other: String) -> Bool { self.equals(other) }
+    pub def __ne__(other: String) -> Bool { !self.equals(other) }
+    pub def __lt__(other: String) -> Bool { self.compare_to(other) < 0 }
+    pub def __le__(other: String) -> Bool { self.compare_to(other) <= 0 }
+    pub def __gt__(other: String) -> Bool { self.compare_to(other) > 0 }
+    pub def __ge__(other: String) -> Bool { self.compare_to(other) >= 0 }
+
     pub def repeat(count: i32) -> String {
         unsafe { return String.from_handle(rt_string_repeat_handle(self, count)); }
     }

@@ -287,7 +287,10 @@ pub struct CompilationDriver {
                         if func.name.equals("main") { return self.fail("A library module cannot define main"); }
                     } }
                     let llvm = compile_to_llvm(post, frontend.arena, owner);
-                    for error in llvm.errors { self.errors.push(error); }
+                    // Code generation reports compiler defects, except for the release/trace hook ABI check.
+                    for error in llvm.errors {
+                        if error.contains(" has an invalid signature; ") { self.errors.push(error); } else { self.errors.push(internal_compiler_error(error)); }
+                    }
                     content = llvm.text;
                     if self.options.target.len() > 0 { content = "target triple = " + llvm_quote(self.options.target) + "\n" + content; }
                 }

@@ -125,7 +125,7 @@ pub struct MirFunctionBuilder {
             for statement in data.statements { if self.is_terminated() { break; } self.lower_stmt(statement); }
             let scope = self.defer_scopes.pop();
             if !self.is_terminated() { var index = scope.len() - 1; while index >= 0 { self.lower_block(scope[index]); index -= 1; } }
-            default: self.errors.push("Expected HIR block");
+            default: self.errors.push(internal_compiler_error("Expected HIR block"));
         }
     }
     pub def lower_stmt(id: HirId) -> Void {
@@ -145,7 +145,7 @@ pub struct MirFunctionBuilder {
             case .for_stmt(let data): self.lower_for(data);
             case .switch_stmt(let data): self.lower_switch(data);
             case .defer_stmt(let data): self.register_defer(data.body);
-            default: self.errors.push("MIR statement lowering pending: " + node.form.kind());
+            default: self.errors.push(internal_compiler_error("MIR statement lowering pending: " + node.form.kind()));
         }
     }
     def default_init(local: MirLocalId, type_id: TypeId) -> Void {
@@ -268,7 +268,7 @@ pub struct MirFunctionBuilder {
                 self.emit(MirOp.bin_op(MirBinOpData { result: local, op: binary, left: MirOperand.copy(target),
                     right: result, result_type: target.type_id }));
                 result = self.copy(local, target.type_id);
-            } else { self.errors.push("Unknown compound assignment operator: " + op); }
+            } else { self.errors.push(internal_compiler_error("Unknown compound assignment operator: " + op)); }
         }
         self.assign(target, result);
     }
@@ -277,7 +277,7 @@ pub struct MirFunctionBuilder {
         switch node.form {
             case .var_ref(let data):
                 if let local = self.bindings[data.symbol_id.id] { return self.place(local, self.locals[local.id].type_id); }
-                self.errors.push("Undefined assignment target: " + data.name);
+                self.errors.push(internal_compiler_error("Undefined assignment target: " + data.name));
             case .field_access(let data):
                 if let base = self.lower_place(data.object) {
                     let projections = Vec<MirProjection>.new(); for p in base.projections { projections.push(p); }
@@ -339,7 +339,7 @@ pub struct MirFunctionBuilder {
             self.emit(MirOp.bin_op(MirBinOpData { result, op, left, right, result_type: data.type_id }));
         } else if let op = comparison_op(data.op) {
             self.emit(MirOp.cmp_op(MirCmpOpData { result, op, left, right }));
-        } else { self.errors.push("Unknown binary operator: " + data.op); }
+        } else { self.errors.push(internal_compiler_error("Unknown binary operator: " + data.op)); }
         self.copy(result, data.type_id)
     }
     def lower_ternary(data: HirTernaryData) -> MirOperand {
@@ -523,17 +523,19 @@ pub struct MirFunctionBuilder {
                 }
             default: {}
         } }
-        let index = self.lower_expr(data.indices[0]); let result = self.temp(data.type_id);
+        let indices = Vec<MirOperand>.new(); for id in data.indices { indices.push(self.lower_expr(id)); }
+        let result = self.temp(data.type_id);
         let prefix = self.type_prefix(object.type_id());
         var function = ""; var symbol: SymbolId? = nil;
         if prefix.equals("Vec") || prefix.starts_with("Vec_") || prefix.equals("Dict") || prefix.starts_with("Dict_") {
             function = prefix + "_get";
         } else if let method = self.members.get_method(object.type_id(), "__get__") {
             function = prefix + "___get__"; symbol = method.symbol_id;
+            if let signature = self.types.get_function_data(method.signature) { for i in 0..<indices.len() { if i < signature.params.len() { indices[i] = self.coerce(indices[i], signature.params.get(i)); } } }
         }
         if function.len() == 0 { self.errors.push("Cannot subscript type " + self.types.format_type(object.type_id())); }
         else {
-            let args = Vec<MirOperand>.new(); args.push(object); args.push(index);
+            let args = Vec<MirOperand>.new(); args.push(object); for index in indices { args.push(index); }
             self.emit(MirOp.call_static(MirCallStaticData { result, func_name: function, func_symbol: symbol,
                 args, result_type: data.type_id }));
         }
@@ -591,16 +593,20 @@ pub struct MirFunctionBuilder {
                 if let getter = self.members.get_method(type_id, "__get__") { get_name = prefix + "___get__"; }
             }
             if name.len() == 0 { return false; }
-            let object = self.lower_expr(target.object); var index = self.lower_expr(target.indices[0]); var value = self.lower_expr(data.value);
+            let object = self.lower_expr(target.object); let indices = Vec<MirOperand>.new(); for id in target.indices { indices.push(self.lower_expr(id)); }
+            var value = self.lower_expr(data.value);
             if let op = data.compound_op { if get_name.len() > 0 && is_arithmetic_op(op) || get_name.len() > 0 && is_bitwise_op(op) {
-                let current = self.temp(target.type_id); self.static_call(current, get_name, [object, index], target.type_id);
+                let current = self.temp(target.type_id); let get_args = Vec<MirOperand>.new(); get_args.push(object); for index in indices { get_args.push(index); }
+                self.static_call(current, get_name, get_args, target.type_id);
                 value = self.compound_value(op, self.copy(current, target.type_id), value, target.type_id);
             } else { self.errors.push(f"compound assignment '{op}' to a '{prefix}' subscript is not supported"); return true; } }
             var method_name = "__set__"; if prefix.equals("Vec") || prefix.starts_with("Vec_") || prefix.equals("Dict") || prefix.starts_with("Dict_") { method_name = "set"; }
-            if let setter = self.members.get_method(type_id, method_name) { if let signature = self.types.get_function_data(setter.signature) { if signature.params.len() >= 2 {
-                index = self.coerce(index, signature.params.get(0)); value = self.coerce(value, signature.params.get(1));
+            if let setter = self.members.get_method(type_id, method_name) { if let signature = self.types.get_function_data(setter.signature) { if signature.params.len() == indices.len() + 1 {
+                for i in 0..<indices.len() { indices[i] = self.coerce(indices[i], signature.params.get(i)); }
+                value = self.coerce(value, signature.params.get(indices.len()));
             } } }
-            self.static_call(nil, name, [object, index, value], self.void_type(), symbol); return true;
+            let args = Vec<MirOperand>.new(); args.push(object); for index in indices { args.push(index); } args.push(value);
+            self.static_call(nil, name, args, self.void_type(), symbol); return true;
             default: return false;
         }
     }
@@ -927,7 +933,7 @@ pub struct MirFunctionBuilder {
             }
             default: {}
         } }
-        self.errors.push("Undefined variable: " + data.name); self.nil_operand(data.type_id)
+        self.errors.push(internal_compiler_error("Undefined variable: " + data.name)); self.nil_operand(data.type_id)
     }
     def lower_unary(data: HirUnaryOpData) -> MirOperand {
         if data.op.equals("spawn") {
@@ -955,7 +961,7 @@ pub struct MirFunctionBuilder {
         }
         let result = self.temp(data.type_id); if let op = unary_op(data.op) {
             self.emit(MirOp.unary_op(MirUnaryOpData { result, op, operand, result_type: data.type_id }));
-        } else { self.errors.push("Unknown unary operator: " + data.op); } self.copy(result, data.type_id)
+        } else { self.errors.push(internal_compiler_error("Unknown unary operator: " + data.op)); } self.copy(result, data.type_id)
     }
     def lower_optional_match(data: HirOptionalMatchData) -> MirOperand {
         let value = self.lower_expr(data.scrutinee); let result = self.temp(data.type_id); let place = self.place(result, data.type_id);
@@ -1000,7 +1006,7 @@ pub struct MirFunctionBuilder {
     def lower_downcast(data: HirCastData) -> MirOperand {
         let value = self.lower_expr(data.expr); var protocol_type = self.types.error_type;
         if let info = self.types.get_type(value.type_id()) { switch info.data { case .existential(let existential): protocol_type = existential.protocol_id; default: {} } }
-        if self.types.is_error(protocol_type) { self.errors.push("internal: runtime downcast source is not an existential (should have been rejected by the type checker)"); return self.copy(self.temp(data.type_id), data.type_id); }
+        if self.types.is_error(protocol_type) { self.errors.push(internal_compiler_error("runtime downcast source is not an existential")); return self.copy(self.temp(data.type_id), data.type_id); }
         var concrete = data.target_type; if data.kind.equals("optional") { concrete = self.types.get_optional_inner(data.type_id) ?? concrete; }
         let test = self.temp(self.bool_type(), "__cast_match"); self.emit(MirOp.existential_check_type(MirExistentialCheckTypeData { result: test,
             existential: value, concrete_type: concrete, protocol_type }));
@@ -1062,7 +1068,7 @@ pub struct MirFunctionBuilder {
                 self.emit(MirOp.clone(MirCloneData { result, value, result_type: data.type_id }));
                 return self.copy(result, data.type_id);
             default:
-                self.errors.push("MIR expression lowering pending: " + node.form.kind());
+                self.errors.push(internal_compiler_error("MIR expression lowering pending: " + node.form.kind()));
                 return self.nil_operand(node.form.type_id() ?? self.types.error_type);
         }
     }
@@ -1117,7 +1123,7 @@ pub struct MirBuilder {
                 self.build_function(HirFunctionData { name, symbol_id: method.symbol_id, params,
                     return_type: method.return_type, body: method.body, is_async: method.is_async,
                     is_method: true, is_static: method.is_static }, functions);
-            default: self.errors.push("Expected HIR method");
+            default: self.errors.push(internal_compiler_error("Expected HIR method"));
         }
     }
     def type_name(type_id: TypeId) -> String {
@@ -1172,7 +1178,7 @@ pub struct MirBuilder {
                     default: {}
                 }
             }
-            default: self.errors.push("Expected HIR program");
+            default: self.errors.push(internal_compiler_error("Expected HIR program"));
         } }
         for lambda in self.pending { self.build_lambda(lambda, functions); }
         let result = MirProgram { functions, structs, enums, externs };

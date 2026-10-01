@@ -129,6 +129,11 @@ pub struct ExprChecker {
             self.state.check_assignable(right, inner, "coalescing fallback", data.right); return inner;
         }
         let left = self.state.infer_expr(data.left); let right = self.state.infer_expr(data.right);
+        if is_equality_op(data.op) {
+            // `x == nil` and `x != nil` test whether an optional holds a value.
+            let table = self.state.type_table;
+            if (left == table.nil_type && table.is_optional(right)) || (right == table.nil_type && table.is_optional(left)) { return self.state.builtin("Bool"); }
+        }
         if let type = self.state.try_operator_overload(id, left, data.op, right) { return type; }
         self.state.binary_types(left, data.op, right)
     }
@@ -148,8 +153,10 @@ pub struct ExprChecker {
         }
         if data.op.equals("-") { if let operand = data.operand { if let node = self.state.arena.get(operand) { switch node.form { case .literal(let lit): if lit.kind.equals("int") { let type = self.integer(operand, lit, true); self.state.result.expr_types[operand.id] = type; return type; } default: {} } } } }
         let type = self.state.infer_expr(data.operand);
+        if let result = self.state.try_unary_overload(id, type, data.op) { return result; }
         switch data.op {
             case "-": if self.state.type_table.is_numeric(type) { return type; } self.state.error(TypeErrorKind.invalid_operation(), f"Cannot negate {self.state.type_table.format_type(type)}");
+            case "+": if self.state.type_table.is_numeric(type) { return type; } self.state.error(TypeErrorKind.invalid_operation(), f"Cannot apply unary '+' to {self.state.type_table.format_type(type)}");
             case "!": self.state.check_boolean(type, "operand of !"); return self.state.builtin("Bool");
             case "~": if self.state.type_table.is_integer(type) { return type; } self.state.error(TypeErrorKind.invalid_operation(), "Bitwise not requires integer operand");
             case "await":
@@ -368,7 +375,13 @@ pub struct ExprChecker {
             } default: {} } } } }
             if name.equals("Vec") && value.type_args.len() == 1 { return value.type_args.get(0); }
             if name.equals("Dict") && value.type_args.len() == 2 { return self.state.type_table.make_optional(value.type_args.get(1)); }
-            if let method = self.state.member_resolver.get_method(type, "__get__") { if let func = self.state.type_table.get_function_data(method.signature) { if func.params.len() >= 1 { return func.return_type; } } }
+            if let method = self.state.member_resolver.get_method(type, "__get__") { if let func = self.state.type_table.get_function_data(method.signature) {
+                self.state.check_subscript_indices(func, data.indices, 0, "__get__", id); return func.return_type;
+            } }
+            // A set-only subscript is still a valid assignment target.
+            if let method = self.state.member_resolver.get_method(type, "__set__") { if let func = self.state.type_table.get_function_data(method.signature) {
+                if func.params.len() > 0 { return func.params.get(func.params.len() - 1); }
+            } }
             default: {}
         } }
         self.state.error(TypeErrorKind.type_mismatch(), f"Type {self.state.type_table.format_type(type)} does not support subscripting", id); self.state.type_table.error_type
@@ -440,6 +453,7 @@ pub struct ExprChecker {
         let old_return = self.state.current_function_return; let old_expected = self.state.expected_type;
         let old_unsafe = self.state.in_unsafe; let old_async = self.state.in_async_function;
         var expected_return: TypeId? = nil; if let func = context { if !self.state.type_table.has_type_variables(func.return_type) { expected_return = func.return_type; } }
+        if let declared = data.return_type { expected_return = self.state.resolve_type(declared); }
         self.state.current_function_return = expected_return; self.state.expected_type = nil; self.state.in_unsafe = false; self.state.in_async_function = false;
         defer { self.state.current_function_return = old_return; self.state.expected_type = old_expected; self.state.in_unsafe = old_unsafe; self.state.in_async_function = old_async; }
         for stmt in data.body { self.state.check_stmt(stmt); }

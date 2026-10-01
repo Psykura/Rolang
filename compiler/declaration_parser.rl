@@ -8,6 +8,8 @@ pub struct DeclarationParseResult {
     pub let next_index: i32;
     pub let remaining: String;
     pub let error: String?;
+    // Declarations synthesized alongside `declaration`, such as the extension for `struct S: P`.
+    pub let extra: Vec<NodeId>;
 }
 
 struct DeclarationCursor {
@@ -19,6 +21,7 @@ struct DeclarationCursor {
     var end_line: i32;
     var end_column: i32;
     var error: String?;
+    let extra: Vec<NodeId>;
 
     def current() -> LexToken {
         if self.index < self.tokens.len() { return self.tokens[self.index]; }
@@ -185,6 +188,34 @@ struct DeclarationCursor {
         self.make(NodeForm.constraint(ConstraintAst {
             subject: AstConstraintSubject.type_ref(subject), kind, bounds, equal_type
         }), start)
+    }
+    // `: P, Q` after a struct, enum or protocol name.
+    def parse_inheritance() -> Vec<NodeId>? {
+        let bounds = Vec<NodeId>.new();
+        if !self.match_text(":") { return bounds; }
+        guard let first = self.parse_named_bound() else { return nil; }
+        bounds.push(first);
+        while self.match_text(",") {
+            guard let next = self.parse_named_bound() else { return nil; }
+            bounds.push(next);
+        }
+        bounds
+    }
+    // `struct S<T>: P, Q` declares its conformances through `extension<T> S<T>: P, Q {}`.
+    def conformance_extension(visibility: String, name: String, generic_params: Vec<NodeId>, conformances: Vec<NodeId>, start: Span) -> Void {
+        if conformances.len() == 0 { return; }
+        let params = Vec<NodeId>.new(); let args = Vec<NodeId>.new();
+        for id in generic_params { if let node = self.arena.get(id) { switch node.form {
+            case .generic_param(let param):
+                params.push(self.make(NodeForm.generic_param(GenericParamAst { name: param.name, bounds: param.bounds }), start));
+                args.push(self.make(NodeForm.named_type(NamedTypeAst { name: param.name, module_path: Vec<String>.new(), generic_args: Vec<NodeId>.new() }), start));
+            default: {}
+        } } }
+        let extended = self.make(NodeForm.named_type(NamedTypeAst { name, module_path: Vec<String>.new(), generic_args: args }), start);
+        self.extra.push(self.make(NodeForm.extension_decl(ExtensionDeclAst {
+            visibility, generic_params: params, extended_type: extended, conformances,
+            constraints: Vec<NodeId>.new(), members: Vec<NodeId>.new()
+        }), start));
     }
     def parse_constraints() -> Vec<NodeId>? {
         let constraints = Vec<NodeId>.new();
@@ -374,6 +405,7 @@ struct DeclarationCursor {
         if !self.at_identifier() { self.fail("struct name"); return nil; }
         let name = self.take();
         guard let generic_params = self.parse_generic_params() else { return nil; }
+        guard let conformances = self.parse_inheritance() else { return nil; }
         guard let constraints = self.parse_constraints() else { return nil; }
         if !self.expect("{") { return nil; }
         let members = Vec<NodeId>.new();
@@ -398,9 +430,11 @@ struct DeclarationCursor {
             }
         }
         if !self.expect("}") { return nil; }
-        self.make(NodeForm.struct_decl(StructDeclAst {
+        let declaration = self.make(NodeForm.struct_decl(StructDeclAst {
             visibility, name, generic_params, constraints, members
-        }), start)
+        }), start);
+        self.conformance_extension(visibility, name, generic_params, conformances, start);
+        declaration
     }
     def parse_enum_case_def() -> NodeId? {
         if !self.at_identifier() { self.fail("enum case name"); return nil; }
@@ -446,6 +480,7 @@ struct DeclarationCursor {
         if !self.at_identifier() { self.fail("enum name"); return nil; }
         let name = self.take();
         guard let generic_params = self.parse_generic_params() else { return nil; }
+        guard let conformances = self.parse_inheritance() else { return nil; }
         guard let constraints = self.parse_constraints() else { return nil; }
         if !self.expect("{") { return nil; }
         let members = Vec<NodeId>.new();
@@ -469,9 +504,11 @@ struct DeclarationCursor {
             }
         }
         if !self.expect("}") { return nil; }
-        self.make(NodeForm.enum_decl(EnumDeclAst {
+        let declaration = self.make(NodeForm.enum_decl(EnumDeclAst {
             visibility, name, generic_params, constraints, members
-        }), start)
+        }), start);
+        self.conformance_extension(visibility, name, generic_params, conformances, start);
+        declaration
     }
     def parse_protocol_func() -> NodeId? {
         let start = self.current().span;
@@ -535,7 +572,13 @@ struct DeclarationCursor {
         if !self.at_identifier() { self.fail("protocol name"); return nil; }
         let name = self.take();
         guard let generic_params = self.parse_generic_params() else { return nil; }
+        guard let parents = self.parse_inheritance() else { return nil; }
         guard let constraints = self.parse_constraints() else { return nil; }
+        // `protocol B: A, C` is stored as the constraint `Self: A & C`.
+        if parents.len() > 0 {
+            let subject = self.make(NodeForm.named_type(NamedTypeAst { name: "Self", module_path: Vec<String>.new(), generic_args: Vec<NodeId>.new() }), start);
+            constraints.push(self.make(NodeForm.constraint(ConstraintAst { subject: AstConstraintSubject.type_ref(subject), kind: "conforms", bounds: parents, equal_type: nil }), start));
+        }
         if !self.expect("{") { return nil; }
         let members = Vec<NodeId>.new();
         while !self.spelling().equals("}") {
@@ -622,11 +665,11 @@ pub def parse_declaration_prefix(tokens: Vec<LexToken>, arena: AstArena,
                                  start_index: i32 = 0) -> DeclarationParseResult {
     let cursor = DeclarationCursor {
         tokens, arena, index: start_index, fragment: "", fragment_offset: 0,
-        end_line: 0, end_column: 0, error: nil
+        end_line: 0, end_column: 0, error: nil, extra: Vec<NodeId>.new()
     };
     let declaration = cursor.parse_declaration();
     DeclarationParseResult {
-        declaration, next_index: cursor.index, remaining: cursor.fragment, error: cursor.error
+        declaration, next_index: cursor.index, remaining: cursor.fragment, error: cursor.error, extra: cursor.extra
     }
 }
 
@@ -634,14 +677,14 @@ pub def parse_declaration_text(source: String, arena: AstArena) -> DeclarationPa
     let lexed = tokenize(source);
     if let problem = lexed.error {
         return DeclarationParseResult { declaration: nil, next_index: 0,
-                                        remaining: "", error: problem.message };
+                                        remaining: "", error: problem.message, extra: Vec<NodeId>.new() };
     }
     let result = parse_declaration_prefix(lexed.tokens, arena);
     if let problem = result.error { return result; }
     if result.remaining.len() > 0 || result.next_index < lexed.tokens.len() - 1 {
         return DeclarationParseResult {
             declaration: nil, next_index: result.next_index, remaining: result.remaining,
-            error: "unexpected token after declaration"
+            error: "unexpected token after declaration", extra: Vec<NodeId>.new()
         };
     }
     result
