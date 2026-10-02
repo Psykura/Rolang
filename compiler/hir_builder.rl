@@ -21,14 +21,71 @@ pub struct HirBuilder {
     pub let type_resolver: TypeResolver;
     pub let errors: Vec<String>;
     var temp_counter: i32;
+    // `var` symbols that a closure captures and that are reassigned; they live in a
+    // shared __CaptureCell so closures and the enclosing scope see one variable.
+    let boxed: Dict<i32, Bool>;
+    let cell_types: Dict<i32, TypeId>;
     pub static def new(ast: AstArena, result: TypeCheckResult, symbols: SymbolTable, bindings: Dict<i32, SymbolId>) -> HirBuilder {
         HirBuilder { ast, arena: HirArena.new(), result, symbol_table: symbols, node_symbols: bindings,
-            type_table: result.type_table, type_resolver: TypeResolver.new(ast, result.type_table, symbols, bindings), errors: Vec<String>.new(), temp_counter: 0 }
+            type_table: result.type_table, type_resolver: TypeResolver.new(ast, result.type_table, symbols, bindings), errors: Vec<String>.new(), temp_counter: 0,
+            boxed: Dict<i32, Bool>.with_capacity(16, 0), cell_types: Dict<i32, TypeId>.with_capacity(16, 0) }
     }
     pub def build(program: NodeId) -> HirBuildResult {
+        self.find_boxed_variables(program);
         let items = Vec<HirId>.new();
         if let node = self.ast.get(program) { switch node.form { case .program(let data): for item in data.items { if let built = self.item(item) { items.push(built); } } default: {} } }
         HirBuildResult { ast: self.ast, arena: self.arena, program: self.arena.add(HirForm.program(HirProgramData { items })), type_table: self.type_table, symbol_table: self.symbol_table, errors: self.errors }
+    }
+    def descendants(root: NodeId) -> Vec<NodeId> {
+        let out = Vec<NodeId>.new(); let pending = Vec<NodeId>.new(); pending.push(root);
+        while pending.len() > 0 {
+            let id = pending.pop();
+            if let node = self.ast.get(id) { out.push(id); for child in node.form.children() { pending.push(child); } }
+        }
+        out
+    }
+    def find_boxed_variables(program: NodeId) -> Void {
+        let mutable = Dict<i32, Bool>.with_capacity(16, 0); let assigned = Dict<i32, Bool>.with_capacity(16, 0); let captured = Dict<i32, Bool>.with_capacity(16, 0);
+        for id in self.descendants(program) { if let node = self.ast.get(id) { switch node.form {
+            case .var_decl(let data): if data.is_mutable { if let pattern = data.pattern { for child in self.descendants(pattern) {
+                if let inner = self.ast.get(child) { switch inner.form { case .identifier_pattern: if let sid = self.node_symbols[child.id] { mutable[sid.id] = true; } default: {} } }
+            } } }
+            case .assignment(let data): if let target = data.target { if let inner = self.ast.get(target) { switch inner.form {
+                case .identifier: if let sid = self.node_symbols[target.id] { assigned[sid.id] = true; }
+                default: {}
+            } } }
+            case .lambda:
+                let referenced = Dict<i32, Bool>.with_capacity(16, 0); let declared = Dict<i32, Bool>.with_capacity(16, 0);
+                for child in self.descendants(id) { if let inner = self.ast.get(child) { switch inner.form {
+                    case .identifier: if let sid = self.node_symbols[child.id] { referenced[sid.id] = true; }
+                    case .identifier_pattern: if let sid = self.node_symbols[child.id] { declared[sid.id] = true; }
+                    default: {}
+                } } }
+                for entry in referenced.entries() { if !declared.contains(entry.key) { captured[entry.key] = true; } }
+            default: {}
+        } } }
+        for entry in captured.entries() { if mutable.contains(entry.key) && assigned.contains(entry.key) { self.boxed[entry.key] = true; } }
+    }
+    // Declares a variable, placing it in a shared cell when it is boxed.
+    def declare(name: String, sid: SymbolId, type: TypeId, initializer: HirId?, mutable: Bool) -> HirId {
+        if self.boxed.contains(sid.id) { if let symbol = self.symbol_table.get_type_symbol("__CaptureCell") {
+            let cell = self.type_table.make_struct(symbol, [type]);
+            self.cell_types[sid.id] = cell;
+            let statements = Vec<HirId>.new();
+            var value: HirId? = initializer;
+            if let given = value {} else {
+                // A declaration without an initializer starts from the type's default value.
+                let temp = self.temp("__default"); let temp_sid = self.temp_symbol(temp);
+                statements.push(self.arena.add(HirForm.var_decl(HirVarDeclData { name: temp, symbol_id: temp_sid, type_id: type, initializer: nil, is_mutable: false })));
+                value = self.arena.add(HirForm.var_ref(HirVarData { type_id: type, name: temp, symbol_id: temp_sid }));
+            }
+            let arguments = Vec<(String?, HirId)>.new(); if let content = value { let label: String? = "value"; arguments.push((label, content)); }
+            let init = self.arena.add(HirForm.struct_init(HirStructInitData { type_id: cell, struct_type: cell, struct_symbol: symbol, arguments }));
+            statements.push(self.arena.add(HirForm.var_decl(HirVarDeclData { name, symbol_id: sid, type_id: cell, initializer: init, is_mutable: false })));
+            if statements.len() == 1 { return statements[0]; }
+            return self.arena.add(HirForm.block(HirBlockData { statements }));
+        } }
+        self.arena.add(HirForm.var_decl(HirVarDeclData { name, symbol_id: sid, type_id: type, initializer, is_mutable: mutable }))
     }
     def type_of(id: NodeId?) -> TypeId { if let ref = id { return self.result.expr_types[ref.id] ?? self.type_table.error_type; } self.type_table.error_type }
     def hir_type(id: HirId) -> TypeId { self.arena.type_of(id, self.type_table.error_type) }
@@ -162,7 +219,7 @@ pub struct HirBuilder {
         if let ref = data.pattern { if let node = self.ast.get(ref) { switch node.form { case .identifier_pattern(let p):
             let sid = self.symbol(ref, p.name, SymbolKind.variable(), Namespace.value(), data.is_mutable);
             var initializer: HirId? = nil; if let value = data.initializer { initializer = self.expr(value); }
-            return self.arena.add(HirForm.var_decl(HirVarDeclData { name: p.name, symbol_id: sid, type_id: type, initializer, is_mutable: data.is_mutable }));
+            return self.declare(p.name, sid, type, initializer, data.is_mutable);
             default: {}
         } } }
         let sid = self.temp_symbol("__pattern"); var initializer: HirId? = nil; if let value = data.initializer { initializer = self.expr(value); }
@@ -172,7 +229,7 @@ pub struct HirBuilder {
     }
     def project_bindings(id: NodeId?, value: HirId, out: Vec<HirId>, mutable: Bool) -> Void {
         if let ref = id { if let node = self.ast.get(ref) { switch node.form {
-            case .identifier_pattern(let p): out.push(self.arena.add(HirForm.var_decl(HirVarDeclData { name: p.name, symbol_id: self.node_symbols[ref.id] ?? SymbolId { id: -1 }, type_id: self.hir_type(value), initializer: value, is_mutable: mutable })));
+            case .identifier_pattern(let p): out.push(self.declare(p.name, self.node_symbols[ref.id] ?? SymbolId { id: -1 }, self.hir_type(value), value, mutable));
             case .tuple_pattern(let data):
                 if let info = self.type_table.get_type(self.hir_type(value)) { switch info.data { case .struct_type(let tuple): if let fields = tuple.anon_fields {
                     for index in 0..<data.elements.len() { if index < fields.len() { let field = fields.get(index); let child = self.arena.add(HirForm.field_access(HirFieldAccessData { type_id: field.type_id, object: value, field_name: field.name, field_symbol: nil })); self.project_bindings(data.elements[index].1, child, out, mutable); } }
@@ -205,7 +262,13 @@ pub struct HirBuilder {
         let type_id = self.type_of(ref);
         switch node.form {
             case .literal(let data): return self.arena.add(HirForm.literal(HirLiteralData { type_id, value: self.literal_value(data.value), kind: data.kind }));
-            case .identifier(let data): return self.arena.add(HirForm.var_ref(HirVarData { type_id, name: data.name, symbol_id: self.symbol(ref, data.name, SymbolKind.variable(), Namespace.value()) }));
+            case .identifier(let data):
+                let sid = self.symbol(ref, data.name, SymbolKind.variable(), Namespace.value());
+                if let cell = self.cell_types[sid.id] {
+                    let holder = self.arena.add(HirForm.var_ref(HirVarData { type_id: cell, name: data.name, symbol_id: sid }));
+                    return self.arena.add(HirForm.field_access(HirFieldAccessData { type_id, object: holder, field_name: "value", field_symbol: nil }));
+                }
+                return self.arena.add(HirForm.var_ref(HirVarData { type_id, name: data.name, symbol_id: sid }));
             case .type_reference(let data):
                 var sid = SymbolId { id: -1 }; var name = "<type>";
                 if let info = self.type_table.get_type(type_id) { switch info.data { case .struct_type(let value): sid = value.symbol_id ?? sid; case .enum_type(let value): sid = value.symbol_id; default: {} } }

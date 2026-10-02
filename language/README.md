@@ -321,15 +321,23 @@ Function values can be stored in fields, passed to functions and returned.
 A closure is written `(params) -> ReturnType { body }`. Parameter types may be
 omitted when a contextual function type supplies them, and the return type may be
 omitted to infer it from the body.
-Captured values are stored in a managed closure object; captured managed objects
-retain reference semantics and remain alive while owned by the closure.
-Because captures are copies, assigning to a captured variable inside a closure
-is an error; keep shared mutable state in a struct field.
+Closures capture variables by reference: a `var` that a closure captures and
+that is reassigned (inside or outside the closure) is shared, so updates on
+either side are visible to the other and survive after the enclosing function
+returns. Such a variable lives in a managed cell; other captures are copied into
+the closure object, which is equivalent because they never change. Captured
+managed objects remain alive while owned by the closure. Bindings introduced by
+switch, for and if-let patterns cannot be assigned inside a closure; copy them
+into a `var` first.
 
 <!-- example: closures -->
 ~~~rolang
 def make_adder(base: i32) -> (i32) -> i32 {
     (n: i32) -> { base + n }
+}
+def make_counter() -> () -> i32 {
+    var count = 0;
+    () -> { count += 1; count }
 }
 def apply(f: (i32) -> i32, value: i32) -> i32 { f(value) }
 def twice(n: i32) -> i32 { n * 2 }
@@ -337,7 +345,12 @@ def twice(n: i32) -> i32 { n * 2 }
 def main() -> i32 {
     let add = make_adder(40);
     let contextual: (i32) -> i32 = (n) -> { n + 1 };
-    if add(2) == 42 && apply(twice, 21) == 42 && contextual(41) == 42 { return 0; }
+    let next = make_counter();
+    next();
+    var total = 40;
+    let bump = () -> { total += next(); };
+    bump();
+    if add(2) == 42 && apply(twice, 21) == 42 && contextual(41) == 42 && total == 42 { return 0; }
     1
 }
 ~~~

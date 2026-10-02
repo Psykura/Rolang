@@ -94,7 +94,9 @@ pub struct StmtChecker {
                 switch node.form { case .subscript: self.state.error(TypeErrorKind.invalid_operation(), "slice assignment is not supported; slices are copies", id); return; default: {} }
             }
         }
-        let value_type = self.state.infer_expr(value);
+        // A plain assignment gives the value its target type as context, e.g. for closures and [].
+        var value_type = self.state.type_table.error_type;
+        if data.op.equals("=") { value_type = self.state.infer_with_expected(value, target_type); } else { value_type = self.state.infer_expr(value); }
         if let node = self.state.arena.get(target) { switch node.form { case .subscript(let sub): if let object = sub.object { if let object_type = self.state.result.expr_types[object.id] {
             if let setter = self.state.member_resolver.get_method(object_type, "__set__") { if let func = self.state.type_table.get_function_data(setter.signature) {
                 self.state.check_subscript_indices(func, sub.indices, 1, "__set__", target);

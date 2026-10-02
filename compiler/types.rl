@@ -200,9 +200,11 @@ pub struct TypeTable {
         guard let info = self.get_type(type_id) else { return false; }
         switch info.data { case .struct_type(_) | .enum_type(_) | .closure(_) | .existential(_): true; default: false; }
     }
+    // Nonzero when runtime containers must retain/release values of this type. Function
+    // values are closure objects, so they are managed like heap types.
     pub def runtime_type_id(type_id: TypeId) -> i32 {
-        if self.is_heap_type(type_id) { return 1; }
-        if let inner = self.get_optional_inner(type_id) { if self.is_heap_type(inner) { return 1; } }
+        if self.is_heap_type(type_id) || self.is_function(type_id) { return 1; }
+        if let inner = self.get_optional_inner(type_id) { if self.is_heap_type(inner) || self.is_function(inner) { return 1; } }
         0
     }
     pub def is_function(type_id: TypeId) -> Bool {

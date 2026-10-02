@@ -179,7 +179,7 @@ pub struct Frontend {
                     }
                 }
                 let items = Vec<NodeId>.new();
-                for name in ["vec.rl", "dict.rl", "string.rl", "range.rl"] {
+                for name in ["vec.rl", "dict.rl", "string.rl", "range.rl", "cell.rl"] {
                     if !existing.contains(name) {
                         let implicit = self.arena.add(NodeForm.import_decl(ImportDeclAst {
                             visibility: "internal", path: path_join(standard, name), module: Vec<String>.new(), alias: nil

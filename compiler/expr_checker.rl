@@ -443,7 +443,7 @@ pub struct ExprChecker {
         self.state.type_table.void_type
     }
     def lambda_expr(id: NodeId, data: LambdaAst) -> TypeId {
-        var context: FunctionTypeData? = nil; if let expected = self.state.expected_type { context = self.state.type_table.get_function_data(expected); }
+        var context: FunctionTypeData? = nil; if let expected = self.state.expected_type { context = self.state.type_table.get_function_data(self.state.type_table.get_optional_inner(expected) ?? expected); }
         let params = Vec<TypeId>.new();
         for index in 0..<data.params.len() { let pair = data.params[index]; var type = self.state.type_table.error_type;
             if let annotation = pair.1 { type = self.state.resolve_type(annotation); }
