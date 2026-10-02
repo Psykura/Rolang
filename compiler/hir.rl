@@ -4,9 +4,16 @@ pub struct HirNode {
     pub let id: HirId;
     pub var form: HirForm;
 }
+// Source position of a HIR statement or function, for debug information.
+pub struct HirLocation { pub let file: String; pub let line: i32; pub let column: i32; }
 pub struct HirArena {
     let nodes: Vec<HirNode>;
-    pub static def new() -> HirArena { HirArena { nodes: Vec<HirNode>.new() } }
+    let locations: Dict<i32, HirLocation>;
+    pub static def new() -> HirArena { HirArena { nodes: Vec<HirNode>.new(), locations: Dict<i32, HirLocation>.new() } }
+    pub def location(id: HirId) -> HirLocation? { self.locations[id.id] }
+    pub def set_location(id: HirId, location: HirLocation?) -> Void { if let known = location { self.locations[id.id] = known; } }
+    // Gives `copy` the location of `original`, for nodes cloned by later passes.
+    pub def copy_location(original: HirId, copy: HirId) -> HirId { self.set_location(copy, self.location(original)); copy }
     pub def len() -> i32 { self.nodes.len() }
     pub def add(form: HirForm) -> HirId {
         let id = HirId { id: self.nodes.len() }; self.nodes.push(HirNode { id, form }); id

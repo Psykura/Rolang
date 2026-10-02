@@ -1266,9 +1266,11 @@ struct StatementCursor {
         let expression_start = self.current().span;
         guard let expression = self.parse_expression() else { return nil; }
         if self.spelling().equals("}") {
+            var span: Span? = nil;
+            if let node = self.arena.get(expression) { span = node.span; }
             statements.push(self.arena.add(NodeForm.return_stmt(ReturnStmtAst {
                 value: expression, implicit: true
-            })));
+            }), span));
             return true;
         }
         let statement = self.make(NodeForm.expr_stmt(ExprStmtAst { expr: expression }),

@@ -217,6 +217,44 @@ pub struct ExprChecker {
     def decl_params(sid: SymbolId?) -> Vec<NodeId>? {
         if let ref = sid { if let sym = self.state.symbol_table.get_symbol(ref) { if let id = sym.decl_node { if let node = self.state.arena.get(id) { switch node.form { case .func_decl(let data): return data.params; case .extern_func_decl(let data): return data.params; default: {} } } } } } nil
     }
+    // A labeled argument may skip defaulted parameters: `f(a, help: "x")` passes
+    // the defaults in between. The call's arguments are rewritten to one per
+    // parameter in order, so later passes see an ordinary positional call.
+    def fill_skipped_defaults(data: CallAst, params: Vec<NodeId>) -> Void {
+        let args = data.arguments;
+        let filled = Vec<NodeId>.new();
+        var next = 0;
+        var changed = false;
+        for index in 0..<params.len() {
+            if next >= args.len() { break; }
+            guard let param = self.state.param(params[index]) else { return; }
+            guard let arg = self.argument(args[next]) else { return; }
+            if !label_matches(param, arg.label) && param.default_value != nil {
+                if let label = arg.label { if self.later_label(params, index + 1, label) {
+                    if let value = param.default_value {
+                        let span = self.state.arena.get(args[next])?.span;
+                        let default_arg = self.state.arena.add(NodeForm.argument(ArgumentAst { label: param.external_name ?? param.internal_name, value }), span);
+                        self.state.default_arguments[default_arg.id] = true;
+                        filled.push(default_arg);
+                        changed = true;
+                        continue;
+                    }
+                } }
+            }
+            filled.push(args[next]);
+            next += 1;
+        }
+        // Leftover arguments mean the labels were out of order; the positional
+        // label check reports that.
+        if !changed || next < args.len() { return; }
+        data.arguments = filled;
+    }
+    def later_label(params: Vec<NodeId>, start: i32, label: String) -> Bool {
+        for index in start..<params.len() { if let param = self.state.param(params[index]) {
+            if (param.external_name ?? param.internal_name).equals(label) { return true; }
+        } }
+        false
+    }
     def call(id: NodeId, data: CallAst) -> TypeId {
         let old = self.state.expected_type; self.state.expected_type = nil;
         defer { self.state.expected_type = old; }
@@ -227,6 +265,7 @@ pub struct ExprChecker {
             var symbol = self.state.node_symbols[callee.id];
             if let found = symbol {} else { symbol = self.state.result.member_method_symbols[callee.id]; }
             let mapping = Dict<String, TypeId>.with_capacity(16, 1);
+            if let decl = self.decl_params(symbol) { self.fill_skipped_defaults(data, decl); }
             if let sid = symbol {
                 if let sym = self.state.symbol_table.get_symbol(sid) { if let decl = sym.decl_node { if let node = self.state.arena.get(decl) { switch node.form {
                     case .extern_func_decl(let value): self.state.require_unsafe(f"calling external '{value.abi}' function", id);
@@ -253,10 +292,10 @@ pub struct ExprChecker {
                 self.state.error(TypeErrorKind.wrong_arg_count(), message, id);
             } else {
                 if let decl = params { for index in 0..<argc { if let arg = self.argument(data.arguments[index]) { if let param = self.state.param(decl[index]) {
-                    var matches = false;
-                    if let expected = param.external_name { if let actual = arg.label { matches = expected.equals(actual); } }
-                    else { if let actual = arg.label { matches = actual.equals(param.internal_name); } else { matches = true; } }
-                    if !matches { self.state.error(TypeErrorKind.wrong_arg_type(), f"argument {index + 1} label mismatch: expected {param.external_name ?? "<none>"}, got {arg.label ?? "<none>"}", data.arguments[index]); }
+                    if !label_matches(param, arg.label) {
+                        var wanted = f"no label or '{param.internal_name}'"; if let external = param.external_name { wanted = f"label '{external}'"; }
+                        var got = "none"; if let actual = arg.label { got = f"'{actual}'"; }
+                        self.state.error(TypeErrorKind.wrong_arg_type(), f"argument {index + 1} label mismatch: expected {wanted}, got {got}", data.arguments[index]); }
                 } } } }
                 if let sid = symbol { self.check_call_constraints(sid, mapping, id); }
                 if let names = self.requirement_generics(callee) {
@@ -268,6 +307,8 @@ pub struct ExprChecker {
                     } } }
                 }
                 for index in 0..<argc { if let arg = self.argument(data.arguments[index]) { if let value = arg.value {
+                    // Defaults were checked against their parameter with the declaration.
+                    if self.state.default_arguments.contains(data.arguments[index].id) { continue; }
                     let expected = self.state.generic_inference.substitute_type(func.params.get(index), mapping);
                     self.state.check_assignable(self.state.infer_with_expected(value, expected), expected, f"argument {index + 1}", value);
                 } } }
@@ -776,4 +817,15 @@ pub struct ExprChecker {
         }
         self.state.error(TypeErrorKind.undefined_member(), f"Type {self.state.type_table.format_type(base)} has no member '{data.member}'", id); self.state.type_table.error_type
     }
+}
+
+// An argument label matches a parameter's external label, or, without one, is
+// absent or its internal name.
+def label_matches(param: ParamAst, label: String?) -> Bool {
+    if let expected = param.external_name {
+        if let actual = label { return expected.equals(actual); }
+        return false;
+    }
+    if let actual = label { return actual.equals(param.internal_name); }
+    true
 }

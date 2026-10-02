@@ -128,6 +128,8 @@ Functions use `def`. A final expression provides the return value; explicit
 `return` remains available. Ordinary parameter names may be used as labels.
 Default parameters are evaluated when omitted. Explicit external labels
 declared by a signature must be respected, and arguments follow declaration order.
+A labeled argument may skip parameters that have defaults:
+`scale(5, offset: 1)` passes the default `factor`.
 
 <!-- example: functions -->
 ~~~rolang
@@ -637,7 +639,10 @@ See the [async API guide](async.md).
 C functions use `extern "C" def`. Calling external or unsafe functions and
 performing RawPtr operations require an unsafe context. That context does not
 implicitly extend into closures. Explicit casts and ownership transfers at
-FFI boundaries must match the C/runtime representation.
+FFI boundaries must match the C/runtime representation. `x as RawPtr` is the
+address of the variable `x`, as C out-parameters expect; `p as T` for a struct or
+other managed type reads the reference stored at `p`, so the two round-trip.
+Integer casts of a RawPtr convert the address itself.
 
 <!-- example: unsafe -->
 ~~~rolang

@@ -162,7 +162,7 @@ pub struct Monomorphizer {
                 var self_symbol = SymbolId { id: -1 };
                 if let body = method.body { for child in self.arena.preorder(body) { if let n = self.arena.get(child) { switch n.form { case .var_ref(let v): if v.name.equals("self") { self_symbol = v.symbol_id; break; } default: {} } } } }
                 let params = Vec<HirId>.new(); params.push(self.arena.add(HirForm.param(HirParamData { name: "self", symbol_id: self_symbol, type_id: receiver, external_name: nil, has_default: false }))); for param in method.params { params.push(param); }
-                self.originals[method_id] = self.arena.add(HirForm.function(HirFunctionData { name: method.name, symbol_id: method.symbol_id, params, return_type: method.return_type, body: method.body, is_async: method.is_async, is_method: method.is_method, is_static: method.is_static }));
+                self.originals[method_id] = self.arena.copy_location(id, self.arena.add(HirForm.function(HirFunctionData { name: method.name, symbol_id: method.symbol_id, params, return_type: method.return_type, body: method.body, is_async: method.is_async, is_method: method.is_method, is_static: method.is_static })));
             } } }
         } }
     }
@@ -271,7 +271,7 @@ pub struct Monomorphizer {
         let params = Vec<HirId>.new(); for param in data.params { params.push(self.clone_node(param, subst)); }
         let return_type = self.specialized_type(data.return_type, subst); self.discover(return_type);
         var body: HirId? = nil; if let value = data.body { body = self.clone_node(value, subst); }
-        self.arena.add(HirForm.function(HirFunctionData { name, symbol_id: sid, params, return_type, body, is_async: data.is_async, is_method: data.is_method, is_static: data.is_static }))
+        self.arena.copy_location(id, self.arena.add(HirForm.function(HirFunctionData { name, symbol_id: sid, params, return_type, body, is_async: data.is_async, is_method: data.is_method, is_static: data.is_static })))
     }
     def specialize_methods(methods: Vec<HirId>, subst: TypeSubstitution, owner: SymbolId, name: String) -> Vec<HirId> {
         let out = Vec<HirId>.new();
@@ -294,6 +294,9 @@ pub struct Monomorphizer {
     // Clone every field through the generated schema. Ordering-sensitive forms
     // below retain the reference compiler's specialization and discovery order.
     def clone_node(id: HirId, subst: TypeSubstitution) -> HirId {
+        self.arena.copy_location(id, self.clone_form(id, subst))
+    }
+    def clone_form(id: HirId, subst: TypeSubstitution) -> HirId {
         guard let node = self.arena.get(id) else { return id; }
         let new_type = self.specialized_type(node.form.type_id() ?? self.types.error_type, subst);
         switch node.form {

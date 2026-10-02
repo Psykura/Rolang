@@ -40,6 +40,8 @@ pub struct CheckerState {
     pub var statement_callback: ((NodeId) -> Void)?;
     // The innermost located node and file being checked, for errors reported without a node.
     pub var current_node: NodeId?;
+    // Arguments synthesized for parameters skipped by a later label.
+    pub let default_arguments: Dict<i32, Bool>;
     pub var current_file: String?;
     pub static def new(arena: AstArena, resolution: ResolutionResult) -> CheckerState {
         let types = TypeTable.new(); types.attach_symbol_table(resolution.symbol_table);
@@ -62,7 +64,7 @@ pub struct CheckerState {
             layout: LayoutService.new(arena, types, resolution.symbol_table, resolver), result,
             type_env: Dict<i32, TypeId>.with_capacity(16, 0), lowered_expressions: result.lowered_expressions,
             current_function_return: nil, current_self_type: nil, expected_type: nil,
-            in_async_function: false, in_unsafe: false, projection_equalities: Dict<String, TypeId>.with_capacity(4, 1), computing_constants: Dict<i32, Bool>.with_capacity(4, 0), rigid_generics: Dict<String, Bool>.with_capacity(4, 1), synthetic_lambda_types: Dict<i32, TypeId>.with_capacity(4, 0), infer_callback: nil, statement_callback: nil, current_node: nil, current_file: nil };
+            in_async_function: false, in_unsafe: false, projection_equalities: Dict<String, TypeId>.with_capacity(4, 1), computing_constants: Dict<i32, Bool>.with_capacity(4, 0), rigid_generics: Dict<String, Bool>.with_capacity(4, 1), synthetic_lambda_types: Dict<i32, TypeId>.with_capacity(4, 0), infer_callback: nil, statement_callback: nil, current_node: nil, current_file: nil, default_arguments: Dict<i32, Bool>.new() };
         // Inference errors are located at the expression being checked.
         state.generic_inference.error_reporter = (kind: TypeErrorKind, message: String) -> { state.error(kind, message); };
         state

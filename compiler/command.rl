@@ -64,6 +64,7 @@ def command_line() -> CommandLine {
     cli.flag("no-cache", "disable the build cache");
     cli.option("cache-context", "TEXT", "extra build cache key").hide();
     cli.option("color", "WHEN", "colored diagnostics (default: auto)").choices(["auto", "always", "never"]).implicit("always").preset(["--no-color"], "never");
+    cli.flag("debug", "emit debug information for debuggers (a .dSYM on macOS)").short("g");
     cli.flag("verbose", "print build commands and cache decisions").short("v");
     let passes = ["parse", "resolve", "check", "hir", "mono", "mir", "mir-post", "llvm"];
     let inspect = cli.option("inspect", "PASS", "print a pass and stop; --PASS is short for this").choices(passes);
@@ -109,6 +110,7 @@ pub def run_compiler_cli() -> i32 {
     options.cache_dir = args.value("cache-dir") ?? "";
     options.cache_context = args.value("cache-context") ?? "";
     options.verbose = args.has("verbose");
+    options.debug_info = args.has("debug");
     if args.has("no-cache") { options.cache_dir = ""; }
     var mode = "";
     if let pass = args.value("inspect") { mode = "--" + pass; }
@@ -128,6 +130,7 @@ pub def run_compiler_cli() -> i32 {
         roots.push(options.stdlib);
     }
     let frontend = Frontend.new(roots);
+    frontend.debug_info = options.debug_info;
     if options.target.len() > 0 { frontend.module_target = options.target; }
     var root: Module? = nil;
     if mode.equals("--parse") { root = frontend.parse_file(input); }
@@ -165,7 +168,7 @@ pub def run_compiler_cli() -> i32 {
     } else if mode.equals("--llvm") {
         guard let result = frontend.post_result else { return 1; }
         var owner = ""; if frontend.symbol_table.separate_modules { owner = frontend.module_key(module.path); }
-        let llvm = compile_to_llvm(result, frontend.arena, owner);
+        let llvm = compile_to_llvm(result, frontend.arena, owner, options.debug_info);
         if llvm.has_errors() {
             let errors = Vec<Diagnostic>.new();
             for error in llvm.errors { errors.push(Diagnostic.error(error)); }

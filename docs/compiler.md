@@ -60,6 +60,23 @@ suppressed. Diagnostics are ordered by file, then position.
 Command-line errors print `rolangc: message` with a `--help` hint and exit
 with status 2; unknown options suggest the closest spelling.
 
+## Debugging
+
+`-g` emits DWARF: line tables for every statement, each function as a
+subprogram, and parameters and named locals (integers, floats and Bool as
+values; managed objects as typed pointers). On macOS the driver runs dsymutil
+and writes `OUTPUT.dSYM` beside the executable. Use -O0 for faithful stepping
+and variables; optimized builds keep line information for the code that
+remains. -g builds bypass the content cache.
+
+~~~sh
+rolangc -g -O0 program.rl -o program
+lldb program
+(lldb) breakpoint set --file program.rl --line 12
+(lldb) run
+(lldb) frame variable
+~~~
+
 ## Panics and backtraces
 
 A runtime panic prints `rolang panic: message` and aborts. With
@@ -101,7 +118,7 @@ imported bitcode before linking. Native objects may also participate in links.
 ## Content cache
 
 --cache-dir enables caching for executable/object/module outputs; --no-cache
-disables it. -v prints real compilation/cache-hit diagnostics. Keys include
+disables it, as does -g. -v prints real compilation/cache-hit diagnostics. Keys include
 compiler/tools, source/import inputs, runtime/header dependencies, relevant
 environment, output/options, LTO and linker information. Corrupt or unusable cache
 data triggers recompilation rather than compiler fallback.

@@ -5,6 +5,7 @@ pub import "../async_lowering.rl"
 import "../conformance.rl"
 import "../monomorphize.rl"
 import std.string_builder
+import std.path
 import "../module_abi.rl"
 import std.sha256
 import "../acyclic.rl"
@@ -37,6 +38,15 @@ struct LlvmModuleEmitter {
     var char_helpers: Bool;
     var frem_helpers: Bool;
     var collection_metadata: Bool;
+    // Debug information (-g): metadata lines, numbered from !16 above the TBAA nodes.
+    var debug: Bool;
+    let debug_lines: StringBuilder;
+    var next_meta: i32;
+    let debug_files: Dict<String, i32>;
+    let debug_types: Dict<i32, i32>;
+    var debug_unit: i32;
+    var debug_signature: i32;
+    var debug_declare: Bool;
     static def new(result: MirPostResult, owner: String) -> LlvmModuleEmitter {
         let emitter = LlvmModuleEmitter { result, cache: LlvmTypeCache.new(result.type_table, result.program),
             signatures: Dict<String, LlvmSignature>.with_capacity(16, 1), signature_order: Vec<String>.new(),
@@ -44,7 +54,9 @@ struct LlvmModuleEmitter {
             source_names: Dict<String, String>.with_capacity(16, 1), witness_names: Dict<String, String>.with_capacity(16, 1),
             globals: StringBuilder.new(), bodies: StringBuilder.new(), errors: Vec<String>.new(), string_id: 0, arc_helpers: false,
             alloc_helpers: false, char_helpers: false, frem_helpers: false, collection_metadata: false,
-            owner, linkages: Dict<String, String>.with_capacity(16, 1) };
+            owner, linkages: Dict<String, String>.with_capacity(16, 1),
+            debug: false, debug_lines: StringBuilder.new(), next_meta: 16, debug_files: Dict<String, i32>.new(),
+            debug_types: Dict<i32, i32>.new(), debug_unit: -1, debug_signature: -1, debug_declare: false };
         if owner.len() > 0 { emitter.cache.symbols = result.symbol_table; }
         emitter.reserve_functions(); emitter
     }
@@ -435,7 +447,64 @@ struct LlvmModuleEmitter {
         let output = StringBuilder.new(); output.append_line("; Rolang full MIR backend: LLVM text, 64-bit pointers, 32-byte ARC header");
         output.append(self.globals.to_string());
         for name in self.signature_order { if let signature = self.signatures[name] { if !signature.defined { output.append_line(signature.declaration()); } } }
-        output.append(self.bodies.to_string()); LlvmResult { text: output.to_string(), errors: self.errors }
+        output.append(self.bodies.to_string());
+        if self.debug_unit >= 0 {
+            if self.debug_declare { output.append_line("declare void @llvm.dbg.declare(metadata, metadata, metadata)"); }
+            let version = self.meta("!{i32 7, !\"Dwarf Version\", i32 4}");
+            let format = self.meta("!{i32 2, !\"Debug Info Version\", i32 3}");
+            output.append_line(f"!llvm.dbg.cu = !{{!{self.debug_unit}}}");
+            output.append_line(f"!llvm.module.flags = !{{!{version}, !{format}}}");
+            output.append(self.debug_lines.to_string());
+        }
+        LlvmResult { text: output.to_string(), errors: self.errors }
+    }
+    def meta(text: String, distinct: Bool = false) -> i32 {
+        let id = self.next_meta; self.next_meta += 1;
+        var prefix = ""; if distinct { prefix = "distinct "; }
+        self.debug_lines.append_line(f"!{id} = {prefix}{text}");
+        id
+    }
+    def debug_file(path: String) -> i32 {
+        if let known = self.debug_files[path] { return known; }
+        let id = self.meta(f"!DIFile(filename: {llvm_quote(path_basename(path))}, directory: {llvm_quote(path_dirname(path))})");
+        self.debug_files[path] = id;
+        if self.debug_unit < 0 {
+            self.debug_unit = self.meta(f"!DICompileUnit(language: DW_LANG_C99, file: !{id}, producer: \"rolangc\", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug)", true);
+            self.debug_signature = self.meta("!DISubroutineType(types: !{})");
+        }
+        id
+    }
+    // Variable types: numbers and Bool as base types, managed objects as named pointers.
+    def debug_type(type_id: TypeId) -> i32? {
+        if let known = self.debug_types[type_id.id] { return known; }
+        let table = self.result.type_table;
+        let name = table.format_type(type_id);
+        var text = "";
+        if let info = table.get_type(type_id) { switch info.data {
+            case .primitive(let primitive):
+                let width = primitive.integer_width();
+                if width > 0 {
+                    var encoding = "DW_ATE_unsigned"; if primitive.is_signed() { encoding = "DW_ATE_signed"; }
+                    text = f"!DIBasicType(name: {llvm_quote(name)}, size: {width}, encoding: {encoding})";
+                } else if primitive.is_float() {
+                    var size = 64; switch primitive { case .f32: size = 32; default: {} }
+                    text = f"!DIBasicType(name: {llvm_quote(name)}, size: {size}, encoding: DW_ATE_float)";
+                } else { switch primitive {
+                    case .bool_type: text = f"!DIBasicType(name: \"Bool\", size: 8, encoding: DW_ATE_boolean)";
+                    default: {}
+                } }
+            default: {}
+        } }
+        if text.len() == 0 && self.cache.spelling(type_id).equals("ptr") {
+            // A typedef keeps the Rolang type name visible in debuggers.
+            var pointer = self.debug_types[-1] ?? -1;
+            if pointer < 0 { pointer = self.meta("!DIDerivedType(tag: DW_TAG_pointer_type, baseType: null, size: 64)"); self.debug_types[-1] = pointer; }
+            text = f"!DIDerivedType(tag: DW_TAG_typedef, name: {llvm_quote(name)}, baseType: !{pointer})";
+        }
+        if text.len() == 0 { return nil; }
+        let id = self.meta(text);
+        self.debug_types[type_id.id] = id;
+        id
     }
 }
 
@@ -446,8 +515,14 @@ struct LlvmFunctionEmitter {
     let ir: LlvmIrBuilder;
     let local_types: Dict<i32, TypeId>;
     let address_sources: Dict<i32, MirLocalId>;
+    // Debug information: the function's DISubprogram (-1 without -g) and its DILocations.
+    var debug_scope: i32;
+    var debug_file: i32;
+    var debug_line: i32;
+    let debug_locations: Dict<String, i32>;
     static def new(module: LlvmModuleEmitter, func: MirFunction, name: String) -> LlvmFunctionEmitter {
-        let emitter = LlvmFunctionEmitter { module, func, name, ir: LlvmIrBuilder.new(module.errors), local_types: Dict<i32, TypeId>.with_capacity(16, 0), address_sources: Dict<i32, MirLocalId>.with_capacity(16, 0) };
+        let emitter = LlvmFunctionEmitter { module, func, name, ir: LlvmIrBuilder.new(module.errors), local_types: Dict<i32, TypeId>.with_capacity(16, 0), address_sources: Dict<i32, MirLocalId>.with_capacity(16, 0),
+            debug_scope: -1, debug_file: -1, debug_line: 0, debug_locations: Dict<String, i32>.new() };
         for local in func.locals { emitter.local_types[local.id.id] = local.type_id; }
         // Recover only single-definition address casts. Reassignments in any
         // block invalidate provenance, independent of block emission order.
@@ -468,6 +543,48 @@ struct LlvmFunctionEmitter {
         emitter
     }
     def type(type_id: TypeId) -> String { self.module.cache.spelling(type_id) }
+    // With -g, the first source position in the function; functions without one get no debug info.
+    def first_location() -> MirDebugLocationData? {
+        if !self.module.debug { return nil; }
+        for id in self.func.block_order { if let block = self.func.get_block(id) { for op in block.ops {
+            switch op { case .debug_location(let data): return data; default: {} }
+        } } }
+        nil
+    }
+    def begin_debug(at: MirDebugLocationData) -> i32 {
+        self.debug_file = self.module.debug_file(at.file);
+        self.debug_line = at.line;
+        var display = self.name; if display.equals("__rolang_user_main") { display = "main"; }
+        self.debug_scope = self.module.meta(f"!DISubprogram(name: {llvm_quote(display)}, linkageName: {llvm_quote(self.name)}, scope: !{self.debug_file}, file: !{self.debug_file}, line: {at.line}, type: !{self.module.debug_signature}, scopeLine: {at.line}, spFlags: DISPFlagDefinition, unit: !{self.module.debug_unit})", true);
+        self.debug_scope
+    }
+    def locate(at: MirDebugLocationData) -> Void {
+        if self.debug_scope < 0 { return; }
+        let key = f"{at.line}:{at.column}";
+        var id = self.debug_locations[key] ?? -1;
+        if id < 0 {
+            id = self.module.meta(f"!DILocation(line: {at.line}, column: {at.column}, scope: !{self.debug_scope})");
+            self.debug_locations[key] = id;
+        }
+        self.ir.debug = f", !dbg !{id}";
+    }
+    // Named user variables and parameters, described at their stack slots.
+    def declare_variables() -> Void {
+        var arg_index = 0;
+        for local in self.func.locals {
+            var arg = 0;
+            if local.is_arg { arg_index += 1; arg = arg_index; }
+            // Compiler-made locals and the async frame parameter stay hidden.
+            if local.name.starts_with("__") || local.name.len() == 0 || local.name.equals("_frame") { continue; }
+            if !local.is_arg { if let sid = local.symbol_id {} else { continue; } }
+            if self.type(local.type_id).equals("void") { continue; }
+            guard let type = self.module.debug_type(local.type_id) else { continue; }
+            var argument = ""; if arg > 0 { argument = f"arg: {arg}, "; }
+            let variable = self.module.meta(f"!DILocalVariable(name: {llvm_quote(local.name)}, {argument}scope: !{self.debug_scope}, file: !{self.debug_file}, line: {self.debug_line}, type: !{type})");
+            self.ir.line(f"  call void @llvm.dbg.declare(metadata ptr {self.local(local.id)}, metadata !{variable}, metadata !DIExpression())");
+            self.module.debug_declare = true;
+        }
+    }
     def constant(type: String, text: String) -> LlvmValue { LlvmValue { type, text } }
     def local(id: MirLocalId) -> String { f"%local{id.id}" }
     def result(id: MirLocalId, value: LlvmValue) -> Void {
@@ -526,11 +643,16 @@ struct LlvmFunctionEmitter {
         let header = StringBuilder.new(); header.append("define " + (self.module.linkages[self.name] ?? "") + signature.result + " " + llvm_global(self.name) + "(");
         for i in 0..<self.func.args.len() { if i > 0 { header.append(", "); } header.append(signature.params[i] + f" %arg{i}"); }
         // Frame pointers keep panic backtraces and profilers able to walk the stack.
-        header.append(") \"frame-pointer\"=\"non-leaf\" {"); self.ir.line(header.to_string());
+        header.append(") \"frame-pointer\"=\"non-leaf\"");
+        let first = self.first_location();
+        if let at = first { header.append(f" !dbg !{self.begin_debug(at)}"); }
+        header.append(" {"); self.ir.line(header.to_string());
+        if let at = first { self.locate(at); }
         // A dedicated prologue keeps every alloca outside MIR loops and safely
         // dominates all blocks even when MIR block order differs from entry.
         self.ir.line("entry:");
         for local in self.func.locals { let type = self.type(local.type_id); if !type.equals("void") { self.ir.line("  " + self.local(local.id) + " = alloca " + type); } }
+        if self.debug_scope >= 0 { self.declare_variables(); }
         for i in 0..<self.func.args.len() { let arg = self.func.args[i]; self.ir.store(self.constant(signature.params[i], f"%arg{i}"), signature.params[i], self.local(arg.id)); }
         self.ir.line(f"  br label %bb{self.func.entry_block.id}");
         for id in self.func.block_order { if let block = self.func.get_block(id) {
@@ -590,6 +712,7 @@ struct LlvmFunctionEmitter {
             case .task_complete(let data): self.task_complete(data);
             case .scheduler_run(let data): self.scheduler_run(data);
             case .task_get_result(let data): self.task_result(data);
+            case .debug_location(let data): self.locate(data);
             case .suspend(let data): self.call("rt_task_yield", "void", Vec<LlvmValue>.new()); if let result = data.result { self.result(result, self.constant(self.type(data.result_type), "zeroinitializer")); }
         }
     }
@@ -685,6 +808,11 @@ struct LlvmFunctionEmitter {
             default: {}
         } }
         let value = self.operand(data.operand); let source = value.type;
+        // `p as T` is the inverse of `x as RawPtr`, which takes x's address: it
+        // reads the T reference stored at p.
+        if self.module.result.type_table.format_type(data.operand.type_id()).equals("RawPtr") && self.module.cache.managed(data.target_type) {
+            self.result(data.result, self.ir.load("ptr", value.text)); return;
+        }
         var result = value; let source_width = llvm_width(source); let target_width = llvm_width(target);
         let source_float = source.equals("float") || source.equals("double"); let target_float = target.equals("float") || target.equals("double");
         let signed = self.module.result.type_table.is_signed_integer(data.operand.type_id());
@@ -986,6 +1114,6 @@ struct LlvmFunctionEmitter {
     }
 }
 
-pub def compile_to_llvm(result: MirPostResult, arena: AstArena, owner: String = "") -> LlvmResult {
-    let emitter = LlvmModuleEmitter.new(result, owner); emitter.emit(arena)
+pub def compile_to_llvm(result: MirPostResult, arena: AstArena, owner: String = "", debug: Bool = false) -> LlvmResult {
+    let emitter = LlvmModuleEmitter.new(result, owner); emitter.debug = debug; emitter.emit(arena)
 }

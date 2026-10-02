@@ -58,10 +58,20 @@ pub struct LlvmIrBuilder {
     pub let output: StringBuilder;
     pub let errors: Vec<String>;
     var next_id: i32;
+    // With debug info, the `, !dbg !N` attachment for instructions.
+    pub var debug: String;
     pub static def new(errors: Vec<String>) -> LlvmIrBuilder {
-        LlvmIrBuilder { output: StringBuilder.new(), errors, next_id: 0 }
+        LlvmIrBuilder { output: StringBuilder.new(), errors, next_id: 0, debug: "" }
     }
-    pub def line(text: String) -> Void { self.output.append_line(text); }
+    // Instructions are indented by two spaces; labels, headers and the
+    // `switch` case lines (four spaces, or ending in `[`) take no attachment.
+    pub def line(text: String) -> Void {
+        if self.debug.len() > 0 && text.starts_with("  ") && !text.starts_with("    ") && !text.ends_with("[") && !text.starts_with("  ;") {
+            self.output.append_line(text + self.debug);
+            return;
+        }
+        self.output.append_line(text);
+    }
     pub def fresh() -> String { let id = self.next_id; self.next_id += 1; f"v{id}" }
     pub def value(type: String, expression: String) -> LlvmValue {
         let name = "%" + self.fresh(); self.line("  " + name + " = " + expression);

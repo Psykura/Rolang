@@ -311,6 +311,8 @@ sink.append(" until_handle=");
 if let x = data.until_handle { sink.append(mir_print_operand(x, types)); } else { sink.append("nil"); }
 sink.append(" destroy_after=");
 sink.append(data.destroy_after.to_string());
+case .debug_location(let data):
+sink.append(f" {data.file}:{data.line}:{data.column}");
 case .task_get_result(let data):
 sink.append(" result=");
 sink.append("%" + data.result.id.to_string());

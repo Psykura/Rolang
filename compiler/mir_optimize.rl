@@ -22,7 +22,8 @@ def mir_inline_candidates(program: MirProgram, types: TypeTable, structs: Dict<i
     for func in program.functions {
         if func.is_async || func.block_order.len() != 1 || !mir_scalarish(func.ret_type, types, structs) { continue; }
         guard let block = func.get_block(func.entry_block) else { continue; }
-        if block.ops.len() > 48 { continue; }
+        var size = 0; for op in block.ops { switch op { case .debug_location: {} default: size += 1; } }
+        if size > 48 { continue; }
         var qualifies = false; if let term = block.terminator { switch term { case .return_stmt: qualifies = true; default: {} } }
         for local in func.locals { if !mir_scalarish(local.type_id, types, structs) { qualifies = false; } }
         for op in block.ops { switch op {
@@ -50,7 +51,8 @@ def mir_inline(func: MirFunction, candidates: Dict<String, MirFunction>) -> Bool
                         func.locals.push(MirLocal { id, symbol_id: nil, name: f"__inl_{callee.name}_{local.name}", type_id: local.type_id, is_mutable: true, is_arg: false });
                     }
                     var index = 0; for arg in callee.args { ops.push(MirOp.assign(MirAssignData { place: MirPlace { base: rewriter.local(arg.id), projections: Vec<MirProjection>.new(), type_id: arg.type_id }, value: call.args[index] })); index += 1; }
-                    for body_op in body.ops { ops.push(rewriter.op(body_op)); }
+                    // Inlined statements keep the caller's position.
+                    for body_op in body.ops { switch body_op { case .debug_location: {} default: ops.push(rewriter.op(body_op)); } }
                     if let result = call.result { if let term = body.terminator { switch term { case .return_stmt(let d): if let value = d.value {
                         ops.push(MirOp.assign(MirAssignData { place: MirPlace { base: result, projections: Vec<MirProjection>.new(), type_id: call.result_type }, value: rewriter.operand(value) }));
                     } default: {} } } }

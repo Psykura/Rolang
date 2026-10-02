@@ -27,6 +27,8 @@ pub struct CompileOptions {
     pub var cache_dir: String = "";
     pub var cache_context: String = "";
     pub var verbose: Bool = false;
+    // -g: DWARF line tables and variables; on Darwin a .dSYM beside the executable.
+    pub var debug_info: Bool = false;
     pub let include_roots: Vec<String>;
     pub static def new() -> CompileOptions {
         CompileOptions { emit: "exe", opt_level: 2, output: "", target: "", runtime: "", stdlib: "", clang: "", cc: "",
@@ -158,6 +160,8 @@ pub struct CompilationDriver {
         true
     }
     def cache(entry: String, output: String) -> BuildCache? {
+        // Debug builds also produce a .dSYM, which the cache does not store.
+        if self.options.debug_info { return nil; }
         if self.options.cache_dir.len() == 0 || !(self.options.emit.equals("exe") || self.options.emit.equals("obj") || self.options.emit.equals("module")) { return nil; }
         guard let compiler = executable_path() else { return nil; }
         guard let compiler_hash = file_sha256(compiler) else { return nil; }
@@ -280,6 +284,7 @@ pub struct CompilationDriver {
         let frontend = Frontend.new(self.options.include_roots, self.options.cache_dir.len() > 0);
         if self.options.target.len() > 0 { frontend.module_target = self.options.target; }
         if emit.equals("module") { frontend.symbol_table.separate_modules = true; }
+        frontend.debug_info = self.options.debug_info;
         frontend.load(entry); frontend.resolve_modules();
         var content = "";
         if emit.equals("mir") {
@@ -293,7 +298,7 @@ pub struct CompilationDriver {
                     if emit.equals("module") { for func in post.program.functions {
                         if func.name.equals("main") { return self.fail("A library module cannot define main"); }
                     } }
-                    let llvm = compile_to_llvm(post, frontend.arena, owner);
+                    let llvm = compile_to_llvm(post, frontend.arena, owner, self.options.debug_info);
                     // Code generation reports compiler defects, except for the release/trace hook ABI check.
                     for error in llvm.errors {
                         if error.contains(" has an invalid signature; ") { self.error(error); } else { self.error(internal_compiler_error(error)); }
@@ -350,6 +355,7 @@ pub struct CompilationDriver {
             compile.push("-o"); compile.push(runtime_obj);
             var runtime_opt = 0; if self.options.opt_level >= 1 { runtime_opt = 3; }
             compile.push("-O" + runtime_opt.to_string()); compile.push("-DROLANG_SINGLE_THREADED");
+            if self.options.debug_info { compile.push("-g"); }
             if runtime_opt >= 1 { compile.push("-fno-semantic-interposition"); compile.push("-fvisibility=hidden"); }
             if !self.options.lto.equals("none") { compile.push("-flto=" + self.options.lto); }
             // Runtime C flags use whitespace-separated arguments.
@@ -394,6 +400,7 @@ pub struct CompilationDriver {
                 } else { link.push(dependency); }
             }
             if !self.command(link, "Linking") { return self.fail(); }
+            if self.options.debug_info && !self.debug_symbols(artifact, output) { return self.fail(); }
         }
         if emit.equals("module") {
             guard let data = fs_read_text(object, 134217728) else { return self.fail("Cannot read native module object"); }
@@ -413,6 +420,18 @@ pub struct CompilationDriver {
         }
         if self.options.verbose { eprintln("Compiled -> " + output); }
         self.result(true, output, false)
+    }
+    // Darwin keeps DWARF in the object files, which are temporary: collect it
+    // into OUTPUT.dSYM, where lldb finds it next to the executable.
+    def debug_symbols(artifact: String, output: String) -> Bool {
+        var target = self.options.target; if target.len() == 0 { target = host_target(); }
+        if !target.contains("apple") { return true; }
+        var tool = path_join(path_dirname(self.clang), "dsymutil");
+        if !path_is_file(tool) {
+            guard let found = find_tool("dsymutil") else { self.error("dsymutil not found; it is needed for -g on Darwin"); return false; }
+            tool = found;
+        }
+        self.command([tool, artifact, "-o", output + ".dSYM"], "Debug symbols")
     }
     def emit_text(content: String, output: String) -> CompileResult {
         if output.len() == 0 || output.equals("-") { print(content); }

@@ -33,6 +33,9 @@ compiler to rebuild itself identically. Add a test for every fixed bug and
 language change. CI runs the bootstrap, build, self-hosting check and tests for
 every push to main and every pull request.
 
+Test files may set compiler options with a `// compile-flags:` header;
+`ROLANG_TEST_FLAGS` adds options to every case (CI also runs `-g -O0`).
+
 When the compiler sources start using a feature newer than BOOTSTRAP_VERSION,
 release a version containing that feature first, then raise BOOTSTRAP_VERSION.
 

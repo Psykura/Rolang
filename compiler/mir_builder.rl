@@ -6,7 +6,7 @@ import "operators.rl"
 import "module_abi.rl"
 
 struct MirLoopScope { let header: MirBlockId; let exit: MirBlockId; let defer_depth: i32; }
-pub struct MirPendingLambda { pub let name: String; pub let lambda: HirLambdaData; pub let captures: Vec<CaptureInfo>; pub let closure_type: TypeId; }
+pub struct MirPendingLambda { pub let name: String; pub let lambda: HirLambdaData; pub let captures: Vec<CaptureInfo>; pub let closure_type: TypeId; pub let location: HirLocation?; }
 
 pub struct MirFunctionBuilder {
     pub let ast: AstArena;
@@ -27,6 +27,9 @@ pub struct MirFunctionBuilder {
     pub let pending_starters: Vec<MirFunction>;
     pub var captures: Vec<CaptureInfo>;
     pub var lambda_mode: Bool;
+    // With -g, statements and the function entry are preceded by debug_location ops.
+    pub var debug: Bool;
+    pub var location: HirLocation?;
     var next_value_id: i32;
     var current: MirBlockId?;
     var loops: Vec<MirLoopScope>;
@@ -35,7 +38,7 @@ pub struct MirFunctionBuilder {
         MirFunctionBuilder { ast, hir, program, func, types, symbols, members: MemberResolver.new(ast, types, symbols), args: Vec<MirLocal>.new(), locals: Vec<MirLocal>.new(),
             blocks: Dict<i32, MirBlock>.with_capacity(16, 0), block_order: Vec<MirBlockId>.new(),
             errors: Vec<String>.new(), bindings: Dict<i32, MirLocalId>.with_capacity(16, 0),
-            pending_lambdas: Vec<MirPendingLambda>.new(), pending_starters: Vec<MirFunction>.new(), captures: Vec<CaptureInfo>.new(), lambda_mode: false, next_value_id: 0,
+            pending_lambdas: Vec<MirPendingLambda>.new(), pending_starters: Vec<MirFunction>.new(), captures: Vec<CaptureInfo>.new(), lambda_mode: false, debug: false, location: nil, next_value_id: 0,
             current: nil, loops: Vec<MirLoopScope>.new(), defer_scopes: Vec<Vec<HirId>>.new() }
     }
     def void_type() -> TypeId { self.types.void_type }
@@ -83,6 +86,7 @@ pub struct MirFunctionBuilder {
     def assign(place: MirPlace, value: MirOperand) -> Void { self.emit(MirOp.assign(MirAssignData { place, value })); }
     pub def build() -> MirFunction {
         let entry = self.create_block(); self.switch_to(entry);
+        self.mark(self.location);
         var param_index = 0;
         for param in self.func.params { if let node = self.hir.get(param) { switch node.form { case .param(let data):
             var symbol_id: SymbolId? = data.symbol_id;
@@ -130,8 +134,13 @@ pub struct MirFunctionBuilder {
             default: self.errors.push(internal_compiler_error("Expected HIR block"));
         }
     }
+    def mark(location: HirLocation?) -> Void {
+        if !self.debug { return; }
+        if let at = location { self.emit(MirOp.debug_location(MirDebugLocationData { file: at.file, line: at.line, column: at.column })); }
+    }
     pub def lower_stmt(id: HirId) -> Void {
         guard let node = self.hir.get(id) else { return; }
+        self.mark(self.hir.location(id));
         switch node.form {
             case .block: self.lower_block(id);
             case .var_decl(let data): self.lower_var_decl(data);
@@ -899,7 +908,7 @@ pub struct MirFunctionBuilder {
             self.assign(place, self.copy(increment, i64_type)); self.branch(header);
         }
     }
-    def lower_lambda(data: HirLambdaData) -> MirOperand {
+    def lower_lambda(data: HirLambdaData, location: HirLocation? = nil) -> MirOperand {
         let outer = Dict<i32, TypeId>.with_capacity(16, 0);
         for local in self.locals { if let sid = local.symbol_id { outer[sid.id] = local.type_id; } }
         let captures = analyze_captures(self.hir, data, outer, self.symbols);
@@ -920,7 +929,7 @@ pub struct MirFunctionBuilder {
         var return_type = self.void_type(); if let signature = self.types.get_function_data(data.type_id) { return_type = signature.return_type; }
         var is_async = false; if let signature = self.types.get_function_data(data.type_id) { is_async = signature.is_async; }
         let closure_type = self.types.make_closure(params, return_type, capture_types, is_async);
-        self.pending_lambdas.push(MirPendingLambda { name, lambda: data, captures, closure_type });
+        self.pending_lambdas.push(MirPendingLambda { name, lambda: data, captures, closure_type, location: location ?? self.location });
         var entry = name; if is_async { entry = name + "$start"; }
         let result = self.temp(closure_type); self.emit(MirOp.make_closure(MirMakeClosureData {
             result, func_name: entry, captures: capture_values, result_type: closure_type })); self.copy(result, closure_type)
@@ -1085,7 +1094,7 @@ pub struct MirFunctionBuilder {
             case .optional_match(let data): return self.lower_optional_match(data);
             case .try_expr(let data): return self.lower_try(data);
             case .type_check(let data): return self.lower_type_check(data);
-            case .lambda(let data): return self.lower_lambda(data);
+            case .lambda(let data): return self.lower_lambda(data, self.hir.location(id));
             case .switch_expr(let data):
                 let result = self.create_local("__switch_value", data.type_id, false, false, data.result_symbol);
                 if self.types.is_heap_type(data.type_id) { self.assign(self.place(result, data.type_id), self.nil_operand(data.type_id)); }
@@ -1129,9 +1138,11 @@ pub struct MirBuilder {
     pub let errors: Vec<String>;
     let pending: Vec<MirPendingLambda>;
     let starter_names: Dict<String, Bool>;
-    pub static def new(mono: MonomorphizationResult) -> MirBuilder { MirBuilder { mono, errors: Vec<String>.new(), pending: Vec<MirPendingLambda>.new(), starter_names: Dict<String, Bool>.with_capacity(8, 1) } }
-    def build_function(data: HirFunctionData, functions: Vec<MirFunction>) -> Void {
+    let debug: Bool;
+    pub static def new(mono: MonomorphizationResult, debug: Bool = false) -> MirBuilder { MirBuilder { mono, errors: Vec<String>.new(), pending: Vec<MirPendingLambda>.new(), starter_names: Dict<String, Bool>.with_capacity(8, 1), debug } }
+    def build_function(data: HirFunctionData, functions: Vec<MirFunction>, location: HirLocation? = nil) -> Void {
         let builder = MirFunctionBuilder.new(self.mono.ast, self.mono.arena, self.mono.program, data, self.mono.type_table, self.mono.symbol_table);
+        builder.debug = self.debug; builder.location = location;
         functions.push(builder.build());
         for error in builder.errors { self.errors.push(data.name + ": " + error); }
         for lambda in builder.pending_lambdas { self.pending.push(lambda); }
@@ -1149,7 +1160,8 @@ pub struct MirBuilder {
         let data = HirFunctionData { name: pending.name, symbol_id: SymbolId { id: -1 }, params, return_type,
             body: pending.lambda.body, is_async, is_method: false, is_static: false };
         let builder = MirFunctionBuilder.new(self.mono.ast, self.mono.arena, self.mono.program, data, self.mono.type_table, self.mono.symbol_table);
-        builder.captures = pending.captures; builder.lambda_mode = true; let function = builder.build();
+        builder.captures = pending.captures; builder.lambda_mode = true; builder.debug = self.debug; builder.location = pending.location;
+        let function = builder.build();
         for error in builder.errors { self.errors.push(error); }
         for child in builder.pending_lambdas { self.build_lambda(child, functions); }
         self.add_starters(builder.pending_starters, functions);
@@ -1180,7 +1192,7 @@ pub struct MirBuilder {
                 if !name.starts_with(owner + "_") { name = owner + "_" + name; }
                 self.build_function(HirFunctionData { name, symbol_id: method.symbol_id, params,
                     return_type: method.return_type, body: method.body, is_async: method.is_async,
-                    is_method: true, is_static: method.is_static }, functions);
+                    is_method: true, is_static: method.is_static }, functions, self.mono.arena.location(method_id));
             default: self.errors.push(internal_compiler_error("Expected HIR method"));
         }
     }
@@ -1202,7 +1214,7 @@ pub struct MirBuilder {
             case .program(let program): for id in program.items {
                 guard let node = self.mono.arena.get(id) else { continue; }
                 switch node.form {
-                    case .function(let data): self.build_function(data, functions);
+                    case .function(let data): self.build_function(data, functions, self.mono.arena.location(id));
                     case .extern_func(let data):
                         let params = Vec<(String, TypeId)>.new();
                         for param in data.params { if let p = self.mono.arena.get(param) { switch p.form {

@@ -222,6 +222,8 @@ var until_handle: MirOperand? = nil; if let x = data.until_handle { until_handle
 return MirOp.scheduler_run(MirSchedulerRunData { until_handle: until_handle, destroy_after: data.destroy_after });
 case .task_get_result(let data):
 return MirOp.task_get_result(MirTaskGetResultData { result: self.local(data.result), task_handle: self.operand(data.task_handle), result_type: data.result_type, consume: data.consume });
+case .debug_location(let data):
+return MirOp.debug_location(data);
 } }
 pub def term(value: MirTerm) -> MirTerm { switch value {
 case .branch(let data):

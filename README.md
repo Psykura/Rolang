@@ -70,6 +70,7 @@ to PATH when using the installed command.
 | `rolangc program.rl -o program` | Native executable; defaults to O2 |
 | `rolangc -O3 program.rl` | Select O0, O1, O2 or O3 |
 | `rolangc -c program.rl -o program.o` | Object file |
+| `rolangc -g -O0 program.rl` | Debug build for lldb/gdb; a `program.dSYM` on macOS |
 | `rolangc --emit llvm program.rl` | LLVM text |
 | `rolangc --emit llvm-opt -O3 program.rl` | Backend-optimized LLVM |
 | `rolangc --emit asm program.rl` | Assembly |

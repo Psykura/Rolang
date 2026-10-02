@@ -4,6 +4,7 @@
 # KIND is "run" (must compile and exit with the expected status, optionally
 # printing NAME.stdout) or "fail" (must not compile; output contains the
 # `// expect-error:` text). PATH is a .rl file or a directory with main.rl.
+# A `// compile-flags:` header and ROLANG_TEST_FLAGS add compiler options.
 RC=$1 KIND=$2 CASE=$3
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 NAME=${CASE#"$ROOT"/}
@@ -13,7 +14,9 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/rolang-test.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 header() { sed -n "s|^// $1: ||p" "$SOURCE" | head -1; }
 
-OUTPUT=$(cd "$DIR" && "$RC" "$SOURCE" -o "$WORK/program" 2>&1); STATUS=$?
+FLAGS="$(header compile-flags) ${ROLANG_TEST_FLAGS:-}"
+# shellcheck disable=SC2086 # flags are whitespace-separated options
+OUTPUT=$(cd "$DIR" && "$RC" $FLAGS "$SOURCE" -o "$WORK/program" 2>&1); STATUS=$?
 if [ "$KIND" = fail ]; then
     WANT=$(header expect-error)
     if [ -z "$WANT" ]; then echo "FAIL $NAME: missing // expect-error: header"; exit 0; fi

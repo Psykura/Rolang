@@ -124,7 +124,15 @@ pub struct HirBuilder {
     def build_function(id: NodeId, data: FuncDeclAst, method: Bool) -> HirId {
         let params = self.params(data.params); let ret = self.return_type(data.return_type);
         var body: HirId? = nil; if let ref = data.body { body = self.block(ref); }
-        self.arena.add(HirForm.function(HirFunctionData { name: data.name, symbol_id: self.symbol(id, data.name, SymbolKind.function(), Namespace.value()), params, return_type: ret, body, is_async: data.is_async, is_method: method, is_static: data.is_static }))
+        let function = self.arena.add(HirForm.function(HirFunctionData { name: data.name, symbol_id: self.symbol(id, data.name, SymbolKind.function(), Namespace.value()), params, return_type: ret, body, is_async: data.is_async, is_method: method, is_static: data.is_static }));
+        self.located(function, id)
+    }
+    def located(hir: HirId, id: NodeId) -> HirId { self.arena.set_location(hir, self.ast_location(id)); hir }
+    def ast_location(id: NodeId) -> HirLocation? {
+        guard let node = self.ast.get(id) else { return nil; }
+        guard let span = node.span else { return nil; }
+        guard let file = self.ast.source_module(id) else { return nil; }
+        HirLocation { file, line: span.line, column: span.column }
     }
     def item(id: NodeId) -> HirId? {
         guard let node = self.ast.get(id) else { return nil; }
@@ -179,6 +187,7 @@ pub struct HirBuilder {
             let id = ids[index]; var demoted = false;
             if demote_tail && index == ids.len() - 1 { if let node = self.ast.get(id) { switch node.form { case .return_stmt(let data): if data.implicit { if let ref = data.value { out.push(self.arena.add(HirForm.expr_stmt(HirExprStmtData { expr: self.expr(ref) }))); demoted = true; } } default: {} } } }
             if !demoted { out.push(self.stmt(id)); }
+            self.arena.set_location(out[out.len() - 1], self.ast_location(id));
         }
         self.arena.add(HirForm.block(HirBlockData { statements: out }))
     }
@@ -362,7 +371,7 @@ pub struct HirBuilder {
                 }
                 var body = self.statements(data.body);
                 if destructure.len() > 0 { if let node = self.arena.get(body) { switch node.form { case .block(let block): for stmt in block.statements { destructure.push(stmt); } body = self.arena.add(HirForm.block(HirBlockData { statements: destructure })); default: {} } } }
-                return self.arena.add(HirForm.lambda(HirLambdaData { type_id, params, body, captures: Vec<SymbolId>.new() }));
+                return self.located(self.arena.add(HirForm.lambda(HirLambdaData { type_id, params, body, captures: Vec<SymbolId>.new() })), ref);
             case .struct_literal(let data):
                 var sid = SymbolId { id: -1 }; if let info = self.type_table.get_type(type_id) { switch info.data { case .struct_type(let value): sid = value.symbol_id ?? sid; default: {} } }
                 let arguments = self.arguments(data.arguments);

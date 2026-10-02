@@ -200,6 +200,7 @@ pub struct MirTaskGetResultData {
     pub var consume: Bool;
 }
 
+pub struct MirDebugLocationData { pub let file: String; pub let line: i32; pub let column: i32; }
 pub enum MirOp {
     case bin_op(MirBinOpData);
     case cmp_op(MirCmpOpData);
@@ -237,6 +238,8 @@ pub enum MirOp {
     case alloc_async_frame(MirAllocAsyncFrameData);
     case scheduler_run(MirSchedulerRunData);
     case task_get_result(MirTaskGetResultData);
+    // With -g: the source position of the ops that follow, up to the next marker.
+    case debug_location(MirDebugLocationData);
     pub def kind() -> String {
         switch self {
             case .bin_op(_): "BinOp";
@@ -275,6 +278,7 @@ pub enum MirOp {
             case .alloc_async_frame(_): "AllocAsyncFrame";
             case .scheduler_run(_): "SchedulerRun";
             case .task_get_result(_): "TaskGetResult";
+            case .debug_location(_): "DebugLocation";
         }
     }
 }

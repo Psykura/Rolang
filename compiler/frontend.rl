@@ -51,6 +51,8 @@ pub struct Frontend {
     pub var module_target: String;
     let failed_sources: Dict<String, String>;
     var resolution_errors: i32;
+    // -g: MIR carries statement positions for debug information.
+    pub var debug_info: Bool;
     pub static def new(include_roots: Vec<String> = Vec<String>.new(), track_inputs: Bool = false) -> Frontend {
         let graph = ModuleGraph.new();
         var stdlib_path: String? = nil;
@@ -69,7 +71,7 @@ pub struct Frontend {
             checked_program: nil, type_result: nil, hir_result: nil, mono_result: nil, mir_result: nil, post_result: nil, post_opt_level: -1,
             import_targets: Dict<i32, String>.with_capacity(16, 0), stdlib_path,
             module_sources: Dict<String, ModuleSource>.with_capacity(16, 1), module_objects: Dict<String, String>.with_capacity(16, 1),
-            artifact_paths: Vec<String>.new(), implicit_imports: Dict<i32, String>.with_capacity(16, 0), module_target: host_target(), failed_sources: Dict<String, String>.new(), resolution_errors: 0 }
+            artifact_paths: Vec<String>.new(), implicit_imports: Dict<i32, String>.with_capacity(16, 0), module_target: host_target(), failed_sources: Dict<String, String>.new(), resolution_errors: 0, debug_info: false }
     }
     pub def has_errors() -> Bool { error_count(self.diagnostics) > 0 }
     def error(message: String, file: String? = nil, span: Span? = nil) -> Void {
@@ -354,7 +356,7 @@ pub struct Frontend {
         if let cached = self.mir_result { return cached; }
         guard let mono = self.monomorphize_modules() else { return nil; }
         if self.has_errors() { return nil; }
-        let result = MirBuilder.new(mono).build();
+        let result = MirBuilder.new(mono, self.debug_info).build();
         if !result.has_errors() { elide_outparam_default_init(result.program, result.type_table); }
         self.mir_result = result;
         for error in result.errors { self.error(error); }
