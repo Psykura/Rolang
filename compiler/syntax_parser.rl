@@ -198,6 +198,28 @@ def rebase_template_span(local: Span, origin: (i32, i32)) -> Span {
              origin.0 + local.end_line - 1, end_column)
 }
 
+// The `:` starting a format specification in an interpolation, or -1: the
+// first one outside brackets and strings, unless a `?` (a ternary) precedes it.
+def format_spec_colon(raw: String, start: i32, limit: i32) -> i32 {
+    var depth = 0;
+    var index = start;
+    while index < limit {
+        let byte = raw.byte_at(index);
+        if byte == 34 || byte == 39 {
+            index += 1;
+            while index < limit && raw.byte_at(index) != byte {
+                if raw.byte_at(index) == 92 { index += 1; }
+                index += 1;
+            }
+        } else if byte == 40 || byte == 91 || byte == 123 { depth += 1; }
+        else if byte == 41 || byte == 93 || byte == 125 { depth -= 1; }
+        else if depth == 0 && byte == 63 { return -1; }
+        else if depth == 0 && byte == 58 { return index; }
+        index += 1;
+    }
+    -1
+}
+
 def template_expression_end(raw: String, start: i32, limit: i32) -> i32 {
     var depth = 1;
     var index = start;
@@ -653,6 +675,22 @@ struct ExpressionCursor {
         }), span)
     }
     def template_value(token: LexToken, start: i32, end: i32) -> NodeId? {
+        // `{value:spec}` formats with a specification; see FormatSpec.
+        var spec: String? = nil;
+        let colon = format_spec_colon(token.text, start, end);
+        if colon >= 0 {
+            let text = token.text.substring(colon + 1, end - colon - 1);
+            if let parsed = FormatSpec.parse(text) {} else {
+                let at = template_position(token, colon + 1);
+                self.error = SyntaxError { message: f"invalid format specification '{text}'", span: Span.new(at.0, at.1, at.0, at.1 + (text.scalar_count())) };
+                return nil;
+            }
+            spec = text;
+            return self.template_call(token, start, colon, spec);
+        }
+        self.template_call(token, start, end, spec)
+    }
+    def template_call(token: LexToken, start: i32, end: i32, spec: String?) -> NodeId? {
         let raw = token.text.substring(start, end - start);
         let lexed = tokenize(raw);
         let origin = template_position(token, start);
@@ -674,11 +712,18 @@ struct ExpressionCursor {
         }
         guard let value = result.expression else { self.fail("interpolation expression"); return nil; }
         guard let node = self.arena.get(value) else { self.fail("interpolation expression"); return nil; }
+        let arguments = Vec<NodeId>.new();
+        var method = "to_string";
+        if let text = spec {
+            method = "format";
+            let literal = self.arena.add(NodeForm.literal(LiteralAst { value: LiteralValue.text(text), kind: "string" }), node.span);
+            arguments.push(self.arena.add(NodeForm.argument(ArgumentAst { label: nil, value: literal }), node.span));
+        }
         let member = self.arena.add(NodeForm.member_access(MemberAccessAst {
-            object: value, member: "to_string"
+            object: value, member: method
         }), node.span);
         self.arena.add(NodeForm.call(CallAst {
-            callee: member, arguments: Vec<NodeId>.new(), is_interpolation: true
+            callee: member, arguments, is_interpolation: true
         }), node.span)
     }
     def combine_template(parts: Vec<NodeId>, start: i32, end: i32) -> NodeId {

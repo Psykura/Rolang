@@ -1,0 +1,26 @@
+{"name":"RoLang 😀","version":[0,4,2],"pi":3.14,"big":9223372036854775807,"huge":1.2345678901234567e+19,"nested":{"ok":true,"none":null,"e":1000.0},"esc":"tab\tquote\"slash/"}
+RoLang 😀 3 4 9223372036854775807
+1.2345678901234567e+19 true true true
+{
+  "ok": true,
+  "none": null,
+  "e": 1000.0
+}
+round trip true
+{"ok":true,"count":4,"ratio":2.0,"bad":null,"list":["a\nb\u0001",null]}
+"say \"hi\"\t"
+expected a JSON value at line 1, column 7
+expected ',' or ']' in array at line 1, column 6
+invalid escape in string at line 1, column 3
+unexpected text after the JSON value at line 1, column 2
+expected ':' after object key at line 1, column 6
+expected a JSON value at line 1, column 4
+expected a JSON value at line 1, column 1
+unpaired surrogate in \u escape at line 1, column 8
+unexpected text after the JSON value at line 1, column 3
+invalid number at line 1, column 2
+expected digits after '.' in number at line 1, column 3
+expected digits in number exponent at line 1, column 3
+control character in string at line 1, column 3
+expected a string key in object at line 1, column 2
+unexpected end of JSON at line 1, column 1

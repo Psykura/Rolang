@@ -140,7 +140,16 @@ pub struct ExprChecker {
             }
             self.state.check_assignable(right, inner, "coalescing fallback", data.right); return inner;
         }
-        let left = self.state.infer_expr(data.left); let right = self.state.infer_expr(data.right);
+        // A numeric literal takes the other operand's numeric type: `x * 5` with x: u64 is u64.
+        let table = self.state.type_table;
+        var left = table.error_type; var right = table.error_type;
+        if self.literal_kind(data.left).len() > 0 && self.literal_kind(data.right).len() == 0 {
+            right = self.state.infer_expr(data.right);
+            left = self.state.infer_with_expected(data.left, self.literal_hint(data.left, right));
+        } else {
+            left = self.state.infer_expr(data.left);
+            right = self.state.infer_with_expected(data.right, self.literal_hint(data.right, left));
+        }
         if is_equality_op(data.op) {
             // `x == nil` and `x != nil` test whether an optional holds a value.
             let table = self.state.type_table;
@@ -156,6 +165,24 @@ pub struct ExprChecker {
         }
         if let type = self.state.try_operator_overload(id, left, data.op, right) { return type; }
         self.state.binary_types(left, data.op, right)
+    }
+    // "int" or "float" for a numeric literal, possibly negated; "" otherwise.
+    def literal_kind(id: NodeId?) -> String {
+        guard let ref = id else { return ""; }
+        guard let node = self.state.arena.get(ref) else { return ""; }
+        switch node.form {
+            case .literal(let literal): if literal.kind.equals("int") || literal.kind.equals("float") { return literal.kind; }
+            case .unary_op(let unary): if unary.op.equals("-") { return self.literal_kind(unary.operand); }
+            default: {}
+        }
+        ""
+    }
+    // The other operand's type for an integer literal (any numeric type) or a float literal (float types).
+    def literal_hint(id: NodeId?, other: TypeId) -> TypeId? {
+        let kind = self.literal_kind(id);
+        if kind.equals("int") && self.state.type_table.is_numeric(other) { return other; }
+        if kind.equals("float") && self.state.type_table.is_float(other) { return other; }
+        nil
     }
     def unary(id: NodeId, data: UnaryOpAst) -> TypeId {
         if data.op.equals("spawn") {
@@ -255,7 +282,25 @@ pub struct ExprChecker {
         } }
         false
     }
+    // `{value:spec}` calls value.format(spec); a type without format formats its to_string().
+    def format_fallback(data: CallAst) -> Void {
+        guard let callee = data.callee else { return; }
+        guard let node = self.state.arena.get(callee) else { return; }
+        switch node.form {
+            case .member_access(let member):
+                if !member.member.equals("format") { return; }
+                guard let object = member.object else { return; }
+                let type = self.state.infer_expr(object);
+                if self.state.type_table.is_error(type) { return; }
+                if let method = self.state.member_resolver.get_method(type, "format") { return; }
+                let span = self.state.arena.get(object)?.span;
+                let to_string = self.state.arena.add(NodeForm.member_access(MemberAccessAst { object, member: "to_string" }), span);
+                member.object = self.state.arena.add(NodeForm.call(CallAst { callee: to_string, arguments: Vec<NodeId>.new(), is_interpolation: true }), span);
+            default: {}
+        }
+    }
     def call(id: NodeId, data: CallAst) -> TypeId {
+        if data.is_interpolation { self.format_fallback(data); }
         let old = self.state.expected_type; self.state.expected_type = nil;
         defer { self.state.expected_type = old; }
         guard let callee = data.callee else { return self.state.type_table.error_type; }
@@ -493,14 +538,15 @@ pub struct ExprChecker {
             } default: {} } } } }
             if name.equals("Vec") && value.type_args.len() == 1 { return value.type_args.get(0); }
             if name.equals("Dict") && value.type_args.len() == 2 { return self.state.type_table.make_optional(value.type_args.get(1)); }
-            if let method = self.state.member_resolver.get_method(type, "__get__") { if let func = self.state.type_table.get_function_data(method.signature) {
-                self.state.check_subscript_indices(func, data.indices, 0, "__get__", id); return func.return_type;
-            } }
-            // A set-only subscript is still a valid assignment target.
-            if let method = self.state.member_resolver.get_method(type, "__set__") { if let func = self.state.type_table.get_function_data(method.signature) {
-                if func.params.len() > 0 { return func.params.get(func.params.len() - 1); }
-            } }
             default: {}
+        } }
+        // Structs and enums subscript through __get__ / __set__.
+        if let method = self.state.member_resolver.get_method(type, "__get__") { if let func = self.state.type_table.get_function_data(method.signature) {
+            self.state.check_subscript_indices(func, data.indices, 0, "__get__", id); return func.return_type;
+        } }
+        // A set-only subscript is still a valid assignment target.
+        if let method = self.state.member_resolver.get_method(type, "__set__") { if let func = self.state.type_table.get_function_data(method.signature) {
+            if func.params.len() > 0 { return func.params.get(func.params.len() - 1); }
         } }
         self.state.error(TypeErrorKind.type_mismatch(), f"Type {self.state.type_table.format_type(type)} does not support subscripting", id); self.state.type_table.error_type
     }

@@ -16,7 +16,7 @@ The [runtime core](../runtime/README.md) provides allocation, ARC/GC and schedul
 
 | Module | Current responsibilities |
 | --- | --- |
-| [vec](vec.rl) | Vec<T>, owned elements, indexed access and vector iteration |
+| [vec](vec.rl) | Vec<T>, owned elements, indexed access, iteration, stable sort_by, binary search and reversal |
 | [dict](dict.rl) | Ordered Dict<K,V>, optional lookup/removal and snapshots |
 | [string](string.rl) | String operations, conversions and literals; byte-oriented, with Unicode scalar and grapheme views |
 | [range](range.rl) | Half-open/inclusive language range support |
@@ -39,6 +39,9 @@ The [runtime core](../runtime/README.md) provides allocation, ARC/GC and schedul
 | [fs](fs.rl) | File handles, checked reads, atomic writes/copies and filesystem operations |
 | [path](path.rl) | Path operations and directory listing |
 | [process](process.rl) | Arguments, environment, executable identity and argv-based processes |
+| [time](time.rl) | Duration, monotonic Instant, DateTime (RFC 3339, strftime-style format, local offset) and sleeping |
+| [random](random.rl) | Seedable xoshiro256** generator: ranges, floats, choice, shuffle, sampling; OS entropy |
+| [json](json.rl) | Json values, RFC 8259 parsing with positions, compact/pretty output |
 | [cli](cli.rl) | Command-line parsing: flags, options with values/choices, positionals, help and suggestions |
 | [task](task.rl) | Task ownership, cancellation, waits, sleep and yield |
 | [async_io](async_io.rl) | Async socket streams, pipes, TCP connections and listeners |
@@ -93,10 +96,27 @@ combinations. `--help` output is generated from the declarations. Errors such
 as an unknown option (with a closest-spelling suggestion) print to stderr and
 leave `status` 2; `parse` returns them as a Result instead.
 
+## Time, randomness and JSON
+
+Duration spans are signed nanoseconds and print in the largest fitting unit
+(`1.5s`, `250ms`). Instant reads the monotonic clock; DateTime is a Gregorian
+date and time at a fixed UTC offset, parsed from and printed as RFC 3339, with
+`format("%Y-%m-%d")` patterns. Leap seconds are not represented.
+`sleep_blocking` stops the thread; async code uses `sleep_for`.
+
+Random is xoshiro256**: fast and reproducible with `Random.seeded(n)`, but not
+cryptographic; `entropy_u64()` reads the operating system's entropy source.
+Integer ranges are half-open and unbiased.
+
+Json keeps integers that fit in i64 exact and other numbers as f64. Objects
+keep key order. `json["a"]["b"]` yields null for missing members; `get`/`at`
+return optionals. Parse errors carry a line and column. Output escapes control
+characters and writes NaN or infinity as null.
+
 ## Library development
 
 The next work is explicit errors, typed handles, ownership/mutability guarantees,
 byte/UTF-8 separation, common collection interfaces and platform contracts.
-JSON/TOML, time, randomness, richer networking and serialization are planned.
+TOML, HTTP and serialization of user types are planned.
 Document new contracts, including edge, failure and ownership behavior.
 See [the roadmap](../docs/roadmap.md) and [language semantics](../language/README.md).

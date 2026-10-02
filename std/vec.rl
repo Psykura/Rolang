@@ -88,6 +88,97 @@ pub struct Vec<T> {
         return VecIter<T> { vec: self, pos: 0 };
     }
 
+    pub def swap(first: i32, second: i32) -> Void {
+        let held = self.get(first);
+        self.set(first, self.get(second));
+        self.set(second, held);
+    }
+    pub def reverse() -> Void {
+        var low = 0; var high = self.len() - 1;
+        while low < high { self.swap(low, high); low += 1; high -= 1; }
+    }
+    pub def reversed() -> Vec<T> {
+        let out = Vec<T>.with_capacity(self.len());
+        var index = self.len() - 1;
+        while index >= 0 { out.push(self.get(index)); index -= 1; }
+        out
+    }
+
+    // Sorts in place so that `less(a, b)` holds for no later a before earlier b.
+    // Stable: equal elements keep their order. O(n log n) comparisons.
+    pub def sort_by(less: (T, T) -> Bool) -> Void {
+        let count = self.len();
+        if count < 2 { return; }
+        // Insertion-sorted runs, then bottom-up merges alternating with a buffer.
+        var start = 0;
+        while start < count {
+            var end = start + 16; if end > count { end = count; }
+            var index = start + 1;
+            while index < end {
+                let value = self.get(index);
+                var slot = index;
+                while slot > start && less(value, self.get(slot - 1)) { self.set(slot, self.get(slot - 1)); slot -= 1; }
+                self.set(slot, value);
+                index += 1;
+            }
+            start = end;
+        }
+        var from = self;
+        var into = self.slice(0..<count);
+        var width = 16;
+        while width < count {
+            var low = 0;
+            while low < count {
+                var middle = low + width; if middle > count { middle = count; }
+                var high = low + 2 * width; if high > count { high = count; }
+                var left = low; var right = middle; var out = low;
+                while out < high {
+                    if left < middle && (right >= high || !less(from.get(right), from.get(left))) { into.set(out, from.get(left)); left += 1; }
+                    else { into.set(out, from.get(right)); right += 1; }
+                    out += 1;
+                }
+                low = high;
+            }
+            let swapped = from; from = into; into = swapped;
+            width *= 2;
+        }
+        // After an odd number of passes the result is in the buffer.
+        if from.handle != self.handle { for index in 0..<count { self.set(index, from.get(index)); } }
+    }
+    pub def sorted_by(less: (T, T) -> Bool) -> Vec<T> {
+        let copy = self.slice(0..<self.len());
+        copy.sort_by(less);
+        copy
+    }
+    // In a vector partitioned by `predicate` (true elements first), the index
+    // of the first false element; the length when all are true.
+    pub def partition_point(predicate: (T) -> Bool) -> i32 {
+        var low = 0; var high = self.len();
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if predicate(self.get(middle)) { low = middle + 1; } else { high = middle; }
+        }
+        low
+    }
+    // In a sorted vector, an index whose element `order` maps to 0, or nil.
+    // `order(element)` is negative for elements before the target and
+    // positive for elements after it.
+    pub def binary_search_by(order: (T) -> i32) -> i32? {
+        var low = 0; var high = self.len();
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let result = order(self.get(middle));
+            if result == 0 { return middle; }
+            if result < 0 { low = middle + 1; } else { high = middle; }
+        }
+        nil
+    }
+    // The index of the first element satisfying `predicate`, or nil.
+    pub def index_where(predicate: (T) -> Bool) -> i32? {
+        for index in 0..<self.len() { if predicate(self.get(index)) { return index; } }
+        nil
+    }
+
     pub def len() -> i32 {
         unsafe { return rt_gvec_len(self.handle); }
     }

@@ -487,8 +487,14 @@ Ordinary quoted literals process escapes, including `\u{1F600}` for any Unicode
 scalar (also in character literals). Raw literals preserve backslashes;
 triple-quoted literals preserve newlines and indentation. Explicit `f"..."`
 interpolation evaluates fields once from left to right through to_string.
-`{{` and `}}` emit literal braces. Precision/alignment format specifiers are
-not part of the interpolation grammar.
+`{{` and `}}` emit literal braces. `{value:spec}` formats with a
+specification `[[fill]align][sign][#][0][width][.precision][type]`, as in
+Python: `{pi:.2}` → `3.14`, `{n:08}`, `{n:#x}` → `0xff`, `{name:>10}`,
+`{ratio:.1%}`. Integer types are d x X o b, number types f e %; precision is
+decimal places for numbers and a maximum length for text. The value's
+`format(spec)` method does the work; types without one format their to_string.
+An invalid specification is a compile-time error. Floats print with the fewest
+digits that read back exactly (`0.1 + 0.2` is `0.30000000000000004`).
 
 <!-- example: text -->
 ~~~rolang

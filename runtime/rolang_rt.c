@@ -16,6 +16,8 @@
 #include "../std/panic.c"
 #include "../std/sha256.c"
 #include "../std/string_builder.c"
+#include "../std/time.c"
+#include "../std/random.c"
 #include "scheduler.c"
 #include "../std/task.c"
 #include "../std/async_io.c"

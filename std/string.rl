@@ -345,3 +345,165 @@ pub extension u64 {
         unsafe { return String.from_handle(rt_u64_to_string_handle(self)); }
     }
 }
+
+// ---- Format specifications ----
+//
+// `{value:spec}` in an f-string calls value.format("spec"); types without a
+// format method format their to_string(). A spec is
+//   [[fill]align][sign][#][0][width][.precision][type]
+// align: < left, > right, ^ center (numbers default right, text left);
+// sign: + or space for non-negative numbers; # adds 0x/0o/0b; 0 pads numbers
+// with zeros after the sign; precision: digits after the point for floats,
+// maximum length for text; type: d x X o b for integers, f e % for numbers.
+pub extern "C" def rt_f64_format_handle(value: f64, precision: i32, style: i32) -> RawPtr;
+
+pub struct FormatSpec {
+    pub var fill: String;
+    pub var align: String;
+    pub var sign: String;
+    pub var alternate: Bool;
+    pub var zero: Bool;
+    pub var width: i32;
+    pub var precision: i32;
+    pub var kind: String;
+
+    // nil when `spec` is not a valid specification.
+    pub static def parse(spec: String) -> FormatSpec? {
+        let format = FormatSpec { fill: " ", align: "", sign: "", alternate: false, zero: false, width: 0, precision: -1, kind: "" };
+        let scalars = spec.scalars();
+        let count = scalars.len();
+        var at = 0;
+        if count >= 2 && format_align(scalars[1]) {
+            format.fill = String.from_scalar(scalars[0]); format.align = String.from_scalar(scalars[1]); at = 2;
+        } else if count >= 1 && format_align(scalars[0]) {
+            format.align = String.from_scalar(scalars[0]); at = 1;
+        }
+        if at < count && (scalars[at] == 43 || scalars[at] == 32) { format.sign = String.from_scalar(scalars[at]); at += 1; }
+        if at < count && scalars[at] == 35 { format.alternate = true; at += 1; }
+        if at < count && scalars[at] == 48 { format.zero = true; at += 1; }
+        while at < count && format_digit(scalars[at]) {
+            if format.width > 10000 { return nil; }
+            format.width = format.width * 10 + scalars[at] - 48; at += 1;
+        }
+        if at < count && scalars[at] == 46 {
+            at += 1;
+            if at >= count || !format_digit(scalars[at]) { return nil; }
+            format.precision = 0;
+            while at < count && format_digit(scalars[at]) {
+                if format.precision > 100 { return nil; }
+                format.precision = format.precision * 10 + scalars[at] - 48; at += 1;
+            }
+        }
+        if at < count {
+            let kind = String.from_scalar(scalars[at]);
+            if !"dxXobef%s".contains(kind) { return nil; }
+            format.kind = kind; at += 1;
+        }
+        if at != count { return nil; }
+        format
+    }
+
+    // Pads `prefix + body` to the width. Zero padding goes between a numeric
+    // prefix (sign, 0x) and its digits.
+    pub def pad(prefix: String, body: String, numeric: Bool) -> String {
+        let length = prefix.scalar_count() + body.scalar_count();
+        if length >= self.width { return prefix + body; }
+        let missing = self.width - length;
+        if self.zero && numeric && self.align.len() == 0 { return prefix + "0".repeat(missing) + body; }
+        var align = self.align;
+        if align.len() == 0 { align = numeric ? ">" : "<"; }
+        if align.equals("<") { return prefix + body + self.fill.repeat(missing); }
+        if align.equals(">") { return self.fill.repeat(missing) + prefix + body; }
+        let left = missing / 2;
+        self.fill.repeat(left) + prefix + body + self.fill.repeat(missing - left)
+    }
+    def sign_for(negative: Bool) -> String {
+        if negative { return "-"; }
+        self.sign
+    }
+}
+
+def format_align(scalar: i32) -> Bool { scalar == 60 || scalar == 62 || scalar == 94 }
+def format_digit(scalar: i32) -> Bool { scalar >= 48 && scalar <= 57 }
+
+def format_magnitude(negative: Bool, magnitude: u64, spec: String) -> String {
+    guard let format = FormatSpec.parse(spec) else { return magnitude.to_string(); }
+    var base: u64 = 10;
+    var prefix = "";
+    var digits = "0123456789abcdef";
+    if format.kind.equals("x") { base = 16; prefix = "0x"; }
+    else if format.kind.equals("X") { base = 16; prefix = "0x"; digits = "0123456789ABCDEF"; }
+    else if format.kind.equals("o") { base = 8; prefix = "0o"; }
+    else if format.kind.equals("b") { base = 2; prefix = "0b"; }
+    if !format.alternate { prefix = ""; }
+    var text = "";
+    var rest = magnitude;
+    while true {
+        let digit = (rest % base) as i32;
+        text = digits.substring(digit, 1) + text;
+        rest = rest / base;
+        if rest == 0 { break; }
+    }
+    format.pad(format.sign_for(negative) + prefix, text, true)
+}
+
+def format_float_kind(spec: String) -> Bool {
+    if let format = FormatSpec.parse(spec) { return format.kind.equals("e") || format.kind.equals("f") || format.kind.equals("%"); }
+    false
+}
+
+pub extension i64 {
+    pub def format(spec: String) -> String {
+        if format_float_kind(spec) { return (self as f64).format(spec); }
+        if self < 0 { return format_magnitude(true, (0 - self) as u64, spec); }
+        format_magnitude(false, self as u64, spec)
+    }
+}
+pub extension u64 {
+    pub def format(spec: String) -> String {
+        if format_float_kind(spec) { return (self as f64).format(spec); }
+        format_magnitude(false, self, spec)
+    }
+}
+pub extension i32 { pub def format(spec: String) -> String { (self as i64).format(spec) } }
+pub extension i16 { pub def format(spec: String) -> String { (self as i64).format(spec) } }
+pub extension i8 { pub def format(spec: String) -> String { (self as i64).format(spec) } }
+pub extension u32 { pub def format(spec: String) -> String { (self as u64).format(spec) } }
+pub extension u16 { pub def format(spec: String) -> String { (self as u64).format(spec) } }
+pub extension u8 { pub def format(spec: String) -> String { (self as u64).format(spec) } }
+
+pub extension f64 {
+    pub def format(spec: String) -> String {
+        guard let format = FormatSpec.parse(spec) else { return self.to_string(); }
+        if format.kind.equals("d") || format.kind.equals("x") || format.kind.equals("X") || format.kind.equals("o") || format.kind.equals("b") {
+            return (self as i64).format(spec);
+        }
+        let negative = self < 0.0;
+        var magnitude = self; if negative { magnitude = 0.0 - self; }
+        var precision = format.precision; if precision < 0 { precision = 6; }
+        var body = "";
+        unsafe {
+            if format.kind.equals("e") { body = String.from_handle(rt_f64_format_handle(magnitude, precision, 101)); }
+            else if format.kind.equals("%") { body = String.from_handle(rt_f64_format_handle(magnitude * 100.0, precision, 102)) + "%"; }
+            else if format.kind.equals("f") || format.precision >= 0 { body = String.from_handle(rt_f64_format_handle(magnitude, precision, 102)); }
+            else { body = magnitude.to_string(); }
+        }
+        format.pad(format.sign_for(negative), body, true)
+    }
+}
+pub extension f32 { pub def format(spec: String) -> String { (self as f64).format(spec) } }
+
+pub extension String {
+    // Width and alignment; a precision keeps at most that many scalars.
+    pub def format(spec: String) -> String {
+        guard let format = FormatSpec.parse(spec) else { return self; }
+        var text = self;
+        if format.precision >= 0 && self.scalar_count() > format.precision {
+            let scalars = self.scalars();
+            text = "";
+            for index in 0..<format.precision { text = text + String.from_scalar(scalars[index]); }
+        }
+        format.pad("", text, false)
+    }
+}
+pub extension Bool { pub def format(spec: String) -> String { self.to_string().format(spec) } }

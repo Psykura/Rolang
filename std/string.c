@@ -418,11 +418,8 @@ double rt_str_to_f64(StringVal s) {
     return v;
 }
 
-/* Convert f64 -> StringVal (uses %g). Caller owns the data. */
-StringVal rt_f64_to_string(double val) {
+static StringVal rl_string_from_buffer(const char* buf, int n) {
     StringVal sv = {NULL, 0};
-    char buf[32];
-    int n = snprintf(buf, sizeof(buf), "%g", val);
     if (n < 0) return sv;
     char* data = (char*)malloc((size_t)n + 1);
     if (!data) return sv;
@@ -430,6 +427,45 @@ StringVal rt_f64_to_string(double val) {
     sv.data = data;
     sv.len = (int64_t)n;
     return sv;
+}
+
+/* Convert f64 -> StringVal with the fewest significant digits that read back
+ * as the same value: 0.1 + 0.2 prints 0.30000000000000004. Like Python's repr,
+ * exponents from -4 to 15 print positionally (1000, 0.001), others as 1e+21.
+ * Caller owns the data. */
+StringVal rt_f64_to_string(double val) {
+    char buf[400];
+    int n = 0;
+    if (val != val) return rl_string_from_buffer("nan", 3);
+    if (val - val != 0) return val > 0 ? rl_string_from_buffer("inf", 3) : rl_string_from_buffer("-inf", 4);
+    int digits = 17;
+    for (int precision = 1; precision <= 17; precision++) {
+        snprintf(buf, sizeof(buf), "%.*e", precision - 1, val);
+        if (strtod(buf, NULL) == val) { digits = precision; break; }
+    }
+    snprintf(buf, sizeof(buf), "%.*e", digits - 1, val);
+    int exponent = atoi(strchr(buf, 'e') + 1);
+    if (val != 0 && (exponent < -4 || exponent >= 16)) {
+        n = snprintf(buf, sizeof(buf), "%.*g", digits, val);
+    } else {
+        int decimals = digits - 1 - exponent;
+        if (decimals < 0) decimals = 0;
+        n = snprintf(buf, sizeof(buf), "%.*f", decimals, val);
+    }
+    return rl_string_from_buffer(buf, n);
+}
+
+/* Fixed ('f'), exponent ('e') or general ('g') notation with `precision` digits. */
+void* rt_f64_format_handle(double value, int32_t precision, int32_t style) {
+    char buf[400];
+    if (precision < 0) precision = 6;
+    if (precision > 100) precision = 100;
+    const char* format = "%.*f";
+    if (style == 'e') format = "%.*e";
+    else if (style == 'g') format = "%.*g";
+    int n = snprintf(buf, sizeof(buf), format, (int)precision, value);
+    if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;
+    return rl_string_handle_from_value(rl_string_from_buffer(buf, n));
 }
 
 /* -------------------------------------------------------------------------
