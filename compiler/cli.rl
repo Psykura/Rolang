@@ -76,7 +76,7 @@ pub def run_compiler_cli() -> i32 {
             if input.len() > 0 { eprintln("Only one input source is supported"); return 2; } input = arg;
         } else if arg.equals("--") { source_only = true; }
         else if arg.equals("--help") || arg.equals("-h") { compiler_usage(); return 0; }
-        else if arg.equals("--version") { println("rolangc 0.3.0"); return 0; }
+        else if arg.equals("--version") { println("rolangc 0.4.0"); return 0; }
         else if arg.equals("--parse") || arg.equals("--resolve") || arg.equals("--check") || arg.equals("--hir") || arg.equals("--mono") || arg.equals("--mir") || arg.equals("--mir-post") || arg.equals("--llvm") {
             if mode.len() > 0 || emit_set { eprintln("Select one compiler output or inspection mode"); return 2; } mode = arg;
         }
