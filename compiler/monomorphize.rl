@@ -65,7 +65,10 @@ pub def mangle_type(type: TypeId, types: TypeTable) -> String {
             var prefix = "clo"; if data.is_async { prefix = "aclo"; }
             return prefix + "_" + join_strings(params, "_") + "_to_" + mangle_type(data.return_type, types) + "_c" + join_strings(captures, "_");
         case .existential(let data): return "any_" + mangle_type(data.protocol_id, types);
-        case .protocol(let data): return f"P{data.symbol_id.id}";
+        case .protocol(let data):
+            let args = Vec<String>.new(); for arg in data.arguments { args.push(mangle_type(arg, types)); }
+            if args.len() == 0 { return f"P{data.symbol_id.id}"; }
+            return f"P{data.symbol_id.id}_" + join_strings(args, "_");
         case .type_variable(let data): return "T" + data.name;
         default: {}
     } }

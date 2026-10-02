@@ -250,17 +250,23 @@ struct LlvmModuleEmitter {
         for pair in pairs {
             let concrete = pair.0; let protocol = pair.1; let key = self.witness_key(concrete, protocol);
             let name = f"__rolang_witness_{concrete.id}_{protocol.id}"; self.witness_names[key] = name;
+            // The checker verified conformance before specialization; here witnesses are only
+            // located, by requirement name when a specialized type no longer matches the source.
             let conformance = checker.check_conformance(concrete, protocol);
-            if !conformance.conforms { self.errors.push("Cannot build witness table: " + self.result.type_table.format_type(concrete) + " / " + self.result.type_table.format_type(protocol)); continue; }
             guard let info = self.result.type_table.get_type(protocol) else { continue; }
             switch info.data { case .protocol(let data):
                 let entries = Vec<String>.new();
                 for requirement in data.func_requirements {
+                    // Members depending on unfixed associated types cannot be called through this existential.
+                    var open = self.result.type_table.has_type_variables(requirement.return_type);
+                    for param in requirement.params { if self.result.type_table.has_type_variables(param) { open = true; } }
+                    if open { entries.push("ptr null"); continue; }
                     var implementation: String? = nil;
                     for witness in conformance.witnesses { if witness.is_method && witness.requirement_name.equals(requirement.name) {
                         if let symbol = witness.implementation_symbol { implementation = self.symbol_names[symbol.id]; }
                         if let found = implementation {} else { implementation = self.type_method(concrete, witness.implementation_name); }
                     } }
+                    if let found = implementation {} else { implementation = self.type_method(concrete, requirement.name); }
                     guard let target = implementation else { self.errors.push("Missing witness method: " + requirement.name); entries.push("ptr null"); continue; }
                     let thunk_name = name + "_" + requirement.name; let builder = LlvmIrBuilder.new(self.errors);
                     let params = Vec<String>.new(); params.push("ptr"); for param in requirement.params { params.push(self.cache.spelling(param)); }

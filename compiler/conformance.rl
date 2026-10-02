@@ -87,6 +87,8 @@ pub struct ConformanceChecker {
             if let witness = self.find_prop_witness(concrete, requirement, result.errors) { result.witnesses.push(witness); }
             else if !has_error_prefix(result.errors, f"Property '{requirement.name}' ") { result.missing_requirements.push(requirement.name); }
         }
+        // `P<A>` fixes its primary associated types; its requirements already use A.
+        for index in 0..<data.argument_names.len() { if !self.bindings.contains(data.argument_names.get(index)) { self.bindings[data.argument_names.get(index)] = data.arguments.get(index); } }
         if result.missing_requirements.len() == 0 && result.errors.len() == 0 {
             for name in self.associated_names(data.symbol_id) { if !self.bindings.contains(name) {
                 result.errors.push(f"Cannot infer associated type '{name}' from the conforming members");
@@ -292,6 +294,11 @@ pub struct ConformanceChecker {
         guard let decl = symbol.decl_node else { return; }
         guard let node = self.arena.get(decl) else { return; }
         switch node.form { case .protocol_decl(let data):
+            // Primary associated types (`protocol P<Item>`) come first, then associatedtype members.
+            for param in data.generic_params { if let child = self.arena.get(param) { switch child.form {
+                case .generic_param(let generic): var present = false; for name in names { if name.equals(generic.name) { present = true; } } if !present { names.push(generic.name); }
+                default: {}
+            } } }
             for member in data.members { if let child = self.arena.get(member) { switch child.form {
                 case .associated_type_decl(let assoc): var present = false; for name in names { if name.equals(assoc.name) { present = true; } } if !present { names.push(assoc.name); }
                 default: {}

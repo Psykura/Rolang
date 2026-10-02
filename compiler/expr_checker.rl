@@ -394,7 +394,16 @@ pub struct ExprChecker {
         } }
         let type = self.state.infer_with_expected(data.object, nil); let object_is_type = self.is_type_reference(data.object);
         if let info = self.state.type_table.get_type(type) { switch info.data {
-            case .existential(let value): if let member = self.protocol_member(value.protocol_id, data.member, true) { return member; }
+            case .existential(let value): if let member = self.protocol_member(value.protocol_id, data.member, true) {
+                // Through `any P` the concrete type is unknown, so a member must not depend on
+                // unfixed associated types (fix them with `any P<...>`) or on its own generics.
+                if self.state.type_table.has_type_variables(member) {
+                    let protocol = self.state.type_table.format_type(value.protocol_id);
+                    self.state.error(TypeErrorKind.invalid_operation(), f"'{data.member}' cannot be used through any {protocol}: its signature {self.state.type_table.format_type(member)} depends on associated or generic types; fix the associated types with any {protocol}<...>", id);
+                    return self.state.type_table.error_type;
+                }
+                return member;
+            }
             case .type_variable(let value): for bound in value.bounds { if let member = self.protocol_member(bound, data.member, false) { return self.project_member(member, value.name, bound); } }
             default: {}
         } }

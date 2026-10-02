@@ -124,12 +124,62 @@ pub struct TypeTable {
             captures: FrozenVec<TypeId>.new(captures), is_async
         }))
     }
+    // The base protocol type; collected requirements update it and its applications in place.
     pub def make_protocol(symbol_id: SymbolId, func_requirements: Vec<FuncRequirement> = Vec<FuncRequirement>.new(),
                           prop_requirements: Vec<PropRequirement> = Vec<PropRequirement>.new()) -> TypeId {
-        self.intern(TypeData.protocol(ProtocolTypeData { symbol_id,
+        let data = ProtocolTypeData { symbol_id,
             func_requirements: FrozenVec<FuncRequirement>.new(func_requirements),
-            prop_requirements: FrozenVec<PropRequirement>.new(prop_requirements)
-        }))
+            prop_requirements: FrozenVec<PropRequirement>.new(prop_requirements),
+            arguments: FrozenVec<TypeId>.empty(), argument_names: FrozenVec<String>.empty() };
+        let id = self.intern(TypeData.protocol(data));
+        if func_requirements.len() == 0 && prop_requirements.len() == 0 { return id; }
+        self.replace(id, TypeData.protocol(data));
+        let applications = Vec<TypeId>.new();
+        for info in self.types { switch info.data { case .protocol(let other): if other.symbol_id == symbol_id && other.arguments.len() > 0 { applications.push(info.id); } default: {} } }
+        for application in applications { if let applied = self.get_protocol_data(application) {
+            self.replace(application, TypeData.protocol(self.applied_protocol(data, applied.argument_names, applied.arguments)));
+        } }
+        id
+    }
+    // `P<args>`: the protocol with its primary associated types `names` fixed to `args`.
+    pub def make_protocol_application(symbol_id: SymbolId, names: Vec<String>, args: Vec<TypeId>) -> TypeId {
+        guard let base = self.get_protocol_data(self.get_protocol_type(symbol_id)) else { return self.error_type; }
+        let data = self.applied_protocol(base, FrozenVec<String>.new(names), FrozenVec<TypeId>.new(args));
+        let id = self.intern(TypeData.protocol(data));
+        self.replace(id, TypeData.protocol(data));
+        id
+    }
+    def applied_protocol(base: ProtocolTypeData, names: FrozenVec<String>, args: FrozenVec<TypeId>) -> ProtocolTypeData {
+        let mapping = Dict<String, TypeId>.with_capacity(4, 1);
+        for index in 0..<names.len() { if index < args.len() { mapping[names.get(index)] = args.get(index); } }
+        let funcs = Vec<FuncRequirement>.new();
+        for req in base.func_requirements {
+            let params = Vec<TypeId>.new(); for param in req.params { params.push(self.substitute_names(param, mapping)); }
+            funcs.push(FuncRequirement { name: req.name, params: FrozenVec<TypeId>.new(params), return_type: self.substitute_names(req.return_type, mapping),
+                is_async: req.is_async, is_static: req.is_static, generic_params: req.generic_params });
+        }
+        let props = Vec<PropRequirement>.new();
+        for prop in base.prop_requirements { props.push(PropRequirement { name: prop.name, type_id: self.substitute_names(prop.type_id, mapping), has_getter: prop.has_getter, has_setter: prop.has_setter }); }
+        ProtocolTypeData { symbol_id: base.symbol_id, func_requirements: FrozenVec<FuncRequirement>.new(funcs), prop_requirements: FrozenVec<PropRequirement>.new(props), arguments: args, argument_names: names }
+    }
+    def replace(id: TypeId, data: TypeData) -> Void { self.types[id.id] = TypeInfo { id, kind: data.kind(), data }; }
+    // Replaces type variables by name throughout a type.
+    pub def substitute_names(type: TypeId, mapping: Dict<String, TypeId>) -> TypeId {
+        guard let info = self.get_type(type) else { return type; }
+        switch info.data {
+            case .type_variable(let data): return mapping[data.name] ?? type;
+            case .optional(let inner): return self.make_optional(self.substitute_names(inner, mapping));
+            case .struct_type(let data):
+                if let sid = data.symbol_id { let args = Vec<TypeId>.new(); for arg in data.type_args { args.push(self.substitute_names(arg, mapping)); } return self.make_struct(sid, args); }
+                let fields = Vec<(String?, TypeId)>.new(); if let values = data.anon_fields { for field in values { let name: String? = field.name; fields.push((name, self.substitute_names(field.type_id, mapping))); } }
+                return self.make_tuple(fields);
+            case .enum_type(let data): let args = Vec<TypeId>.new(); for arg in data.type_args { args.push(self.substitute_names(arg, mapping)); } return self.make_enum(data.symbol_id, args);
+            case .function(let data):
+                let params = Vec<TypeId>.new(); for param in data.params { params.push(self.substitute_names(param, mapping)); }
+                return self.make_function(params, self.substitute_names(data.return_type, mapping), data.is_async);
+            default: {}
+        }
+        type
     }
     pub def make_existential(protocol_id: TypeId) -> TypeId {
         self.intern(TypeData.existential(ExistentialTypeData { protocol_id }))
@@ -245,15 +295,7 @@ pub struct TypeTable {
         guard let info = self.get_type(type_id) else { return nil; }
         switch info.data { case .existential(let data): data; default: nil; }
     }
-    pub def get_protocol_type(symbol_id: SymbolId) -> TypeId {
-        for info in self.types {
-            switch info.data {
-                case .protocol(let data): if data.symbol_id == symbol_id { return info.id; }
-                default: {}
-            }
-        }
-        self.make_protocol(symbol_id)
-    }
+    pub def get_protocol_type(symbol_id: SymbolId) -> TypeId { self.make_protocol(symbol_id) }
 
     def format_types(types: FrozenVec<TypeId>) -> String {
         join_type_names(types.map((type) -> { self.format_type(type) }))
@@ -286,7 +328,9 @@ pub struct TypeTable {
             case .closure(let data):
                 let prefix = if_async(data.is_async);
                 return f"{prefix}closure({self.format_types(data.params)}) -> {self.format_type(data.return_type)} [captures: {self.format_types(data.captures)}]";
-            case .protocol(let data): return self.symbol_name(data.symbol_id, "protocol");
+            case .protocol(let data):
+                if data.arguments.len() == 0 { return self.symbol_name(data.symbol_id, "protocol"); }
+                return self.symbol_name(data.symbol_id, "protocol") + "<" + self.format_types(data.arguments) + ">";
             case .existential(let data): return f"any {self.format_type(data.protocol_id)}";
             case .type_variable(let data): return f"${data.name}";
             case .error: return "<error>";

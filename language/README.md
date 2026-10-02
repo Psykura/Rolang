@@ -305,12 +305,19 @@ method (`def map<U>(f: (i32) -> U) -> U;`); a witness declares the same number
 of generic parameters, and calls through a constrained type parameter infer them
 from the arguments.
 
-A protocol may declare associated types (`associatedtype Item;`) and use them in
+A protocol may declare associated types (`associatedtype Item;`, or primary
+associated types in its header: `protocol Container<Item> { ... }`) and use them in
 its requirements. Each conformance infers them from its members, e.g. a
 `def first() -> i32` witness makes `Item` i32; a generic conforming type infers
 them per type argument. A generic parameter `C: Container` names them as `C.Item`,
 and `where C.Item == i32` requires a specific type, which the body may then use as
 i32. Generic calls check the callee's bounds and `where` constraints.
+`Container<i32>` fixes the primary associated types: as a bound (`C: Container<i32>`)
+it means `C: Container where C.Item == i32`, in a conformance (`struct S:
+Container<i32>`) the members must agree with it, and `any Container<i32>` makes
+every member usable through the existential. A plain `any Container` only allows
+members whose signatures do not use unfixed associated types. A type has one
+conformance per protocol, so it cannot conform to both `P<i32>` and `P<String>`.
 
 <!-- example: associated -->
 ~~~rolang

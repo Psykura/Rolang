@@ -122,6 +122,8 @@ pub struct TypeResolver {
             if let symbol = self.symbol_table.get_symbol(base) { switch symbol.kind { case .generic_param:
                 // Projection `C.Item`: substituted with C's binding, or kept as a named type variable.
                 let projection = symbol.name + "." + named.name;
+                // A bound such as `C: Container<i32>` fixes C.Item.
+                if let fixed = self.bound_argument(symbol, named.name, subst) { return fixed; }
                 if !self.declares_associated(symbol, named.name) {
                     self.report("NOT_A_TYPE", f"Generic parameter '{symbol.name}' has no associated type '{named.name}'", named_id);
                     return self.type_table.error_type;
@@ -199,11 +201,15 @@ pub struct TypeResolver {
                 }
                 return self.type_table.make_enum(symbol_id, type_args);
             case .protocol:
-                if type_args.len() > 0 {
-                    self.report("GENERIC_ARG_COUNT", f"Protocol '{symbol.name}' does not accept generic arguments", named_id);
+                if type_args.len() == 0 { return self.type_table.get_protocol_type(symbol_id); }
+                // `P<A>` fixes the protocol's primary associated types, declared as `protocol P<Item>`.
+                let names = self.primary_associated(symbol);
+                if names.len() != type_args.len() {
+                    var expected = "no type arguments"; if names.len() > 0 { expected = f"{names.len()} type argument(s) for {join_strings(names, ", ")}"; }
+                    self.report("GENERIC_ARG_COUNT", f"Protocol '{symbol.name}' expects {expected}, got {type_args.len()}", named_id);
                     return self.type_table.error_type;
                 }
-                return self.type_table.get_protocol_type(symbol_id);
+                return self.type_table.make_protocol_application(symbol_id, names, type_args);
             case .generic_param:
                 let bounds = Vec<TypeId>.new();
                 if let declaration = self.generic_param_decl(symbol) {
@@ -232,6 +238,24 @@ pub struct TypeResolver {
         switch node.form { case .type_alias_decl(let data): data; default: nil; }
     }
 
+    def primary_associated(protocol: Symbol) -> Vec<String> {
+        let names = Vec<String>.new();
+        guard let decl = protocol.decl_node else { return names; }
+        guard let node = self.arena.get(decl) else { return names; }
+        switch node.form { case .protocol_decl(let data): for param in data.generic_params { if let child = self.arena.get(param) { switch child.form {
+            case .generic_param(let generic): names.push(generic.name);
+            default: {}
+        } } } default: {} }
+        names
+    }
+    def bound_argument(param: Symbol, name: String, subst: Dict<String, TypeId>?) -> TypeId? {
+        guard let declaration = self.generic_param_decl(param) else { return nil; }
+        guard let bounds = declaration.bounds else { return nil; }
+        for bound in bounds { if let data = self.type_table.get_protocol_data(self.resolve(bound, subst)) {
+            for index in 0..<data.argument_names.len() { if data.argument_names.get(index).equals(name) { return data.arguments.get(index); } }
+        } }
+        nil
+    }
     // Whether a protocol bound of the generic parameter declares the associated type `name`.
     def declares_associated(param: Symbol, name: String) -> Bool {
         guard let declaration = self.generic_param_decl(param) else { return false; }
@@ -245,6 +269,7 @@ pub struct TypeResolver {
         guard let decl = symbol.decl_node else { return false; }
         guard let node = self.arena.get(decl) else { return false; }
         switch node.form { case .protocol_decl(let data):
+            for param in data.generic_params { if let child = self.arena.get(param) { switch child.form { case .generic_param(let generic): if generic.name.equals(name) { return true; } default: {} } } }
             for member in data.members { if let child = self.arena.get(member) { switch child.form { case .associated_type_decl(let assoc): if assoc.name.equals(name) { return true; } default: {} } } }
             // Parents from `protocol B: A`, stored as `where Self: A`.
             for id in data.constraints { if let constraint = self.arena.get(id) { switch constraint.form { case .constraint(let value): for bound in value.bounds {

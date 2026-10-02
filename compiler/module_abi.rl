@@ -62,7 +62,9 @@ pub def abi_type_key(id: TypeId, symbols: SymbolTable, types: TypeTable) -> Stri
         case .optional(let inner): parts.push("optional"); parts.push(abi_type_key(inner, symbols, types));
         // A named protocol's source identity includes its complete declaration;
         // expanding Self requirements here would introduce recursive keys.
-        case .protocol(let data): parts.push("protocol"); parts.push(abi_symbol_key(data.symbol_id, symbols, types));
+        case .protocol(let data):
+            parts.push("protocol"); parts.push(abi_symbol_key(data.symbol_id, symbols, types));
+            for arg in data.arguments { parts.push(abi_type_key(arg, symbols, types)); }
         case .existential(let data): parts.push("existential"); parts.push(abi_type_key(data.protocol_id, symbols, types));
         case .type_variable(let data): parts.push("variable"); parts.push(data.name);
         case .error: parts.push("error"); case .never: parts.push("never");

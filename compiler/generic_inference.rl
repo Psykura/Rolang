@@ -234,6 +234,7 @@ pub struct GenericInference {
         guard let wanted = self.protocol_data(protocol) else { return false; }
         for bound in bounds {
             if bound == protocol { return true; }
+            if wanted.arguments.len() > 0 { continue; }
             if let have = self.protocol_data(bound) {
                 var covered = true;
                 for req in wanted.func_requirements { var found = false; for other in have.func_requirements { if other.name.equals(req.name) { found = true; } } if !found { covered = false; } }

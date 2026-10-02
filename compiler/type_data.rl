@@ -79,6 +79,10 @@ pub struct ProtocolTypeData {
     pub let symbol_id: SymbolId;
     pub let func_requirements: FrozenVec<FuncRequirement>;
     pub let prop_requirements: FrozenVec<PropRequirement>;
+    // `P<A, B>` fixes the protocol's primary associated types (argument_names) to
+    // `arguments`; its requirements are the base protocol's with those substituted.
+    pub let arguments: FrozenVec<TypeId>;
+    pub let argument_names: FrozenVec<String>;
 }
 pub struct ExistentialTypeData { pub let protocol_id: TypeId; }
 pub struct TypeVariableData {
@@ -138,16 +142,9 @@ pub enum TypeData {
                 key.atom("closure"); key.types(data.params); key.number(data.return_type.id);
                 key.types(data.captures); key.flag(data.is_async);
             case .optional(let inner): key.atom("optional"); key.number(inner.id);
-            case .protocol(let data):
-                key.atom("protocol"); key.number(data.symbol_id.id); key.number(data.func_requirements.len());
-                for req in data.func_requirements {
-                    key.atom(req.name); key.types(req.params); key.number(req.return_type.id);
-                    key.flag(req.is_async); key.flag(req.is_static);
-                }
-                key.number(data.prop_requirements.len());
-                for req in data.prop_requirements {
-                    key.atom(req.name); key.number(req.type_id.id); key.flag(req.has_getter); key.flag(req.has_setter);
-                }
+            // A protocol's identity is its symbol and arguments; requirements are filled in
+            // when the declaration is collected.
+            case .protocol(let data): key.atom("protocol"); key.number(data.symbol_id.id); key.types(data.arguments);
             case .existential(let data): key.atom("existential"); key.number(data.protocol_id.id);
             case .type_variable(let data): key.atom("variable"); key.atom(data.name); key.number(data.id); key.types(data.bounds);
             case .error: key.atom("error"); case .never: key.atom("never");
