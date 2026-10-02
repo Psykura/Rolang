@@ -71,6 +71,8 @@ pub struct TypeCheckResult {
     pub let intrinsic_types: Dict<i32, TypeId>;
     pub let intrinsic_values: Dict<i32, i64>;
     pub let propagation_error_types: Dict<i32, TypeId>;
+    // Element type of each for-loop, keyed by the loop statement.
+    pub let loop_element_types: Dict<i32, TypeId>;
 
     pub static def new(type_table: TypeTable) -> TypeCheckResult {
         TypeCheckResult {
@@ -83,7 +85,8 @@ pub struct TypeCheckResult {
             lowered_expressions: Dict<i32, NodeId>.with_capacity(16, 0),
             intrinsic_types: Dict<i32, TypeId>.with_capacity(16, 0),
             intrinsic_values: Dict<i32, i64>.with_capacity(16, 0),
-            propagation_error_types: Dict<i32, TypeId>.with_capacity(16, 0)
+            propagation_error_types: Dict<i32, TypeId>.with_capacity(16, 0),
+            loop_element_types: Dict<i32, TypeId>.with_capacity(16, 0)
         }
     }
 

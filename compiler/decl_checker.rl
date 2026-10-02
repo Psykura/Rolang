@@ -144,7 +144,18 @@ pub struct DeclChecker {
             default: {}
         }
     }
+    // Adds declared generic parameters to the rigid set; returns the previous set to restore.
+    def enter_generics(params: Vec<NodeId>) -> Dict<String, Bool> {
+        let previous = self.state.rigid_generics;
+        let rigid = Dict<String, Bool>.with_capacity(8, 1);
+        for entry in previous.entries() { rigid[entry.key] = true; }
+        for param in params { rigid[self.state.generic_name(param)] = true; }
+        self.state.rigid_generics = rigid;
+        previous
+    }
     def check_function(id: NodeId, data: FuncDeclAst) -> Void {
+        let outer_generics = self.enter_generics(data.generic_params);
+        defer { self.state.rigid_generics = outer_generics; }
         // Inside the body, `where C.Item == T` makes the projection interchangeable with T.
         let old_equalities = self.state.projection_equalities;
         let equalities = Dict<String, TypeId>.with_capacity(4, 1);
@@ -187,13 +198,19 @@ pub struct DeclChecker {
             else { self.state.current_self_type = self.state.type_table.make_struct(sid, args); }
         }
         defer { self.state.current_self_type = old; }
+        let outer_generics = self.enter_generics(generics);
+        defer { self.state.rigid_generics = outer_generics; }
         for member in members {
             if let node = self.state.arena.get(member) {
                 switch node.form {
                     case .property_decl(let prop):
                         if !enum {
                             if let ann = prop.type_annotation { let type = self.state.resolve_type(ann); if let sid = self.state.node_symbols[member.id] { self.state.type_env[sid.id] = type; } }
-                            if let init = prop.initializer { let type = self.state.infer_expr(init); if let ann = prop.type_annotation { self.state.check_assignable(type, self.state.resolve_type(ann), "property initializer"); } }
+                            if let init = prop.initializer {
+                                var declared: TypeId? = nil; if let ann = prop.type_annotation { declared = self.state.resolve_type(ann); }
+                                let type = self.state.infer_with_expected(init, declared);
+                                if let field_type = declared { self.state.check_assignable(type, field_type, "property initializer", init); }
+                            }
                         }
                     case .enum_case_decl(let group):
                         for case_id in group.cases { if let child = self.state.arena.get(case_id) { switch child.form { case .enum_case_def(let data): for payload in data.payload { self.state.resolve_type(payload.1); } default: {} } } }
@@ -228,6 +245,8 @@ pub struct DeclChecker {
         if let ref = data.extended_type { symbol = self.state.node_symbols[ref.id]; }
         if let sid = symbol {} else { if let info = self.state.type_table.get_type(type) { switch info.data { case .primitive: symbol = self.state.symbol_table.get_builtin(self.named_name(data.extended_type)); default: {} } } }
         let old = self.state.current_self_type; self.state.current_self_type = type;
+        let outer_generics = self.enter_generics(data.generic_params);
+        defer { self.state.rigid_generics = outer_generics; }
         let methods = Vec<MethodInfo>.new();
         for member in data.members {
             if let node = self.state.arena.get(member) {

@@ -221,7 +221,7 @@ pub struct GenericInference {
     }
     // A type parameter argument satisfies a protocol through its own bounds: the same protocol,
     // or one whose (inherited, flattened) requirements include all of the protocol's.
-    def bound_satisfies(concrete: TypeId, protocol: TypeId) -> Bool {
+    pub def bound_satisfies(concrete: TypeId, protocol: TypeId) -> Bool {
         guard let info = self.type_table.get_type(concrete) else { return false; }
         var bounds = FrozenVec<TypeId>.empty(); switch info.data { case .type_variable(let data): bounds = data.bounds; default: return false; }
         guard let wanted = self.protocol_data(protocol) else { return false; }

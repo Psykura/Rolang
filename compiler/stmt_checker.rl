@@ -18,7 +18,7 @@ pub struct StmtChecker {
                 if let condition = data.condition { self.state.check_boolean(self.state.infer_expr(condition), "while condition"); }
                 self.state.check_block(data.body);
             case .for_stmt(let data):
-                if let iterable = data.iterable { self.state.bind_pattern(data.pattern, self.state.iterable_element(self.state.infer_expr(iterable))); }
+                if let iterable = data.iterable { let element = self.state.iterable_element(self.state.infer_expr(iterable)); self.state.result.loop_element_types[id.id] = element; self.state.bind_pattern(data.pattern, element); }
                 self.state.check_block(data.body);
             case .switch_stmt(let data):
                 if let value = data.value {

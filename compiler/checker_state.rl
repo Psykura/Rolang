@@ -31,6 +31,11 @@ pub struct CheckerState {
     // `where C.Item == T` constraints of the function being checked, keyed by projection name.
     pub var projection_equalities: Dict<String, TypeId>;
     let computing_constants: Dict<i32, Bool>;
+    // Generic parameters declared by the function and type being checked. Unlike inference
+    // variables they are fixed: a T value is only a T (or an `any P` for a bound P).
+    pub var rigid_generics: Dict<String, Bool>;
+    // Function types of closures the checker synthesizes, used as their parameter context.
+    pub let synthetic_lambda_types: Dict<i32, TypeId>;
     pub var infer_callback: ((NodeId) -> TypeId)?;
     pub var statement_callback: ((NodeId) -> Void)?;
     pub static def new(arena: AstArena, resolution: ResolutionResult) -> CheckerState {
@@ -55,7 +60,7 @@ pub struct CheckerState {
             layout: LayoutService.new(arena, types, resolution.symbol_table, resolver), result,
             type_env: Dict<i32, TypeId>.with_capacity(16, 0), lowered_expressions: result.lowered_expressions,
             current_function_return: nil, current_self_type: nil, expected_type: nil,
-            in_async_function: false, in_unsafe: false, projection_equalities: Dict<String, TypeId>.with_capacity(4, 1), computing_constants: Dict<i32, Bool>.with_capacity(4, 0), infer_callback: nil, statement_callback: nil }
+            in_async_function: false, in_unsafe: false, projection_equalities: Dict<String, TypeId>.with_capacity(4, 1), computing_constants: Dict<i32, Bool>.with_capacity(4, 0), rigid_generics: Dict<String, Bool>.with_capacity(4, 1), synthetic_lambda_types: Dict<i32, TypeId>.with_capacity(4, 0), infer_callback: nil, statement_callback: nil }
     }
     pub def error(kind: TypeErrorKind, message: String, id: NodeId? = nil) -> Void {
         var span: Span? = nil;
@@ -333,11 +338,17 @@ pub struct CheckerState {
         table.error_type
     }
     pub def types_equal(left: TypeId, right: TypeId) -> Bool { self.type_table.types_equal(left, right) }
+    pub def is_rigid(type: TypeId) -> Bool {
+        guard let info = self.type_table.get_type(type) else { return false; }
+        switch info.data { case .type_variable(let variable): return variable.name.find(".") >= 0 || self.rigid_generics.contains(variable.name); default: {} }
+        false
+    }
     pub def check_assignable(source: TypeId, target: TypeId, context: String, id: NodeId? = nil) -> Void {
         let table = self.type_table;
         if table.is_error(source) || table.is_error(target) || self.types_equal(source, target) { return; }
-        // Generic parameters are checked when specialized; projections such as C.Item are opaque.
-        if let info = table.get_type(target) { switch info.data { case .type_variable(let variable): if variable.name.find(".") < 0 { return; } default: {} } }
+        // Inference variables are resolved later; declared generic parameters and projections
+        // such as C.Item only match themselves.
+        if !self.is_rigid(target) { if let info = table.get_type(target) { switch info.data { case .type_variable: return; default: {} } } }
         // A value may be wrapped by every optional layer of the target, e.g. i32 into (i32?)?.
         var layer = target; var wrapping = true;
         while wrapping {
@@ -349,6 +360,7 @@ pub struct CheckerState {
         if let info = table.get_type(target) {
             switch info.data {
                 case .existential(let data):
+                    if self.generic_inference.bound_satisfies(source, data.protocol_id) { return; }
                     let result = self.conformance_checker.check_conformance(source, data.protocol_id);
                     if result.conforms { return; }
                     var details = "";
@@ -363,7 +375,7 @@ pub struct CheckerState {
             if self.is_raw_ptr(target) { return; }
             self.error(TypeErrorKind.type_mismatch(), f"Cannot assign nil to non-optional type {table.format_type(target)} in {context}", id); return;
         }
-        if let info = table.get_type(source) { switch info.data { case .type_variable(let variable): if variable.name.find(".") < 0 { return; } default: {} } }
+        if !self.is_rigid(source) { if let info = table.get_type(source) { switch info.data { case .type_variable: return; default: {} } } }
         if table.is_never(source) || table.can_widen_int(source, target) { return; }
         self.error(TypeErrorKind.type_mismatch(), f"Cannot assign {table.format_type(source)} to {table.format_type(target)} in {context}", id);
     }

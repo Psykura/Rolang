@@ -892,11 +892,11 @@ pub struct MirFunctionBuilder {
         let outer = Dict<i32, TypeId>.with_capacity(16, 0);
         for local in self.locals { if let sid = local.symbol_id { outer[sid.id] = local.type_id; } }
         let captures = analyze_captures(self.hir, data, outer, self.symbols);
-        // `var` declarations are shared through cells; other bindings (switch, for and if-let
-        // patterns) are captured as copies, so assigning them inside the closure is rejected.
+        // Reassigned captured `var`s are shared through cells and other bindings are immutable,
+        // so an assignment to a captured local here means boxing missed it.
         for id in self.hir.preorder(data.body) { if let node = self.hir.get(id) { switch node.form { case .assign(let assign): if let target = self.hir.get(assign.target) { switch target.form {
             case .var_ref(let ref): for capture in captures { if capture.symbol_id == ref.symbol_id {
-                self.errors.push(f"Cannot assign to captured pattern binding '{capture.name}' inside a closure; copy it into a `var` declaration to share it with the closure");
+                self.errors.push(internal_compiler_error(f"closure assigns captured variable '{capture.name}' that is not in a cell"));
             } }
             default: {}
         } } default: {} } } }

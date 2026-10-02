@@ -32,7 +32,18 @@ pub struct ExprChecker {
             case .member_access(let data): return self.member(id, data);
             case .subscript(let data): return self.subscript_expr(id, data);
             case .tuple_expr(let data):
-                let fields = Vec<(String?, TypeId)>.new(); for pair in data.elements { fields.push((pair.0, self.state.infer_expr(pair.1))); }
+                // A contextual tuple type supplies element types, e.g. nil for an optional element.
+                var expected_fields: FrozenVec<TupleField>? = nil;
+                if let expected = self.state.expected_type { if let info = self.state.type_table.get_type(self.state.type_table.get_optional_inner(expected) ?? expected) { switch info.data {
+                    case .struct_type(let value): if let symbol = value.symbol_id {} else { if let anon = value.anon_fields { if anon.len() == data.elements.len() { expected_fields = anon; } } }
+                    default: {}
+                } } }
+                let fields = Vec<(String?, TypeId)>.new();
+                for index in 0..<data.elements.len() { let pair = data.elements[index];
+                    if let context = expected_fields { let want = context.get(index).type_id;
+                        self.state.check_assignable(self.state.infer_with_expected(pair.1, want), want, f"tuple element {index}", pair.1); fields.push((pair.0, want));
+                    } else { fields.push((pair.0, self.state.infer_expr(pair.1))); }
+                }
                 return self.state.type_table.make_tuple(fields);
             case .array_literal(let data): return self.array(data);
             case .dict_literal(let data): return self.dict(data);
@@ -368,7 +379,12 @@ pub struct ExprChecker {
             default: {}
         } }
         if !object_is_type { if let field = self.state.member_resolver.get_field(type, data.member) { self.field_visibility(field, id); self.state.record_call(id, CalleeKind.indirect()); return field.type_id; } }
-        if let method = self.state.member_resolver.get_method(type, data.member, object_is_type) { self.state.result.member_method_symbols[id.id] = method.symbol_id; return method.signature; }
+        if let method = self.state.member_resolver.get_method(type, data.member, object_is_type) {
+            self.state.result.member_method_symbols[id.id] = method.symbol_id;
+            var called = false; if let callee = self.callee { called = callee == id; }
+            if !called && !object_is_type { return self.method_value(id, data, method); }
+            return method.signature;
+        }
         if object_is_type { if let info = self.state.type_table.get_type(type) { switch info.data { case .enum_type:
             if let case_def = self.state.lookup_enum_case(type, data.member) { if case_def.payload.len() == 0 {
                 self.state.record_call(id, CalleeKind.enum_ctor(), nil, data.member);
@@ -476,6 +492,7 @@ pub struct ExprChecker {
     }
     def lambda_expr(id: NodeId, data: LambdaAst) -> TypeId {
         var context: FunctionTypeData? = nil; if let expected = self.state.expected_type { context = self.state.type_table.get_function_data(self.state.type_table.get_optional_inner(expected) ?? expected); }
+        if let pinned = self.state.synthetic_lambda_types[id.id] { context = self.state.type_table.get_function_data(pinned); }
         let params = Vec<TypeId>.new();
         for index in 0..<data.params.len() { let pair = data.params[index]; var type = self.state.type_table.error_type;
             if let annotation = pair.1 { type = self.state.resolve_type(annotation); }
@@ -564,14 +581,19 @@ pub struct ExprChecker {
                 if let sid = symbol { if let other = exp.symbol_id { if sid == other { self.seed(value.generic_params, exp.type_args, mapping, true); } } }
                 default: {}
             } } }
-            for member in value.members { if let node = self.state.arena.get(member) { switch node.form { case .property_decl(let prop): if let annotation = prop.type_annotation { annotations[prop.name] = annotation; fields.push(prop.name); } default: {} } } }
+            let defaulted = Dict<String, Bool>.with_capacity(8, 1);
+            for member in value.members { if let node = self.state.arena.get(member) { switch node.form { case .property_decl(let prop):
+                if let annotation = prop.type_annotation { annotations[prop.name] = annotation; fields.push(prop.name); }
+                if let initial = prop.initializer { defaulted[prop.name] = true; }
+                default: {}
+            } } }
             let seen = Dict<String, Bool>.with_capacity(16, 1);
             for id in data.arguments { if let arg = self.argument(id) { if let label = arg.label {
                 if seen.contains(label) { self.state.error(TypeErrorKind.duplicate_member(), f"duplicate field '{label}' in struct literal", id); continue; }
                 seen[label] = true;
                 if !annotations.contains(label) { self.state.error(TypeErrorKind.undefined_member(), f"struct '{value.name}' has no field '{label}'", id); }
             } } }
-            for name in fields { if !seen.contains(name) { self.state.error(TypeErrorKind.type_mismatch(), f"missing field '{name}' in struct literal for '{value.name}'"); } }
+            for name in fields { if !seen.contains(name) && !defaulted.contains(name) { self.state.error(TypeErrorKind.type_mismatch(), f"missing field '{name}' in struct literal for '{value.name}'"); } }
         }
         for id in data.arguments { if let arg = self.argument(id) { if let value = arg.value {
             if let label = arg.label {
@@ -596,6 +618,46 @@ pub struct ExprChecker {
             if let label = arg.label { if let ann = annotations[label] { self.state.check_assignable(actual, self.state.generic_inference.substitute_type(self.state.resolve_type(ann), mapping), f"field '{label}'"); } }
         } } }
         result
+    }
+    // `recv.method` used as a value becomes
+    // `switch recv { case let __method_receiver: (args) -> { __method_receiver.method(args) } }`,
+    // which evaluates the receiver once and binds it into the closure.
+    def method_value(id: NodeId, data: MemberAccessAst, method: MethodInfo) -> TypeId {
+        guard let func = self.state.type_table.get_function_data(method.signature) else { return method.signature; }
+        var span: Span? = nil; if let node = self.state.arena.get(id) { span = node.span; }
+        let arena = self.state.arena;
+        let receiver_pattern = arena.add(NodeForm.identifier_pattern(IdentifierPatternAst { name: "__method_receiver", binding: "let" }), span);
+        let receiver = self.state.symbol_table.create_symbol("__method_receiver", SymbolKind.variable(), Namespace.value()).id;
+        self.state.node_symbols[receiver_pattern.id] = receiver;
+        let holder = arena.add(NodeForm.identifier(IdentifierAst { name: "__method_receiver" }), span);
+        self.state.node_symbols[holder.id] = receiver;
+        var labels = Vec<String?>.new();
+        if let symbol = self.state.symbol_table.get_symbol(method.symbol_id) { if let decl = symbol.decl_node { if let node = self.state.arena.get(decl) { switch node.form {
+            case .func_decl(let decl_data): for param in decl_data.params { if let p = self.state.param(param) { labels.push(p.external_name); } }
+            default: {}
+        } } } }
+        let params = Vec<(NodeId, NodeId?)>.new(); let arguments = Vec<NodeId>.new(); let untyped: NodeId? = nil;
+        for index in 0..<func.params.len() {
+            let name = f"__method_arg{index}";
+            let pattern = arena.add(NodeForm.identifier_pattern(IdentifierPatternAst { name, binding: nil }), span);
+            let symbol = self.state.symbol_table.create_symbol(name, SymbolKind.parameter(), Namespace.value()).id;
+            self.state.node_symbols[pattern.id] = symbol;
+            let value = arena.add(NodeForm.identifier(IdentifierAst { name }), span);
+            self.state.node_symbols[value.id] = symbol;
+            var label: String? = nil; if index < labels.len() { label = labels[index]; }
+            params.push((pattern, untyped)); arguments.push(arena.add(NodeForm.argument(ArgumentAst { label, value }), span));
+        }
+        let callee = arena.add(NodeForm.member_access(MemberAccessAst { object: holder, member: data.member }), span);
+        let call = arena.add(NodeForm.call(CallAst { callee, arguments, is_interpolation: false }), span);
+        var body = arena.add(NodeForm.return_stmt(ReturnStmtAst { value: call, implicit: true }), span);
+        if func.return_type == self.state.type_table.void_type { body = arena.add(NodeForm.expr_stmt(ExprStmtAst { expr: call }), span); }
+        let lambda = arena.add(NodeForm.lambda(LambdaAst { params, body: [body], return_type: nil }), span);
+        self.state.synthetic_lambda_types[lambda.id] = method.signature;
+        let arm = arena.add(NodeForm.expr_stmt(ExprStmtAst { expr: lambda }), span);
+        let branch = arena.add(NodeForm.switch_case(SwitchCaseAst { patterns: [(receiver_pattern, untyped)], body: [arm], is_default: false }), span);
+        let value = arena.add(NodeForm.switch_expr(SwitchExprAst { value: data.object, cases: [branch] }), span);
+        self.state.lowered_expressions[id.id] = value;
+        self.infer_expr(value)
     }
     def is_variable(type: TypeId) -> Bool { if let info = self.state.type_table.get_type(type) { switch info.data { case .type_variable: return true; default: {} } } false }
     def is_heap(type: TypeId) -> Bool { if let info = self.state.type_table.get_type(type) { switch info.data { case .struct_type | .enum_type: return true; default: {} } } false }
@@ -659,10 +721,11 @@ pub struct ExprChecker {
     }
     def optional_chain(id: NodeId, data: OptionalChainAst) -> TypeId {
         let type = self.state.infer_expr(data.object); let base = self.state.type_table.get_optional_inner(type) ?? type;
-        var has_field = false; if let field = self.state.member_resolver.get_field(base, data.member) { has_field = true; }
-        var has_suffix = false; if let suffix = data.suffix { has_suffix = true; }
-        if has_field || has_suffix {
-            // Check `object?.field`, `object?.member(args)` and `object?.member[indices]` as an ordinary
+        var has_member = false; if let field = self.state.member_resolver.get_field(base, data.member) { has_member = true; }
+        if let method = self.state.member_resolver.get_method(base, data.member) { has_member = true; }
+        if let suffix = data.suffix { has_member = true; }
+        if has_member {
+            // Check `object?.field`, `object?.method`, `object?.member(args)` and `object?.member[indices]` as an ordinary
             // expression on a binding of the unwrapped object; HIR wraps it in the optional match.
             var span: Span? = nil; if let node = self.state.arena.get(id) { span = node.span; }
             let holder = self.state.arena.add(NodeForm.identifier(IdentifierAst { name: "__opt_chain" }), span);
@@ -682,8 +745,6 @@ pub struct ExprChecker {
             if let inner = self.state.type_table.get_optional_inner(result) { return result; }
             return self.state.type_table.make_optional(result);
         }
-        // Without a call suffix, a method member is an optional function value.
-        if let method = self.state.member_resolver.get_method(base, data.member) { return self.state.type_table.make_optional(method.signature); }
         self.state.error(TypeErrorKind.undefined_member(), f"Type {self.state.type_table.format_type(base)} has no member '{data.member}'", id); self.state.type_table.error_type
     }
 }

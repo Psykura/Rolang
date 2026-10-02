@@ -145,7 +145,9 @@ Function-value signatures also describe higher-order callbacks.
 ## Structs, field shorthand and copying
 
 Struct literals name fields. An in-scope variable can supply a field with the
-same name. Methods can mutate shared `var` fields. Operator methods implement
+same name, and a field declared with a default (`var retries: i32 = 3;`) may be
+omitted; the default is evaluated for each literal. Methods can mutate shared
+`var` fields. Operator methods implement
 source operators for user types: `__add__`, `__sub__`, `__mul__`, `__truediv__`,
 `__mod__`, `__eq__`, `__ne__`, `__lt__`, `__le__`, `__gt__`, `__ge__`, `__and__`,
 `__or__`, `__xor__`, `__lshift__` and `__rshift__` take the right operand;
@@ -282,7 +284,9 @@ Panics abort the process and are not caught through Result.
 
 Generic functions, structs, enums and methods specialize lazily for concrete
 types. Inference uses arguments, callbacks, receiver types and return context.
-Constraints check protocol requirements before code generation.
+Constraints check protocol requirements before code generation. Inside generic
+code a value of a type parameter `T` is only a `T`, or an `any P` when `T` is
+bounded by `P`; it does not convert to other types.
 
 `typealias` is transparent, including generic aliases; it does not create a
 distinct type or prevent mixing values of the underlying type. Recursive aliases
@@ -367,14 +371,13 @@ Function values can be stored in fields, passed to functions and returned.
 A closure is written `(params) -> ReturnType { body }`. Parameter types may be
 omitted when a contextual function type supplies them, and the return type may be
 omitted to infer it from the body.
-Closures capture variables by reference: a `var` that a closure captures and
-that is reassigned (inside or outside the closure) is shared, so updates on
-either side are visible to the other and survive after the enclosing function
-returns. Such a variable lives in a managed cell; other captures are copied into
-the closure object, which is equivalent because they never change. Captured
-managed objects remain alive while owned by the closure. Bindings introduced by
-switch, for and if-let patterns cannot be assigned inside a closure; copy them
-into a `var` first.
+Closures capture variables by reference: a `var` (including `var` bindings in
+switch, for and if-let patterns) that a closure captures and that is reassigned
+(inside or outside the closure) is shared, so updates on either side are visible
+to the other and survive after the enclosing function returns. Such a variable
+lives in a managed cell; other captures are copied into the closure object,
+which is equivalent because they never change. Captured managed objects remain
+alive while owned by the closure.
 
 <!-- example: closures -->
 ~~~rolang
@@ -405,7 +408,9 @@ Further forms: `(n: i32) -> i32 { n + 1 }` declares every type,
 `values.map((x) -> { x * 2 })` infers them, `() -> { counter.tick(); }` takes no
 arguments, and `((a, b)) -> { a + b }` destructures a tuple argument. A `{` in
 expression position is not a closure.
-Named synchronous, non-generic safe functions can be adapted to function values.
+Named synchronous, non-generic safe functions can be adapted to function values,
+and `value.method` without a call is a closure bound to that receiver, which is
+evaluated once (`value?.method` gives an optional closure).
 Use wrappers for generic/unsafe functions. Async closures and dynamic async
 protocol calls are outside the current async implementation.
 
