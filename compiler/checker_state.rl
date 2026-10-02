@@ -28,6 +28,9 @@ pub struct CheckerState {
     pub var expected_type: TypeId?;
     pub var in_async_function: Bool;
     pub var in_unsafe: Bool;
+    // `where C.Item == T` constraints of the function being checked, keyed by projection name.
+    pub var projection_equalities: Dict<String, TypeId>;
+    let computing_constants: Dict<i32, Bool>;
     pub var infer_callback: ((NodeId) -> TypeId)?;
     pub var statement_callback: ((NodeId) -> Void)?;
     pub static def new(arena: AstArena, resolution: ResolutionResult) -> CheckerState {
@@ -52,7 +55,7 @@ pub struct CheckerState {
             layout: LayoutService.new(arena, types, resolution.symbol_table, resolver), result,
             type_env: Dict<i32, TypeId>.with_capacity(16, 0), lowered_expressions: result.lowered_expressions,
             current_function_return: nil, current_self_type: nil, expected_type: nil,
-            in_async_function: false, in_unsafe: false, infer_callback: nil, statement_callback: nil }
+            in_async_function: false, in_unsafe: false, projection_equalities: Dict<String, TypeId>.with_capacity(4, 1), computing_constants: Dict<i32, Bool>.with_capacity(4, 0), infer_callback: nil, statement_callback: nil }
     }
     pub def error(kind: TypeErrorKind, message: String, id: NodeId? = nil) -> Void {
         var span: Span? = nil;
@@ -60,7 +63,71 @@ pub struct CheckerState {
         self.result.errors.push(TypeError { kind, message, span });
     }
     pub def builtin(name: String) -> TypeId { self.type_table.get_builtin(name) ?? self.type_table.error_type }
-    pub def resolve_type(id: NodeId?) -> TypeId { self.type_resolver.resolve(id) }
+    pub def resolve_type(id: NodeId?) -> TypeId { self.with_equalities(self.type_resolver.resolve(id)) }
+    pub def constant_decl(sid: SymbolId) -> ConstantDeclAst? {
+        if let symbol = self.symbol_table.get_symbol(sid) { if let decl = symbol.decl_node { if let node = self.arena.get(decl) { switch node.form { case .constant_decl(let data): return data; default: {} } } } }
+        nil
+    }
+    // Type of a module-level constant, checked on first use (also across modules).
+    pub def constant_type(sid: SymbolId, data: ConstantDeclAst) -> TypeId {
+        if let known = self.type_env[sid.id] { return known; }
+        if self.computing_constants.contains(sid.id) {
+            self.error(TypeErrorKind.invalid_operation(), f"Constant '{data.name}' depends on itself", data.value);
+            self.type_env[sid.id] = self.type_table.error_type; return self.type_table.error_type;
+        }
+        self.computing_constants[sid.id] = true;
+        defer { self.computing_constants.remove(sid.id); }
+        let old_return = self.current_function_return; let old_equalities = self.projection_equalities;
+        self.current_function_return = nil; self.projection_equalities = Dict<String, TypeId>.with_capacity(4, 1);
+        defer { self.current_function_return = old_return; self.projection_equalities = old_equalities; }
+        var expected: TypeId? = nil; if let annotation = data.type_annotation { expected = self.resolve_type(annotation); }
+        let actual = self.infer_with_expected(data.value, expected);
+        var type = actual;
+        if let declared = expected { self.check_assignable(actual, declared, f"constant '{data.name}'", data.value); type = declared; }
+        if !self.type_table.is_error(type) {
+            if !self.is_constant_expression(data.value) {
+                self.error(TypeErrorKind.invalid_operation(), f"The value of constant '{data.name}' must be a constant expression (literals, operators, casts and other constants)", data.value);
+            } else if !self.is_constant_type(type) {
+                self.error(TypeErrorKind.type_mismatch(), f"Constant '{data.name}' has type {self.type_table.format_type(type)}; constants must be numbers, Bool, String or optionals of them", data.value);
+            }
+        }
+        self.type_env[sid.id] = type; type
+    }
+    // Constants are inlined at each use, so their values must not depend on evaluation or identity.
+    def is_constant_expression(id: NodeId?) -> Bool {
+        guard let ref = id else { return false; }
+        guard let node = self.arena.get(ref) else { return false; }
+        switch node.form {
+            case .literal: return true;
+            case .unary_op(let data): return !self.result.operator_targets.contains(ref.id) && self.is_constant_expression(data.operand);
+            case .binary_op(let data):
+                // Only String's + is an overloaded operator on constant types.
+                if self.result.operator_targets.contains(ref.id) { if let left = data.left { if let type = self.result.expr_types[left.id] { if !self.type_table.is_string(type) { return false; } } } }
+                return self.is_constant_expression(data.left) && self.is_constant_expression(data.right);
+            case .ternary_op(let data): return self.is_constant_expression(data.condition) && self.is_constant_expression(data.then_expr) && self.is_constant_expression(data.else_expr);
+            case .cast(let data): return self.is_constant_expression(data.expr);
+            case .identifier: if let sid = self.node_symbols[ref.id] { if let constant = self.constant_decl(sid) { return true; } } return false;
+            default: return false;
+        }
+    }
+    def is_constant_type(type: TypeId) -> Bool {
+        let inner = self.type_table.get_optional_inner(type) ?? type;
+        if self.type_table.is_string(inner) { return true; }
+        if let info = self.type_table.get_type(inner) { switch info.data { case .primitive(let primitive): switch primitive { case .void_type | .raw_ptr: return false; default: return true; } default: {} } }
+        false
+    }
+    pub def with_equalities(type: TypeId) -> TypeId {
+        if self.projection_equalities.len() == 0 { return type; }
+        self.generic_inference.substitute_type(type, self.projection_equalities)
+    }
+    // Equality constraints such as `where C.Item == i32`, as (projection, required type) pairs.
+    pub def equality_constraints(constraints: Vec<NodeId>) -> Vec<(TypeId, TypeId)> {
+        let pairs = Vec<(TypeId, TypeId)>.new();
+        for id in constraints { if let node = self.arena.get(id) { switch node.form { case .constraint(let data): if data.kind.equals("equals") {
+            if let subject = data.subject { switch subject { case .type_ref(let ref): pairs.push((self.type_resolver.resolve(ref), self.type_resolver.resolve(data.equal_type))); default: {} } }
+        } default: {} } } }
+        pairs
+    }
     pub def infer_expr(id: NodeId?) -> TypeId {
         if let ref = id { if let callback = self.infer_callback { return callback(ref); } }
         self.type_table.error_type
@@ -269,7 +336,8 @@ pub struct CheckerState {
     pub def check_assignable(source: TypeId, target: TypeId, context: String, id: NodeId? = nil) -> Void {
         let table = self.type_table;
         if table.is_error(source) || table.is_error(target) || self.types_equal(source, target) { return; }
-        if let info = table.get_type(target) { switch info.data { case .type_variable: return; default: {} } }
+        // Generic parameters are checked when specialized; projections such as C.Item are opaque.
+        if let info = table.get_type(target) { switch info.data { case .type_variable(let variable): if variable.name.find(".") < 0 { return; } default: {} } }
         // A value may be wrapped by every optional layer of the target, e.g. i32 into (i32?)?.
         var layer = target; var wrapping = true;
         while wrapping {
@@ -295,7 +363,7 @@ pub struct CheckerState {
             if self.is_raw_ptr(target) { return; }
             self.error(TypeErrorKind.type_mismatch(), f"Cannot assign nil to non-optional type {table.format_type(target)} in {context}", id); return;
         }
-        if let info = table.get_type(source) { switch info.data { case .type_variable: return; default: {} } }
+        if let info = table.get_type(source) { switch info.data { case .type_variable(let variable): if variable.name.find(".") < 0 { return; } default: {} } }
         if table.is_never(source) || table.can_widen_int(source, target) { return; }
         self.error(TypeErrorKind.type_mismatch(), f"Cannot assign {table.format_type(source)} to {table.format_type(target)} in {context}", id);
     }

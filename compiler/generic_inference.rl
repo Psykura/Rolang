@@ -219,6 +219,27 @@ pub struct GenericInference {
         }
         inferred
     }
+    // A type parameter argument satisfies a protocol through its own bounds: the same protocol,
+    // or one whose (inherited, flattened) requirements include all of the protocol's.
+    def bound_satisfies(concrete: TypeId, protocol: TypeId) -> Bool {
+        guard let info = self.type_table.get_type(concrete) else { return false; }
+        var bounds = FrozenVec<TypeId>.empty(); switch info.data { case .type_variable(let data): bounds = data.bounds; default: return false; }
+        guard let wanted = self.protocol_data(protocol) else { return false; }
+        for bound in bounds {
+            if bound == protocol { return true; }
+            if let have = self.protocol_data(bound) {
+                var covered = true;
+                for req in wanted.func_requirements { var found = false; for other in have.func_requirements { if other.name.equals(req.name) { found = true; } } if !found { covered = false; } }
+                for req in wanted.prop_requirements { var found = false; for other in have.prop_requirements { if other.name.equals(req.name) { found = true; } } if !found { covered = false; } }
+                if covered { return true; }
+            }
+        }
+        false
+    }
+    def protocol_data(type: TypeId) -> ProtocolTypeData? {
+        if let info = self.type_table.get_type(type) { switch info.data { case .protocol(let data): return data; default: {} } }
+        nil
+    }
     // `checker` must be the checker that has seen extension conformances.
     pub def check_generic_constraints(inferred: Dict<String, TypeId>, params: Vec<NodeId>, checker: ConformanceChecker) -> Void {
         for id in params {
@@ -230,7 +251,7 @@ pub struct GenericInference {
                         for bound in bounds {
                             let protocol = self.type_resolver.resolve(bound);
                             if self.type_table.is_error(protocol) || !self.type_table.is_protocol(protocol) { continue; }
-                            if !checker.check_conformance(concrete, protocol).conforms {
+                            if !self.bound_satisfies(concrete, protocol) && !checker.check_conformance(concrete, protocol).conforms {
                                 var name = "";
                                 if let annotation = self.arena.get(bound) { switch annotation.form { case .named_type(let data): name = data.name; default: {} } }
                                 if let report = self.error_reporter {

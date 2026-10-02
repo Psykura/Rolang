@@ -28,12 +28,19 @@ pub struct ConformanceChecker {
     pub let symbol_table: SymbolTable;
     let cache: Dict<String, ConformanceResult>;
     let extensions: Vec<ConformanceExtension>;
-    // Witness method generic parameters, mapped to the requirement's type variables.
+    // Witness type names: the conforming type's generic parameters mapped to its type
+    // arguments, plus a witness method's generic parameters mapped to the requirement's.
     var generic_scope: Dict<String, TypeId>;
+    var type_scope: Dict<String, TypeId>;
+    // Associated type placeholders bound while checking one conformance, and the
+    // requirement's own method generic names, which are not placeholders.
+    var bindings: Dict<String, TypeId>;
+    var method_generics: FrozenVec<String>;
     pub static def new(arena: AstArena, type_table: TypeTable, symbol_table: SymbolTable) -> ConformanceChecker {
         ConformanceChecker { arena, type_table, symbol_table,
             cache: Dict<String, ConformanceResult>.with_capacity(16, 1), extensions: Vec<ConformanceExtension>.new(),
-            generic_scope: Dict<String, TypeId>.with_capacity(4, 1) }
+            generic_scope: Dict<String, TypeId>.with_capacity(4, 1), type_scope: Dict<String, TypeId>.with_capacity(4, 1),
+            bindings: Dict<String, TypeId>.with_capacity(4, 1), method_generics: FrozenVec<String>.empty() }
     }
     pub def register_extension(concrete: TypeId, protocol: TypeId, symbol: SymbolId) -> Void {
         var found = false;
@@ -70,6 +77,8 @@ pub struct ConformanceChecker {
         var known = false;
         if let actual = self.type_table.get_type(concrete) { known = true; }
         if !known { result.errors.push(f"Unknown type: TypeId({concrete.id})"); return result; }
+        self.bindings = Dict<String, TypeId>.with_capacity(4, 1);
+        self.type_scope = self.type_arguments(concrete);
         for requirement in data.func_requirements {
             if let witness = self.find_func_witness(concrete, requirement, result.errors) { result.witnesses.push(witness); }
             else if !has_error_prefix(result.errors, f"Method '{requirement.name}' ") { result.missing_requirements.push(requirement.name); }
@@ -78,7 +87,13 @@ pub struct ConformanceChecker {
             if let witness = self.find_prop_witness(concrete, requirement, result.errors) { result.witnesses.push(witness); }
             else if !has_error_prefix(result.errors, f"Property '{requirement.name}' ") { result.missing_requirements.push(requirement.name); }
         }
+        if result.missing_requirements.len() == 0 && result.errors.len() == 0 {
+            for name in self.associated_names(data.symbol_id) { if !self.bindings.contains(name) {
+                result.errors.push(f"Cannot infer associated type '{name}' from the conforming members");
+            } }
+        }
         result.conforms = result.missing_requirements.len() == 0 && result.errors.len() == 0;
+        if result.conforms { for entry in self.bindings.entries() { self.type_table.bind_associated(concrete, entry.key, entry.value); } }
         result
     }
     def type_members(concrete: TypeId) -> Vec<NodeId>? {
@@ -158,7 +173,7 @@ pub struct ConformanceChecker {
                         if let annotation = prop.type_annotation { actual = self.resolve_ast_type(annotation); }
                         var matches = false;
                         var display = "unknown";
-                        if let resolved = actual { matches = resolved == requirement.type_id; display = self.type_table.format_type(resolved); }
+                        if let resolved = actual { matches = self.matches(resolved, requirement.type_id); display = self.type_table.format_type(resolved); }
                         if !matches {
                             errors.push(f"Property '{requirement.name}' has type {display}, expected {self.type_table.format_type(requirement.type_id)}"); return nil;
                         }
@@ -182,8 +197,8 @@ pub struct ConformanceChecker {
         if func.generic_params.len() != requirement.generic_params.len() {
             return f"generic parameter count mismatch: expected {requirement.generic_params.len()}, got {func.generic_params.len()}";
         }
-        self.generic_scope = Dict<String, TypeId>.with_capacity(4, 1);
-        defer { self.generic_scope = Dict<String, TypeId>.with_capacity(4, 1); }
+        self.generic_scope = Dict<String, TypeId>.with_capacity(4, 1); self.method_generics = requirement.generic_params;
+        defer { self.generic_scope = Dict<String, TypeId>.with_capacity(4, 1); self.method_generics = FrozenVec<String>.empty(); }
         for index in 0..<func.generic_params.len() { if let node = self.arena.get(func.generic_params[index]) { switch node.form {
             case .generic_param(let param): self.generic_scope[param.name] = self.type_table.make_type_variable(requirement.generic_params.get(index));
             default: {}
@@ -191,11 +206,11 @@ pub struct ConformanceChecker {
         for index in 0..<func.params.len() {
             let actual = self.param_type(func.params[index]);
             let expected = requirement.params.get(index);
-            if !self.type_table.types_equal(actual, expected) { return f"parameter {index + 1} type mismatch: expected {self.type_table.format_type(expected)}, got {self.type_table.format_type(actual)}"; }
+            if !self.matches(actual, expected) { return f"parameter {index + 1} type mismatch: expected {self.type_table.format_type(expected)}, got {self.type_table.format_type(actual)}"; }
         }
         var actual = self.type_table.void_type;
         if let node = func.return_type { actual = self.resolve_ast_type(node); }
-        if !self.type_table.types_equal(actual, requirement.return_type) {
+        if !self.matches(actual, requirement.return_type) {
             return f"return type mismatch: expected {self.type_table.format_type(requirement.return_type)}, got {self.type_table.format_type(actual)}";
         }
         nil
@@ -206,6 +221,88 @@ pub struct ConformanceChecker {
         }
         self.type_table.error_type
     }
+    // Compares a witness type with a requirement type, binding associated type placeholders
+    // (requirement type variables other than the method's own generic parameters).
+    def matches(actual: TypeId, expected: TypeId) -> Bool {
+        if actual == expected { return true; }
+        guard let want = self.type_table.get_type(expected) else { return false; }
+        guard let have = self.type_table.get_type(actual) else { return false; }
+        switch want.data {
+            case .type_variable(let variable):
+                var generic = false; for name in self.method_generics { if name.equals(variable.name) { generic = true; } }
+                if !generic {
+                    if let bound = self.bindings[variable.name] { return self.type_table.types_equal(actual, bound); }
+                    if self.type_table.is_error(actual) { return false; }
+                    self.bindings[variable.name] = actual; return true;
+                }
+            case .optional(let inner): switch have.data { case .optional(let other): return self.matches(other, inner); default: {} }
+            case .function(let x): switch have.data { case .function(let y):
+                if x.is_async != y.is_async || x.params.len() != y.params.len() { return false; }
+                for index in 0..<x.params.len() { if !self.matches(y.params.get(index), x.params.get(index)) { return false; } }
+                return self.matches(y.return_type, x.return_type);
+                default: {}
+            }
+            case .struct_type(let x): switch have.data { case .struct_type(let y):
+                if let symbol = x.symbol_id { if let other = y.symbol_id { if symbol != other || x.type_args.len() != y.type_args.len() { return false; }
+                    for index in 0..<x.type_args.len() { if !self.matches(y.type_args.get(index), x.type_args.get(index)) { return false; } }
+                    return true;
+                } }
+                let xf = x.anon_fields ?? FrozenVec<TupleField>.empty(); let yf = y.anon_fields ?? FrozenVec<TupleField>.empty();
+                if x.symbol_id == nil && y.symbol_id == nil && xf.len() == yf.len() {
+                    for index in 0..<xf.len() { if !self.matches(yf.get(index).type_id, xf.get(index).type_id) { return false; } }
+                    return true;
+                }
+                default: {}
+            }
+            case .enum_type(let x): switch have.data { case .enum_type(let y):
+                if x.symbol_id != y.symbol_id || x.type_args.len() != y.type_args.len() { return false; }
+                for index in 0..<x.type_args.len() { if !self.matches(y.type_args.get(index), x.type_args.get(index)) { return false; } }
+                return true;
+                default: {}
+            }
+            default: {}
+        }
+        self.type_table.types_equal(actual, expected)
+    }
+    // Generic parameter names of a concrete struct/enum mapped to its type arguments.
+    def type_arguments(concrete: TypeId) -> Dict<String, TypeId> {
+        let scope = Dict<String, TypeId>.with_capacity(4, 1);
+        guard let info = self.type_table.get_type(concrete) else { return scope; }
+        var symbol_id: SymbolId? = nil; var args = FrozenVec<TypeId>.empty();
+        switch info.data { case .struct_type(let data): symbol_id = data.symbol_id; args = data.type_args; case .enum_type(let data): symbol_id = data.symbol_id; args = data.type_args; default: {} }
+        guard let sid = symbol_id else { return scope; }
+        guard let symbol = self.symbol_table.get_symbol(sid) else { return scope; }
+        guard let decl = symbol.decl_node else { return scope; }
+        guard let node = self.arena.get(decl) else { return scope; }
+        var params = Vec<NodeId>.new();
+        switch node.form { case .struct_decl(let data): params = data.generic_params; case .enum_decl(let data): params = data.generic_params; default: {} }
+        for index in 0..<params.len() { if index < args.len() { if let param = self.arena.get(params[index]) { switch param.form {
+            case .generic_param(let data): scope[data.name] = args.get(index);
+            default: {}
+        } } } }
+        scope
+    }
+    // Associated type names declared by a protocol or the protocols it inherits.
+    pub def associated_names(protocol_symbol: SymbolId) -> Vec<String> {
+        let names = Vec<String>.new(); self.collect_associated(protocol_symbol, names, 0); names
+    }
+    def collect_associated(protocol_symbol: SymbolId, names: Vec<String>, depth: i32) -> Void {
+        if depth > 16 { return; }
+        guard let symbol = self.symbol_table.get_symbol(protocol_symbol) else { return; }
+        guard let decl = symbol.decl_node else { return; }
+        guard let node = self.arena.get(decl) else { return; }
+        switch node.form { case .protocol_decl(let data):
+            for member in data.members { if let child = self.arena.get(member) { switch child.form {
+                case .associated_type_decl(let assoc): var present = false; for name in names { if name.equals(assoc.name) { present = true; } } if !present { names.push(assoc.name); }
+                default: {}
+            } } }
+            // Parents from `protocol B: A`, stored as `where Self: A`.
+            for id in data.constraints { if let constraint = self.arena.get(id) { switch constraint.form { case .constraint(let value): for bound in value.bounds {
+                if let info = self.type_table.get_type(self.resolve_ast_type(bound)) { switch info.data { case .protocol(let parent): self.collect_associated(parent.symbol_id, names, depth + 1); default: {} } }
+            } default: {} } } }
+            default: {}
+        }
+    }
     // Resolve conformance annotations independently of
     // checker resolution (notably aliases and type variables are not accepted).
     pub def resolve_ast_type(id: NodeId?) -> TypeId {
@@ -214,7 +311,10 @@ pub struct ConformanceChecker {
         switch node.form {
             case .builtin_type(let data): return self.type_table.get_builtin(data.name) ?? self.type_table.error_type;
             case .named_type(let data):
-                if data.generic_args.len() == 0 { if let scoped = self.generic_scope[data.name] { return scoped; } }
+                if data.generic_args.len() == 0 && data.module_path.len() == 0 {
+                    if let scoped = self.generic_scope[data.name] { return scoped; }
+                    if let scoped = self.type_scope[data.name] { return scoped; }
+                }
                 var symbol_id = self.symbol_table.get_builtin(data.name);
                 if let builtin = symbol_id {} else { symbol_id = self.symbol_table.get_type_symbol(data.name); }
                 let args = Vec<TypeId>.new();

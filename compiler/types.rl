@@ -13,6 +13,8 @@ pub struct TypeTable {
     let member_cache: Dict<i32, TypeMembers>;
     let generic_param_names: Dict<i32, FrozenVec<String>>;
     let descriptors: Dict<i32, TypeDescriptorEntry>;
+    // Associated type bindings ("<concrete type id>:<name>"), recorded when a type conforms.
+    let associated: Dict<String, TypeId>;
     pub var error_type: TypeId;
     pub var never_type: TypeId;
     pub var void_type: TypeId;
@@ -27,6 +29,7 @@ pub struct TypeTable {
             member_cache: Dict<i32, TypeMembers>.with_capacity(16, 0),
             generic_param_names: Dict<i32, FrozenVec<String>>.with_capacity(16, 0),
             descriptors: Dict<i32, TypeDescriptorEntry>.with_capacity(16, 0),
+            associated: Dict<String, TypeId>.with_capacity(16, 1),
             error_type: invalid, never_type: invalid, void_type: invalid, nil_type: invalid
         };
         let primitives = [PrimitiveType.i8(), PrimitiveType.i16(), PrimitiveType.i32(), PrimitiveType.i64(),
@@ -287,6 +290,18 @@ pub struct TypeTable {
             case .error: return "<error>";
             case .never: return "Never";
         }
+    }
+    pub def bind_associated(concrete: TypeId, name: String, type: TypeId) -> Void { self.associated[f"{concrete.id}:{name}"] = type; }
+    pub def associated_type(concrete: TypeId, name: String) -> TypeId? { self.associated[f"{concrete.id}:{name}"] }
+    // Substitutes a projection type variable such as `C.Item` once `C` is mapped: a concrete
+    // base yields its associated type binding, another type variable `D` yields `D.Item`.
+    pub def project(name: String, mapping: Dict<String, TypeId>) -> TypeId? {
+        let dot = name.find(".");
+        if dot <= 0 { return nil; }
+        guard let base = mapping[name.substring(0, dot)] else { return nil; }
+        let member = name.substring(dot + 1, (name.len() as i32) - dot - 1);
+        if let info = self.get_type(base) { switch info.data { case .type_variable(let data): return self.make_type_variable(data.name + "." + member); default: {} } }
+        self.associated_type(base, member)
     }
     // Structural type equality; type variables compare by name.
     pub def types_equal(left: TypeId, right: TypeId) -> Bool {

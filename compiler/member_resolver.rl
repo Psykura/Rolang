@@ -246,7 +246,7 @@ pub struct MemberResolver {
         if subst.len() == 0 { return type_id; }
         guard let info = self.type_table.get_type(type_id) else { return type_id; }
         switch info.data {
-            case .type_variable(let data): return subst[data.name] ?? type_id;
+            case .type_variable(let data): return subst[data.name] ?? (self.type_table.project(data.name, subst) ?? type_id);
             case .struct_type(let data):
                 if let symbol = data.symbol_id {
                     let args = Vec<TypeId>.new();

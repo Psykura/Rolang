@@ -15,7 +15,7 @@ pub struct TypeSubstitution {
     pub def apply(type: TypeId, table: TypeTable) -> TypeId {
         guard let info = table.get_type(type) else { return type; }
         switch info.data {
-            case .type_variable(let data): return self.mapping[data.name] ?? type;
+            case .type_variable(let data): return self.mapping[data.name] ?? (table.project(data.name, self.mapping) ?? type);
             case .struct_type(let data):
                 if let sid = data.symbol_id { let args = Vec<TypeId>.new(); for arg in data.type_args { args.push(self.apply(arg, table)); } return table.make_struct(sid, args); }
                 let fields = Vec<(String?, TypeId)>.new(); if let values = data.anon_fields { for field in values { let name: String? = field.name; fields.push((name, self.apply(field.type_id, table))); } } return table.make_tuple(fields);

@@ -337,6 +337,13 @@ pub struct ExtensionDeclAst {
     pub var constraints: Vec<NodeId>;
     pub var members: Vec<NodeId>;
 }
+// Module-level `let NAME = value;`: a compile-time constant inlined at each use.
+pub struct ConstantDeclAst {
+    pub var visibility: String;
+    pub var name: String;
+    pub var type_annotation: NodeId?;
+    pub var value: NodeId?;
+}
 pub struct TypeAliasDeclAst {
     pub var visibility: String;
     pub var name: String;
@@ -419,6 +426,7 @@ pub enum NodeForm {
     case protocol_decl(ProtocolDeclAst);
     case extension_decl(ExtensionDeclAst);
     case type_alias_decl(TypeAliasDeclAst);
+    case constant_decl(ConstantDeclAst);
 
     pub def kind() -> String {
         switch self {
@@ -496,6 +504,7 @@ pub enum NodeForm {
             case .protocol_decl(_): "ProtocolDecl";
             case .extension_decl(_): "ExtensionDecl";
             case .type_alias_decl(_): "TypeAliasDecl";
+            case .constant_decl(_): "ConstantDecl";
         }
     }
     pub def category() -> NodeCategory {
@@ -574,6 +583,7 @@ pub enum NodeForm {
             case .protocol_decl(_): NodeCategory.declaration();
             case .extension_decl(_): NodeCategory.declaration();
             case .type_alias_decl(_): NodeCategory.declaration();
+            case .constant_decl(_): NodeCategory.declaration();
         }
     }
     pub def children() -> Vec<NodeId> {
@@ -772,6 +782,9 @@ pub enum NodeForm {
             case .type_alias_decl(let data):
                 if let child = data.aliased_type { result.push(child); }
                 for child in data.generic_params { result.push(child); }
+            case .constant_decl(let data):
+                if let child = data.type_annotation { result.push(child); }
+                if let child = data.value { result.push(child); }
             default: {}
         }
         result

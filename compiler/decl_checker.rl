@@ -123,6 +123,7 @@ pub struct DeclChecker {
         self.state.member_resolver.set_current_source_module(self.state.arena.source_module(id));
         defer { self.state.member_resolver.set_current_source_module(previous); }
         switch node.form {
+            case .constant_decl(let data): if let sid = self.state.node_symbols[id.id] { self.state.constant_type(sid, data); }
             case .func_decl(let data):
                 if data.is_static { self.state.error(TypeErrorKind.invalid_operation(), "'static' is only valid on methods inside a type or extension", id); }
                 self.check_function(id, data);
@@ -144,6 +145,15 @@ pub struct DeclChecker {
         }
     }
     def check_function(id: NodeId, data: FuncDeclAst) -> Void {
+        // Inside the body, `where C.Item == T` makes the projection interchangeable with T.
+        let old_equalities = self.state.projection_equalities;
+        let equalities = Dict<String, TypeId>.with_capacity(4, 1);
+        for pair in self.state.equality_constraints(data.constraints) { if let info = self.state.type_table.get_type(pair.0) { switch info.data {
+            case .type_variable(let variable): equalities[variable.name] = pair.1;
+            default: self.state.error(TypeErrorKind.type_mismatch(), f"Equality constraints relate an associated type such as C.Item to a type; got {self.state.type_table.format_type(pair.0)}", id);
+        } } }
+        self.state.projection_equalities = equalities;
+        defer { self.state.projection_equalities = old_equalities; }
         if !data.is_static {
             if let type = self.state.current_self_type { if let symbol = self.state.node_symbols[id.id] { if let bound = self.state.resolution.self_symbols[symbol.id] { self.state.type_env[bound.id] = type; } } }
         }

@@ -87,6 +87,10 @@ pub struct HirBuilder {
         } }
         self.arena.add(HirForm.var_decl(HirVarDeclData { name, symbol_id: sid, type_id: type, initializer, is_mutable: mutable }))
     }
+    def constant_value(sid: SymbolId) -> NodeId? {
+        if let symbol = self.symbol_table.get_symbol(sid) { if let decl = symbol.decl_node { if let node = self.ast.get(decl) { switch node.form { case .constant_decl(let data): return data.value; default: {} } } } }
+        nil
+    }
     def type_of(id: NodeId?) -> TypeId { if let ref = id { return self.result.expr_types[ref.id] ?? self.type_table.error_type; } self.type_table.error_type }
     def hir_type(id: HirId) -> TypeId { self.arena.type_of(id, self.type_table.error_type) }
     def resolve(id: NodeId?) -> TypeId { self.type_resolver.resolve(id) }
@@ -152,7 +156,7 @@ pub struct HirBuilder {
                 let extended_type = self.resolve(data.extended_type);
                 let methods = Vec<HirId>.new(); for member in data.members { if let func = self.function(member) { methods.push(self.build_function(member, func, true)); } }
                 return self.arena.add(HirForm.extension(HirExtensionData { extended_type, methods }));
-            case .import_decl | .type_alias_decl: return nil;
+            case .import_decl | .type_alias_decl | .constant_decl: return nil;
             default: if node.form.category().name().equals("statement") { self.errors.push("Top-level statements are not supported"); }
         }
         nil
@@ -264,6 +268,8 @@ pub struct HirBuilder {
             case .literal(let data): return self.arena.add(HirForm.literal(HirLiteralData { type_id, value: self.literal_value(data.value), kind: data.kind }));
             case .identifier(let data):
                 let sid = self.symbol(ref, data.name, SymbolKind.variable(), Namespace.value());
+                // A module-level constant is its value expression, inlined at each use.
+                if let constant = self.constant_value(sid) { return self.expr(constant); }
                 if let cell = self.cell_types[sid.id] {
                     let holder = self.arena.add(HirForm.var_ref(HirVarData { type_id: cell, name: data.name, symbol_id: sid }));
                     return self.arena.add(HirForm.field_access(HirFieldAccessData { type_id, object: holder, field_name: "value", field_symbol: nil }));
@@ -503,7 +509,7 @@ pub struct HirBuilder {
     def substitute(type: TypeId, subst: Dict<String, TypeId>) -> TypeId {
         if subst.len() == 0 { return type; }
         if let info = self.type_table.get_type(type) { switch info.data {
-            case .type_variable(let data): return subst[data.name] ?? type;
+            case .type_variable(let data): return subst[data.name] ?? (self.type_table.project(data.name, subst) ?? type);
             case .struct_type(let data):
                 if let sid = data.symbol_id { let args = Vec<TypeId>.new(); for arg in data.type_args { args.push(self.substitute(arg, subst)); } return self.type_table.make_struct(sid, args); }
                 let fields = Vec<(String?, TypeId)>.new(); if let elements = data.anon_fields { for field in elements { let label: String? = field.name; fields.push((label, self.substitute(field.type_id, subst))); } } return self.type_table.make_tuple(fields);

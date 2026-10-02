@@ -114,6 +114,7 @@ pub struct NameResolver {
             case .type_alias_decl(let data): self.define_type(data.name, SymbolKind.type_alias(), id, data.visibility);
             case .func_decl(let data): self.define_value(data.name, SymbolKind.function(), id, false, data.visibility);
             case .extern_func_decl(let data): self.define_value(data.name, SymbolKind.extern_func(), id, false, data.visibility);
+            case .constant_decl(let data): self.define_value(data.name, SymbolKind.variable(), id, false, data.visibility);
             default: {}
         }
     }
@@ -138,6 +139,7 @@ pub struct NameResolver {
                 for param in data.params { self.resolve_param_type(param); }
                 self.resolve_type(data.return_type); self.pop_scope();
             case .extension_decl(let data): self.resolve_extension(id, data);
+            case .constant_decl(let data): self.resolve_type(data.type_annotation); self.resolve_expr(data.value);
             default: {}
         }
     }
@@ -328,6 +330,10 @@ pub struct NameResolver {
         switch node.form {
             case .builtin_type(let data): self.lookup_type(data.name, ref);
             case .named_type(let data):
+                // `C.Item` names an associated type of the generic parameter `C`.
+                if data.module_path.len() == 1 && data.generic_args.len() == 0 { if let scope = self.current_scope { if let base = scope.lookup_type(data.module_path[0]) {
+                    if let symbol = self.symbol_table.get_symbol(base) { switch symbol.kind { case .generic_param: self.node_symbols[ref.id] = base; return; default: {} } }
+                } } }
                 var name = data.name;
                 if data.module_path.len() > 0 { name = join_strings(data.module_path, ".") + "." + name; }
                 self.lookup_type(name, ref);

@@ -642,9 +642,27 @@ struct DeclarationCursor {
             visibility, generic_params, extended_type, conformances, constraints, members
         }), start)
     }
+    def parse_constant() -> NodeId? {
+        let start = self.current().span;
+        let visibility = self.visibility();
+        if !self.expect("let") { return nil; }
+        if !self.at_identifier() { self.fail("constant name"); return nil; }
+        let name = self.take();
+        var type_annotation: NodeId? = nil;
+        if self.match_text(":") {
+            guard let annotation = self.parse_type() else { return nil; }
+            type_annotation = annotation;
+        }
+        if !self.expect("=") { return nil; }
+        guard let value = self.parse_expression() else { return nil; }
+        if !self.expect(";") { return nil; }
+        self.make(NodeForm.constant_decl(ConstantDeclAst { visibility, name, type_annotation, value }), start)
+    }
     def parse_declaration() -> NodeId? {
         let word = self.spelling();
         let next = self.next_spelling();
+        if word.equals("let") || next.equals("let") { return self.parse_constant(); }
+        if word.equals("var") || next.equals("var") { self.fail("a declaration (module-level `var` is not supported; use `let` for a constant)"); return nil; }
         if word.equals("import") || next.equals("import") { return self.parse_import(); }
         if word.equals("typealias") || next.equals("typealias") { return self.parse_type_alias(); }
         if word.equals("extern") || next.equals("extern") { return self.parse_extern_func(); }

@@ -11,7 +11,7 @@ def declaration_starts(tokens: Vec<LexToken>, index: i32) -> Bool {
     let word = tokens[index].text;
     switch word {
         case "import", "typealias", "struct", "enum", "protocol",
-             "extension", "def", "extern", "pub", "private", "internal":
+             "extension", "def", "extern", "pub", "private", "internal", "let", "var":
             return true;
         case "unsafe":
             if index + 1 < tokens.len() {
@@ -44,18 +44,8 @@ pub def parse_program_tokens(tokens: Vec<LexToken>, arena: AstArena) -> ProgramP
             for extra in result.extra { items.push(extra); }
             index = result.next_index;
         } else {
-            let result = parse_statement_prefix(tokens, arena, index);
-            if let problem = result.error {
-                return ProgramParseResult { program: nil, error: problem };
-            }
-            if result.next_index <= index {
-                return ProgramParseResult { program: nil, error: "incomplete statement" };
-            }
-            guard let item = result.statement else {
-                return ProgramParseResult { program: nil, error: "missing statement" };
-            }
-            items.push(item);
-            index = result.next_index;
+            let token = tokens[index];
+            return ProgramParseResult { program: nil, error: f"expected a declaration at {token.span.line}:{token.span.column}, found '{token.text}' (statements belong inside functions; module-level constants use `let`)" };
         }
     }
     var span = Span.new(1, 1, 1, 1);

@@ -65,13 +65,13 @@ keeps source-language changes connected to real compiler workloads.
 | Data | Structs, payload enums, generic types, transparent aliases and default initialization |
 | Functions | Methods, static methods, tail expressions, named/default arguments and closures |
 | Control | if/while/for, ranges, switch statements/expressions, guards, patterns and defer |
-| Abstraction | Generic constraints, protocols, properties, extensions and existential dispatch |
+| Abstraction | Generic constraints, protocols with inheritance and associated types, properties, extensions and existential dispatch |
 | Failure | Optional binding/chaining/coalescing and Result/optional propagation |
 | Text | Byte-oriented strings, raw/multiline literals, interpolation and builders |
 | Lifetimes | ARC, synchronous cycle GC, release/trace hooks and shallow clone |
 | Async | State machines, spawn, repeatable awaits, cancellation, timers and socket streams |
 | Interop | Unsafe contexts, RawPtr, C declarations and layout/type built-ins |
-| Modules | File/dotted imports, aliases, public exports, re-exports and compiled .rlm |
+| Modules | File/dotted imports, aliases, public exports and constants, re-exports and compiled .rlm |
 | Compilation | Typed HIR/MIR, specialization, ownership passes, LLVM text, cache and LTO |
 
 ## Bindings, types and shared objects
@@ -112,6 +112,13 @@ type `T` converts to every optional layer of `(T?)?`.
 Declarations without an initializer produce the language's default state:
 numeric zero, false, nil for optionals and an empty String. Managed aggregate
 defaults are built by lowering; this does not expose uninitialized storage.
+
+A module-level `let NAME = value;` (or `pub let` to export it) declares a
+compile-time constant. Its value must be a constant expression made of literals,
+operators, casts, ternaries and other constants, and its type must be a number,
+Bool, String or an optional of one; each use evaluates the value in place, so
+declaration order does not matter. Module-level `var` and other statements are
+not allowed.
 
 ## Functions, named arguments and tail expressions
 
@@ -289,7 +296,46 @@ conformance without adding stored fields; extension conformance satisfies
 generic constraints on functions and types. A requirement may be a generic
 method (`def map<U>(f: (i32) -> U) -> U;`); a witness declares the same number
 of generic parameters, and calls through a constrained type parameter infer them
-from the arguments. `any P` boxes a conforming object with its witness table for
+from the arguments.
+
+A protocol may declare associated types (`associatedtype Item;`) and use them in
+its requirements. Each conformance infers them from its members, e.g. a
+`def first() -> i32` witness makes `Item` i32; a generic conforming type infers
+them per type argument. A generic parameter `C: Container` names them as `C.Item`,
+and `where C.Item == i32` requires a specific type, which the body may then use as
+i32. Generic calls check the callee's bounds and `where` constraints.
+
+<!-- example: associated -->
+~~~rolang
+protocol Container {
+    associatedtype Item;
+    def get(index: i32) -> Item;
+    def size() -> i32;
+}
+struct Stack<T>: Container {
+    var items: [T];
+    def get(index: i32) -> T { self.items[index] }
+    def size() -> i32 { self.items.len() as i32 }
+}
+
+let FIRST = 0;
+
+def last<C: Container>(c: C) -> C.Item { c.get(c.size() - 1) }
+def total<C: Container>(c: C) -> i32 where C.Item == i32 {
+    var sum = 0;
+    for index in FIRST..<c.size() { sum += c.get(index); }
+    sum
+}
+
+def main() -> i32 {
+    let numbers = Stack<i32> { items: [10, 30, 2] };
+    let words = Stack<String> { items: ["ro", "lang"] };
+    if total(numbers) == 42 && last(words) == "lang" && last(numbers) == 2 { return 0; }
+    1
+}
+~~~
+
+`any P` boxes a conforming object with its witness table for
 dynamic dispatch.
 
 <!-- example: protocols -->

@@ -102,6 +102,7 @@ pub struct ExprChecker {
     def identifier(id: NodeId) -> TypeId {
         if let sid = self.state.node_symbols[id.id] {
             if let type = self.state.type_env[sid.id] { return type; }
+            if let constant = self.state.constant_decl(sid) { return self.state.constant_type(sid, constant); }
             if let symbol = self.state.symbol_table.get_symbol(sid) {
                 switch symbol.kind {
                     case .function | .extern_func: return self.state.generic_inference.get_function_type(symbol);
@@ -226,6 +227,7 @@ pub struct ExprChecker {
                     else { if let actual = arg.label { matches = actual.equals(param.internal_name); } else { matches = true; } }
                     if !matches { self.state.error(TypeErrorKind.wrong_arg_type(), f"argument {index + 1} label mismatch: expected {param.external_name ?? "<none>"}, got {arg.label ?? "<none>"}", data.arguments[index]); }
                 } } } }
+                if let sid = symbol { self.check_call_constraints(sid, mapping, id); }
                 if let names = self.requirement_generics(callee) {
                     // Generic protocol requirement called through a constrained type parameter:
                     // infer the method's own type parameters from the arguments.
@@ -293,6 +295,24 @@ pub struct ExprChecker {
             default: {}
         } } } nil
     }
+    // Generic calls must satisfy the callee's bounds and `where` equality constraints.
+    def check_call_constraints(sid: SymbolId, mapping: Dict<String, TypeId>, id: NodeId) -> Void {
+        guard let symbol = self.state.symbol_table.get_symbol(sid) else { return; }
+        guard let decl = symbol.decl_node else { return; }
+        guard let node = self.state.arena.get(decl) else { return; }
+        var func: FuncDeclAst? = nil; switch node.form { case .func_decl(let data): func = data; default: {} }
+        guard let data = func else { return; }
+        if data.generic_params.len() == 0 { return; }
+        if self.unbound(data.generic_params, mapping).len() > 0 { return; }
+        self.state.generic_inference.check_generic_constraints(mapping, data.generic_params, self.state.conformance_checker);
+        for pair in self.state.equality_constraints(data.constraints) {
+            let actual = self.state.generic_inference.substitute_type(pair.0, mapping); let expected = self.state.generic_inference.substitute_type(pair.1, mapping);
+            if self.state.type_table.has_type_variables(actual) || self.state.type_table.has_type_variables(expected) { continue; }
+            if !self.state.types_equal(actual, expected) {
+                self.state.error(TypeErrorKind.type_mismatch(), f"Call to '{data.name}' requires {self.state.type_table.format_type(pair.0)} == {self.state.type_table.format_type(pair.1)}, but it is {self.state.type_table.format_type(actual)}", id);
+            }
+        }
+    }
     // Generic parameter names of the protocol requirement named by `callee` when its receiver
     // is a protocol-constrained type parameter.
     def requirement_generics(callee: NodeId) -> Dict<String, Bool>? {
@@ -313,6 +333,18 @@ pub struct ExprChecker {
         }
         nil
     }
+    // A requirement seen through the type parameter `C` refers to C's associated types:
+    // `Item` becomes the projection `C.Item` (or its `where` equality).
+    def project_member(member: TypeId, receiver: String, protocol: TypeId) -> TypeId {
+        guard let info = self.state.type_table.get_type(protocol) else { return member; }
+        var symbol: SymbolId? = nil; switch info.data { case .protocol(let data): symbol = data.symbol_id; default: {} }
+        guard let sid = symbol else { return member; }
+        let names = self.state.conformance_checker.associated_names(sid);
+        if names.len() == 0 { return member; }
+        let mapping = Dict<String, TypeId>.with_capacity(4, 1);
+        for name in names { mapping[name] = self.state.type_table.make_type_variable(receiver + "." + name); }
+        self.state.with_equalities(self.state.generic_inference.substitute_type(member, mapping))
+    }
     def protocol_member(protocol: TypeId, name: String, existential: Bool) -> TypeId? {
         if let info = self.state.type_table.get_type(protocol) { switch info.data { case .protocol(let data):
             for func in data.func_requirements { if func.name.equals(name) { return self.state.type_table.make_function(func.params.to_vec(), func.return_type, !existential && func.is_async); } }
@@ -332,7 +364,7 @@ pub struct ExprChecker {
         let type = self.state.infer_with_expected(data.object, nil); let object_is_type = self.is_type_reference(data.object);
         if let info = self.state.type_table.get_type(type) { switch info.data {
             case .existential(let value): if let member = self.protocol_member(value.protocol_id, data.member, true) { return member; }
-            case .type_variable(let value): for bound in value.bounds { if let member = self.protocol_member(bound, data.member, false) { return member; } }
+            case .type_variable(let value): for bound in value.bounds { if let member = self.protocol_member(bound, data.member, false) { return self.project_member(member, value.name, bound); } }
             default: {}
         } }
         if !object_is_type { if let field = self.state.member_resolver.get_field(type, data.member) { self.field_visibility(field, id); self.state.record_call(id, CalleeKind.indirect()); return field.type_id; } }

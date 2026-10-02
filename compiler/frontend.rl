@@ -363,6 +363,7 @@ pub struct Frontend {
                                 case .struct_type: kind = "struct"; case .enum_type: kind = "enum";
                                 case .protocol: kind = "protocol"; case .type_alias: kind = "typealias";
                                 case .function: kind = "function"; case .extern_func: kind = "externfunc";
+                                case .variable: if let decl = symbol.decl_node { if let item = self.arena.get(decl) { switch item.form { case .constant_decl: kind = "constant"; default: {} } } }
                                 default: {}
                             }
                             if kind.len() > 0 { module.add_export(symbol.name, sid, kind, symbol.visibility); }

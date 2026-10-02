@@ -118,6 +118,22 @@ pub struct TypeResolver {
             }
         }
 
+        if named.module_path.len() == 1 && named.generic_args.len() == 0 { if let base = self.node_symbols[named_id.id] {
+            if let symbol = self.symbol_table.get_symbol(base) { switch symbol.kind { case .generic_param:
+                // Projection `C.Item`: substituted with C's binding, or kept as a named type variable.
+                let projection = symbol.name + "." + named.name;
+                if !self.declares_associated(symbol, named.name) {
+                    self.report("NOT_A_TYPE", f"Generic parameter '{symbol.name}' has no associated type '{named.name}'", named_id);
+                    return self.type_table.error_type;
+                }
+                if let replacements = subst {
+                    if let replacement = replacements[projection] { return replacement; }
+                    if let projected = self.type_table.project(projection, replacements) { return projected; }
+                }
+                return self.type_table.make_type_variable(projection);
+                default: {}
+            } }
+        } }
         guard let symbol_id = self.lookup_named_symbol(named, named_id) else {
             if let builtin = self.type_table.get_builtin(named.name) { return builtin; }
             var display = named.name;
@@ -199,6 +215,9 @@ pub struct TypeResolver {
                     }
                 }
                 return self.type_table.make_type_variable(symbol.name, bounds);
+            case .associated_type:
+                // Inside its protocol an associated type is a placeholder bound by each conformance.
+                return self.type_table.make_type_variable(symbol.name);
             case .builtin_type:
                 if let builtin = self.type_table.get_builtin(symbol.name) { return builtin; }
             default: {}
@@ -213,6 +232,28 @@ pub struct TypeResolver {
         switch node.form { case .type_alias_decl(let data): data; default: nil; }
     }
 
+    // Whether a protocol bound of the generic parameter declares the associated type `name`.
+    def declares_associated(param: Symbol, name: String) -> Bool {
+        guard let declaration = self.generic_param_decl(param) else { return false; }
+        guard let bounds = declaration.bounds else { return false; }
+        for bound in bounds { if let sid = self.node_symbols[bound.id] { if self.protocol_declares(sid, name, 0) { return true; } } }
+        false
+    }
+    def protocol_declares(protocol: SymbolId, name: String, depth: i32) -> Bool {
+        if depth > 16 { return false; }
+        guard let symbol = self.symbol_table.get_symbol(protocol) else { return false; }
+        guard let decl = symbol.decl_node else { return false; }
+        guard let node = self.arena.get(decl) else { return false; }
+        switch node.form { case .protocol_decl(let data):
+            for member in data.members { if let child = self.arena.get(member) { switch child.form { case .associated_type_decl(let assoc): if assoc.name.equals(name) { return true; } default: {} } } }
+            // Parents from `protocol B: A`, stored as `where Self: A`.
+            for id in data.constraints { if let constraint = self.arena.get(id) { switch constraint.form { case .constraint(let value): for bound in value.bounds {
+                if let parent = self.node_symbols[bound.id] { if self.protocol_declares(parent, name, depth + 1) { return true; } }
+            } default: {} } } }
+            default: {}
+        }
+        false
+    }
     def generic_param_decl(symbol: Symbol) -> GenericParamAst? {
         guard let id = symbol.decl_node else { return nil; }
         guard let node = self.arena.get(id) else { return nil; }
