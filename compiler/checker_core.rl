@@ -73,6 +73,8 @@ pub struct TypeCheckResult {
     pub let propagation_error_types: Dict<i32, TypeId>;
     // Element type of each for-loop, keyed by the loop statement.
     pub let loop_element_types: Dict<i32, TypeId>;
+    // Equality operators with an optional operand (`x == 5`, `a != b`), keyed by node.
+    pub let optional_comparisons: Dict<i32, Bool>;
 
     pub static def new(type_table: TypeTable) -> TypeCheckResult {
         TypeCheckResult {
@@ -86,7 +88,8 @@ pub struct TypeCheckResult {
             intrinsic_types: Dict<i32, TypeId>.with_capacity(16, 0),
             intrinsic_values: Dict<i32, i64>.with_capacity(16, 0),
             propagation_error_types: Dict<i32, TypeId>.with_capacity(16, 0),
-            loop_element_types: Dict<i32, TypeId>.with_capacity(16, 0)
+            loop_element_types: Dict<i32, TypeId>.with_capacity(16, 0),
+            optional_comparisons: Dict<i32, Bool>.with_capacity(16, 0)
         }
     }
 

@@ -145,6 +145,14 @@ pub struct ExprChecker {
             // `x == nil` and `x != nil` test whether an optional holds a value.
             let table = self.state.type_table;
             if (left == table.nil_type && table.is_optional(right)) || (right == table.nil_type && table.is_optional(left)) { return self.state.builtin("Bool"); }
+            // With an optional operand, equal means both nil or both present with equal values.
+            if (table.is_optional(left) || table.is_optional(right)) && left != table.nil_type && right != table.nil_type {
+                let inner_left = table.get_optional_inner(left) ?? left; let inner_right = table.get_optional_inner(right) ?? right;
+                self.state.result.optional_comparisons[id.id] = true;
+                if let type = self.state.try_operator_overload(id, inner_left, data.op, inner_right) { return type; }
+                self.state.binary_types(inner_left, data.op, inner_right);
+                return self.state.builtin("Bool");
+            }
         }
         if let type = self.state.try_operator_overload(id, left, data.op, right) { return type; }
         self.state.binary_types(left, data.op, right)

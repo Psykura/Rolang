@@ -214,7 +214,8 @@ dot shorthand.
 `T?` represents a value or `nil`. `if let` binds a present value, `while let`
 repeats while one is present, `guard let` requires one and keeps the binding
 after the guard, `??` supplies a fallback, and `?.` performs optional chaining.
-`x == nil` and `x != nil` test for a value. A guard's else branch must leave the
+`x == nil` and `x != nil` test for a value, and `x == 5` compares a present value
+(`nil` equals only `nil`, so two optionals are equal when both are nil). A guard's else branch must leave the
 path. With a non-optional value these bindings need a refutable pattern, such as
 `while let .item(value) = next()`.
 Chaining covers fields, method calls and subscripts (`a?.items[0]`,

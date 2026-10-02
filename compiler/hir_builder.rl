@@ -306,6 +306,7 @@ pub struct HirBuilder {
                     if self.hir_type(right) == self.type_table.nil_type { value = left; } else if self.hir_type(left) == self.type_table.nil_type { value = right; }
                     if let optional = value { if let inner = self.type_table.get_optional_inner(self.hir_type(optional)) { return self.presence_test(optional, inner, data.op.equals("!=")); } }
                 }
+                if self.result.optional_comparisons.contains(ref.id) { return self.optional_comparison(ref, data.op, left, right); }
                 if let target = self.result.operator_targets[ref.id] {
                     let args = Vec<(String?, HirId)>.new(); let label: String? = nil; args.push((label, right));
                     var name = to_method_name(data.op); if name.is_empty() { name = data.op; }
@@ -458,6 +459,35 @@ pub struct HirBuilder {
         let name = self.temp("__coal"); let sid = self.temp_symbol(name);
         let some = self.arena.add(HirForm.var_ref(HirVarData { type_id: inner, name, symbol_id: sid })); let none = self.expr(data.right);
         self.arena.add(HirForm.optional_match(HirOptionalMatchData { type_id: type, scrutinee, inner_type: inner, some_binding: sid, some_expr: some, none_expr: none }))
+    }
+    // `a == b` with an optional operand: both nil, or both present with equal values. A
+    // non-optional operand is wrapped; each operand is evaluated once, left to right.
+    def optional_comparison(id: NodeId, op: String, left: HirId, right: HirId) -> HirId {
+        let bool_type = self.type_table.get_builtin("Bool") ?? self.type_table.error_type;
+        let lhs = self.as_optional(left); let rhs = self.as_optional(right);
+        let left_inner = self.type_table.get_optional_inner(self.hir_type(lhs)) ?? self.hir_type(left);
+        let right_inner = self.type_table.get_optional_inner(self.hir_type(rhs)) ?? self.hir_type(right);
+        let x = self.temp("__lhs"); let x_sid = self.temp_symbol(x); let y = self.temp("__rhs"); let y_sid = self.temp_symbol(y);
+        let x_ref = self.arena.add(HirForm.var_ref(HirVarData { type_id: left_inner, name: x, symbol_id: x_sid }));
+        let y_ref = self.arena.add(HirForm.var_ref(HirVarData { type_id: right_inner, name: y, symbol_id: y_sid }));
+        var values = self.arena.add(HirForm.binary_op(HirBinaryOpData { type_id: bool_type, left: x_ref, op, right: y_ref }));
+        if let target = self.result.operator_targets[id.id] {
+            let args = Vec<(String?, HirId)>.new(); let label: String? = nil; args.push((label, y_ref));
+            values = self.arena.add(HirForm.method_call(HirMethodCallData { type_id: bool_type, receiver: x_ref, method_name: to_method_name(op), arguments: args, method_symbol: target.symbol_id, is_static: false }));
+        }
+        let differ = op.equals("!=");
+        let unequal = self.arena.add(HirForm.literal(HirLiteralData { type_id: bool_type, value: HirValue.boolean(differ), kind: "bool" }));
+        let equal = self.arena.add(HirForm.literal(HirLiteralData { type_id: bool_type, value: HirValue.boolean(!differ), kind: "bool" }));
+        let unused = self.temp_symbol(self.temp("__rhs"));
+        // The right operand appears in both branches of the left match; exactly one runs.
+        let when_left = self.arena.add(HirForm.optional_match(HirOptionalMatchData { type_id: bool_type, scrutinee: rhs, inner_type: right_inner, some_binding: y_sid, some_expr: values, none_expr: unequal }));
+        let when_nil = self.arena.add(HirForm.optional_match(HirOptionalMatchData { type_id: bool_type, scrutinee: rhs, inner_type: right_inner, some_binding: unused, some_expr: unequal, none_expr: equal }));
+        self.arena.add(HirForm.optional_match(HirOptionalMatchData { type_id: bool_type, scrutinee: lhs, inner_type: left_inner, some_binding: x_sid, some_expr: when_left, none_expr: when_nil }))
+    }
+    def as_optional(value: HirId) -> HirId {
+        let type = self.hir_type(value);
+        if self.type_table.is_optional(type) { return value; }
+        self.arena.add(HirForm.optional_some(HirOptionalSomeData { type_id: self.type_table.make_optional(type), value, inner_type: type }))
     }
     // Bool that is `present` when the optional holds a value and `!present` when it is nil.
     def presence_test(optional: HirId, inner: TypeId, present: Bool) -> HirId {
