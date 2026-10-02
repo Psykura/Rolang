@@ -8,3 +8,14 @@ pub struct Span {
         Span { line, column, end_line, end_column }
     }
 }
+
+// A syntax error located at the offending token.
+pub struct SyntaxError {
+    pub let message: String;
+    pub let span: Span;
+    pub static def expected(what: String, found: String, span: Span) -> SyntaxError {
+        var shown = f"'{found}'";
+        if found.len() == 0 { shown = "end of file"; }
+        SyntaxError { message: f"expected {what}, found {shown}", span }
+    }
+}

@@ -39,7 +39,7 @@ release a version containing that feature first, then raise BOOTSTRAP_VERSION.
 ## Releases
 
 Releases are built and published by GitHub Actions. Set the new version in
-compiler/cli.rl (`rolangc X.Y.Z`) and the Makefile (`VERSION ?= X.Y.Z`), commit,
+compiler/command.rl (`cli.version = "rolangc X.Y.Z"`) and the Makefile (`VERSION ?= X.Y.Z`), commit,
 then push an annotated tag whose message becomes the release notes:
 
 ~~~sh

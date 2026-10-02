@@ -525,7 +525,8 @@ struct LlvmFunctionEmitter {
         guard let signature = self.module.signatures[self.name] else { return; }
         let header = StringBuilder.new(); header.append("define " + (self.module.linkages[self.name] ?? "") + signature.result + " " + llvm_global(self.name) + "(");
         for i in 0..<self.func.args.len() { if i > 0 { header.append(", "); } header.append(signature.params[i] + f" %arg{i}"); }
-        header.append(") {"); self.ir.line(header.to_string());
+        // Frame pointers keep panic backtraces and profilers able to walk the stack.
+        header.append(") \"frame-pointer\"=\"non-leaf\" {"); self.ir.line(header.to_string());
         // A dedicated prologue keeps every alloca outside MIR loops and safely
         // dominates all blocks even when MIR block order differs from entry.
         self.ir.line("entry:");

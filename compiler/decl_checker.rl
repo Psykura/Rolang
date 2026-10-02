@@ -8,12 +8,20 @@ pub struct DeclChecker {
     pub def run(program: NodeId) -> Void {
         if let node = self.state.arena.get(program) {
             switch node.form { case .program(let data):
-                for item in data.items { self.collect_type(item); }
+                for item in data.items { self.enter(item); self.collect_type(item); }
+                self.state.current_node = nil; self.state.current_file = nil;
                 self.register_imports();
-                for item in data.items { self.check_item(item); }
+                for item in data.items { self.enter(item); self.check_item(item); }
+                self.state.current_node = nil; self.state.current_file = nil;
                 default: {}
             }
         }
+    }
+    // Locates errors without a node at the top-level item being checked.
+    def enter(item: NodeId) -> Void {
+        self.state.current_file = self.state.arena.source_module(item);
+        self.state.current_node = nil;
+        self.state.locate(item);
     }
     def signature(params: Vec<NodeId>, return_type: NodeId?, async: Bool) -> TypeId {
         let types = Vec<TypeId>.new();

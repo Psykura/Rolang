@@ -1,4 +1,4 @@
-// expect-error: INVALID_OPERATION: calling `unsafe def danger` is unsafe and must be used inside an unsafe block
+// expect-error: calling `unsafe def danger` is unsafe and must be used inside an unsafe block
 
 unsafe def danger() -> i32 { return 42; }
 

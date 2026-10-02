@@ -1,4 +1,4 @@
-// expect-error: NON_EXHAUSTIVE_MATCH: Switch must be exhaustive, missing cases: Off
+// expect-error: Switch must be exhaustive, missing cases: Off
 
 enum Light { case On; case Off; }
 def f(l: Light) -> i32 {

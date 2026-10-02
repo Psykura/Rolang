@@ -99,7 +99,9 @@ Primitive types are `i8/i16/i32/i64`, `u8/u16/u32/u64`, `f32/f64`, `Bool` and
 `Void`. `RawPtr` is the low-level interop pointer type. Integer and floating
 literal types can be supplied by context; ordinary inferred numeric literals
 default to i32 and f64. The compiler permits supported integer widening;
-other numeric conversions use `as`.
+other numeric conversions use `as`. Casts bind tighter than binary operators
+and looser than prefix operators: `text.len() as i32 + 1` adds after the cast,
+and `-x as i64` negates first.
 
 Tuples store positional or named components. `[T]` denotes a vector type,
 `[K: V]` denotes a dictionary type, and `(T) -> U` denotes a function type.

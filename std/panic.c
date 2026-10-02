@@ -10,8 +10,7 @@ void rt_panic_msg(StringVal msg) {
     } else {
         fprintf(stderr, "rolang panic: (no message)\n");
     }
-    fflush(stderr);
-    abort();
+    rt_panic_finish();
 }
 
 __attribute__((noreturn))

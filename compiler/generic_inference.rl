@@ -66,7 +66,7 @@ pub struct GenericInference {
     pub let type_resolver: TypeResolver;
     pub let expr_types: Dict<i32, TypeId>;
     var infer_expression: ((NodeId, TypeId?) -> TypeId)?;
-    let error_reporter: ((TypeErrorKind, String) -> Void)?;
+    pub var error_reporter: ((TypeErrorKind, String) -> Void)?;
     let members: MemberResolver;
     pub def set_infer_expression(callback: ((NodeId, TypeId?) -> TypeId)?) -> Void { self.infer_expression = callback; }
     pub static def new(arena: AstArena, types: TypeTable, symbols: SymbolTable, resolver: TypeResolver,

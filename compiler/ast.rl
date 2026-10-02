@@ -12,9 +12,15 @@ pub struct AstArena {
     let nodes: Vec<AstNode>;
     // Driver metadata stays outside the source AST schema.
     let source_modules: Dict<i32, String>;
+    // When recovering, a statement or declaration that fails to parse is recorded
+    // here and skipped so one pass reports every syntax error. Speculative parses
+    // use arenas without recovery.
+    pub var recovering: Bool;
+    pub let syntax_errors: Vec<SyntaxError>;
 
-    pub static def new() -> AstArena {
-        AstArena { nodes: Vec<AstNode>.new(), source_modules: Dict<i32, String>.with_capacity(16, 0) }
+    pub static def new(recovering: Bool = false) -> AstArena {
+        AstArena { nodes: Vec<AstNode>.new(), source_modules: Dict<i32, String>.with_capacity(16, 0),
+                   recovering, syntax_errors: Vec<SyntaxError>.new() }
     }
 
     pub def len() -> i32 { self.nodes.len() }

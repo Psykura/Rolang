@@ -1,4 +1,4 @@
-// expect-error: NON_EXHAUSTIVE_MATCH: Switch on Optional must be exhaustive, missing: nil
+// expect-error: Switch on Optional must be exhaustive, missing: nil
 
 def main() -> i32 {
     let x: i32? = nil;

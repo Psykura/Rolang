@@ -38,6 +38,9 @@ pub struct CheckerState {
     pub let synthetic_lambda_types: Dict<i32, TypeId>;
     pub var infer_callback: ((NodeId) -> TypeId)?;
     pub var statement_callback: ((NodeId) -> Void)?;
+    // The innermost located node and file being checked, for errors reported without a node.
+    pub var current_node: NodeId?;
+    pub var current_file: String?;
     pub static def new(arena: AstArena, resolution: ResolutionResult) -> CheckerState {
         let types = TypeTable.new(); types.attach_symbol_table(resolution.symbol_table);
         let result = TypeCheckResult.new(types);
@@ -47,25 +50,42 @@ pub struct CheckerState {
             (kind: String, message: String, id: NodeId?) -> {
                 var error_kind = TypeErrorKind.not_a_type();
                 if kind.equals("GENERIC_ARG_COUNT") { error_kind = TypeErrorKind.generic_arg_count(); }
-                var span: Span? = nil;
-                if let ref = id { if let node = arena.get(ref) { span = node.span; } }
-                errors.push(TypeError { kind: error_kind, message, span });
+                var span: Span? = nil; var file: String? = nil;
+                if let ref = id { if let node = arena.get(ref) { span = node.span; } file = arena.source_module(ref); }
+                errors.push(TypeError { kind: error_kind, message, span, file });
             });
-        CheckerState { arena, resolution, symbol_table: resolution.symbol_table, node_symbols: resolution.node_symbols,
+        let state = CheckerState { arena, resolution, symbol_table: resolution.symbol_table, node_symbols: resolution.node_symbols,
             type_table: types, type_resolver: resolver,
             member_resolver: MemberResolver.new(arena, types, resolution.symbol_table),
             conformance_checker: ConformanceChecker.new(arena, types, resolution.symbol_table),
-            generic_inference: GenericInference.new(arena, types, resolution.symbol_table, resolver, result.expr_types, nil,
-                (kind: TypeErrorKind, message: String) -> { errors.push(TypeError { kind, message, span: nil }); }),
+            generic_inference: GenericInference.new(arena, types, resolution.symbol_table, resolver, result.expr_types),
             layout: LayoutService.new(arena, types, resolution.symbol_table, resolver), result,
             type_env: Dict<i32, TypeId>.with_capacity(16, 0), lowered_expressions: result.lowered_expressions,
             current_function_return: nil, current_self_type: nil, expected_type: nil,
-            in_async_function: false, in_unsafe: false, projection_equalities: Dict<String, TypeId>.with_capacity(4, 1), computing_constants: Dict<i32, Bool>.with_capacity(4, 0), rigid_generics: Dict<String, Bool>.with_capacity(4, 1), synthetic_lambda_types: Dict<i32, TypeId>.with_capacity(4, 0), infer_callback: nil, statement_callback: nil }
+            in_async_function: false, in_unsafe: false, projection_equalities: Dict<String, TypeId>.with_capacity(4, 1), computing_constants: Dict<i32, Bool>.with_capacity(4, 0), rigid_generics: Dict<String, Bool>.with_capacity(4, 1), synthetic_lambda_types: Dict<i32, TypeId>.with_capacity(4, 0), infer_callback: nil, statement_callback: nil, current_node: nil, current_file: nil };
+        // Inference errors are located at the expression being checked.
+        state.generic_inference.error_reporter = (kind: TypeErrorKind, message: String) -> { state.error(kind, message); };
+        state
     }
     pub def error(kind: TypeErrorKind, message: String, id: NodeId? = nil) -> Void {
+        // An operand whose type is already an error was reported where it arose.
+        if message.contains("<error>") && (self.result.errors.len() > 0 || self.resolution.errors.len() > 0) { return; }
+        var located = self.current_node;
+        if let ref = id { if let node = self.arena.get(ref) { if let span = node.span { located = ref; } } }
         var span: Span? = nil;
-        if let ref = id { if let node = self.arena.get(ref) { span = node.span; } }
-        self.result.errors.push(TypeError { kind, message, span });
+        var file = self.current_file;
+        if let ref = located {
+            if let node = self.arena.get(ref) { span = node.span; }
+            if let module = self.arena.source_module(ref) { file = module; }
+        }
+        self.result.errors.push(TypeError { kind, message, span, file });
+    }
+    // Makes `id` the location of errors reported without a node when it has a
+    // source span; returns the previous location for restoring.
+    pub def locate(id: NodeId) -> NodeId? {
+        let previous = self.current_node;
+        if let node = self.arena.get(id) { if let span = node.span { self.current_node = id; } }
+        previous
     }
     pub def builtin(name: String) -> TypeId { self.type_table.get_builtin(name) ?? self.type_table.error_type }
     pub def resolve_type(id: NodeId?) -> TypeId { self.with_equalities(self.type_resolver.resolve(id)) }
@@ -134,7 +154,11 @@ pub struct CheckerState {
         pairs
     }
     pub def infer_expr(id: NodeId?) -> TypeId {
-        if let ref = id { if let callback = self.infer_callback { return callback(ref); } }
+        if let ref = id { if let callback = self.infer_callback {
+            let previous = self.locate(ref);
+            defer { self.current_node = previous; }
+            return callback(ref);
+        } }
         self.type_table.error_type
     }
     pub def infer_with_expected(id: NodeId?, expected: TypeId?) -> TypeId {
@@ -143,7 +167,11 @@ pub struct CheckerState {
         self.infer_expr(id)
     }
     pub def check_stmt(id: NodeId?) -> Void {
-        if let ref = id { if let callback = self.statement_callback { callback(ref); } }
+        if let ref = id { if let callback = self.statement_callback {
+            let previous = self.locate(ref);
+            defer { self.current_node = previous; }
+            callback(ref);
+        } }
     }
     pub def check_block(id: NodeId?) -> Void {
         guard let ref = id else { return; }
@@ -327,7 +355,11 @@ pub struct CheckerState {
                 } }
             }
             if table.is_numeric(left) && table.is_numeric(right) { return self.builtin("Bool"); }
-            if emit_error { self.error(TypeErrorKind.invalid_operation(), f"Cannot compare {table.format_type(left)} and {table.format_type(right)}"); }
+            if emit_error {
+                if right == table.nil_type { self.error(TypeErrorKind.invalid_operation(), f"Cannot compare {table.format_type(left)} with nil: {table.format_type(left)} is not optional"); }
+                else if left == table.nil_type { self.error(TypeErrorKind.invalid_operation(), f"Cannot compare nil with {table.format_type(right)}: {table.format_type(right)} is not optional"); }
+                else { self.error(TypeErrorKind.invalid_operation(), f"Cannot compare {table.format_type(left)} and {table.format_type(right)}"); }
+            }
         } else if is_logical_op(op) {
             self.check_boolean(left, "left operand"); self.check_boolean(right, "right operand"); return self.builtin("Bool");
         } else if is_nil_coalescing_op(op) { return table.get_optional_inner(left) ?? left; }

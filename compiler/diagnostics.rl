@@ -1,234 +1,211 @@
-// Diagnostic data, formatting and collection.
+// Compiler diagnostics and their terminal rendering.
 pub import "source.rl"
-import "symbols.rl"
-import "checker_core.rl"
-import std.collections
+import std.fs
+import std.path
 import std.string_builder
 
 pub enum Severity {
-    case error; case warning; case note; case help;
+    case error; case warning;
 
     pub def label() -> String {
-        switch self {
-            case .error: "error"; case .warning: "warning";
-            case .note: "note"; case .help: "help";
-        }
+        switch self { case .error: "error"; case .warning: "warning"; }
     }
-    pub def color_code() -> String {
-        switch self {
-            case .error: "1;31"; case .warning: "1;33";
-            case .note: "1;36"; case .help: "1;34";
-        }
+    def color() -> String {
+        switch self { case .error: "1;31"; case .warning: "1;33"; }
     }
-}
-
-pub struct SourceLocation {
-    pub var file_path: String;
-    pub var line: i32;
-    pub var column: i32;
-    pub var end_line: i32? = nil;
-    pub var end_column: i32? = nil;
 }
 
 pub struct Diagnostic {
-    pub var severity: Severity;
-    pub var message: String;
-    pub var code: String? = nil;
-    pub var location: SourceLocation? = nil;
-    pub var source_line: String? = nil;
-    pub var notes: Vec<String>;
+    pub let severity: Severity;
+    pub let message: String;
+    pub let file: String?;
+    pub let span: Span?;
+    pub let notes: Vec<String>;
 
-    pub static def new(severity: Severity, message: String,
-                       code: String? = nil, location: SourceLocation? = nil,
-                       source_line: String? = nil, notes: Vec<String>? = nil) -> Diagnostic {
-        Diagnostic { severity, message, code, location, source_line,
-                     notes: notes ?? Vec<String>.new() }
+    pub static def error(message: String, file: String? = nil, span: Span? = nil,
+                         notes: Vec<String> = Vec<String>.new()) -> Diagnostic {
+        Diagnostic { severity: Severity.error(), message, file, span, notes }
+    }
+    pub static def warning(message: String, file: String? = nil, span: Span? = nil,
+                           notes: Vec<String> = Vec<String>.new()) -> Diagnostic {
+        Diagnostic { severity: Severity.warning(), message, file, span, notes }
+    }
+    pub def is_error() -> Bool {
+        switch self.severity { case .error: true; default: false; }
+    }
+    // One-line form: `file:line:column: error: message`.
+    pub def to_string() -> String {
+        var location = "";
+        if let file = self.file {
+            location = file;
+            if let span = self.span { location += f":{span.line}:{span.column}"; }
+            location += ": ";
+        }
+        f"{location}{self.severity.label()}: {self.message}"
     }
 }
 
-pub struct DiagnosticFormatter {
-    pub let use_color: Bool;
-
-    pub static def new(use_color: Bool = true) -> DiagnosticFormatter {
-        DiagnosticFormatter { use_color }
-    }
-    def color(value: String, code: String) -> String {
-        if !self.use_color { return value; }
-        let result = StringBuilder.new();
-        result.append_byte(27 as u8);
-        result.append(f"[{code}m{value}");
-        result.append_byte(27 as u8);
-        result.append("[0m");
-        result.to_string()
-    }
-    pub def format_diagnostic(diag: Diagnostic) -> String {
-        let lines = Vec<String>.new();
-        var header = self.color(diag.severity.label(), diag.severity.color_code());
-        if let code = diag.code { if code.len() > 0 { header += f"[{code}]"; } }
-        header += f": {self.color(diag.message, "1")}";
-        lines.push(header);
-
-        if let location = diag.location {
-            lines.push(f"  --> {location.file_path}:{location.line}:{location.column}");
-            if let source_line = diag.source_line {
-                if source_line.len() > 0 {
-                    let line_num = location.line.to_string();
-                    let padding = " ".repeat(line_num.len() as i32);
-                    lines.push(f"   {padding}|");
-                    lines.push(f"   {line_num} | {source_line}");
-                    let caret_padding = " ".repeat(location.column - 1);
-                    var caret_count = 1;
-                    if let end_column = location.end_column {
-                        if end_column > location.column { caret_count = end_column - location.column; }
-                    }
-                    let carets = "^".repeat(caret_count);
-                    lines.push(f"   {padding} | {caret_padding}{self.color(carets, "1;31")}");
-                }
-            }
-        }
-        for note in diag.notes {
-            lines.push(f"   = {self.color("note", "1;36")}: {note}");
-        }
-        join_strings(lines, "\n")
-    }
+pub def error_count(diagnostics: Vec<Diagnostic>) -> i32 {
+    var count = 0;
+    for diagnostic in diagnostics { if diagnostic.is_error() { count += 1; } }
+    count
 }
 
-pub struct DiagnosticCollector {
-    pub let source_files: Dict<String, String>;
-    pub let diagnostics: Vec<Diagnostic>;
-    pub var error_count: i32;
-    pub var warning_count: i32;
-
-    pub static def new(source_files: Dict<String, String>) -> DiagnosticCollector {
-        DiagnosticCollector { source_files, diagnostics: Vec<Diagnostic>.new(),
-                              error_count: 0, warning_count: 0 }
+// Diagnostics grouped by file in order of first appearance, each file's in
+// source order; those without a file keep their order at the end.
+pub def sorted_diagnostics(diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
+    let files = Vec<String>.new();
+    for diagnostic in diagnostics { if let file = diagnostic.file {
+        var seen = false;
+        for known in files { if known.equals(file) { seen = true; } }
+        if !seen { files.push(file); }
+    } }
+    let sorted = Vec<Diagnostic>.new();
+    for file in files {
+        let group = Vec<Diagnostic>.new();
+        for diagnostic in diagnostics { if let other = diagnostic.file { if other.equals(file) { group.push(diagnostic); } } }
+        for index in 1..<group.len() {
+            var position = index;
+            while position > 0 && position_before(group[position], group[position - 1]) {
+                let moved = group[position];
+                group[position] = group[position - 1];
+                group[position - 1] = moved;
+                position -= 1;
+            }
+        }
+        for diagnostic in group { sorted.push(diagnostic); }
     }
-    pub def has_errors() -> Bool { self.error_count > 0 }
+    for diagnostic in diagnostics { if let file = diagnostic.file {} else { sorted.push(diagnostic); } }
+    sorted
+}
 
-    def source_line(path: String, line: i32) -> String? {
-        if line < 1 { return nil; }
-        if let content = self.source_files[path] {
-            // CRLF is one break; the final break
-            // does not produce an additional empty source line.
-            var current = 1;
-            var start = 0;
-            var index = 0;
-            let length = content.len() as i32;
-            while index < length {
-                let byte = content.byte_at(index);
-                var width = 0;
-                if byte == 13 {
-                    width = 1;
-                    if index + 1 < length && content.byte_at(index + 1) == 10 { width = 2; }
-                } else if byte == 10 || byte == 11 || byte == 12 ||
-                          byte == 28 || byte == 29 || byte == 30 { width = 1; }
-                else if byte == 194 && index + 1 < length && content.byte_at(index + 1) == 133 { width = 2; }
-                else if byte == 226 && index + 2 < length && content.byte_at(index + 1) == 128 {
-                    let last = content.byte_at(index + 2);
-                    if last == 168 || last == 169 { width = 3; }
+def position_before(first: Diagnostic, second: Diagnostic) -> Bool {
+    guard let a = first.span else { return false; }
+    guard let b = second.span else { return true; }
+    a.line < b.line || (a.line == b.line && a.column < b.column)
+}
+
+// Renders a diagnostic with its source line and a caret underline:
+//
+//   error: Cannot assign String to i32 in variable initializer
+//    --> main.rl:2:18
+//     |
+//   2 |     let a: i32 = "x";
+//     |                  ^^^
+pub struct DiagnosticRenderer {
+    let color: Bool;
+    let directory: String;
+    let sources: Dict<String, String>;
+    let lines: Dict<String, Vec<String>>;
+
+    // `sources` maps file paths to text already in memory; other files are read on demand.
+    pub static def new(color: Bool, sources: Dict<String, String> = Dict<String, String>.new()) -> DiagnosticRenderer {
+        DiagnosticRenderer { color, directory: path_resolve(".") + "/", sources, lines: Dict<String, Vec<String>>.new() }
+    }
+
+    pub def render(diagnostic: Diagnostic) -> String {
+        let out = StringBuilder.new();
+        out.append(self.paint(diagnostic.severity.label(), diagnostic.severity.color()));
+        out.append(self.paint(": " + diagnostic.message, "1"));
+        var gutter = "";
+        if let file = diagnostic.file {
+            let shown = self.display_path(file);
+            if let span = diagnostic.span {
+                gutter = " ".repeat(span.line.to_string().len() as i32);
+                out.append(f"\n{gutter}{self.paint("-->", "1;34")} {shown}:{span.line}:{span.column}");
+                if let text = self.source_line(file, span.line) {
+                    out.append(f"\n{gutter} {self.paint("|", "1;34")}");
+                    out.append(f"\n{self.paint(span.line.to_string() + " |", "1;34")} {text.replace("\t", "    ")}");
+                    out.append(f"\n{gutter} {self.paint("|", "1;34")} {self.underline(text, span, diagnostic.severity)}");
                 }
-                if width > 0 {
-                    if current == line { return content.substring(start, index - start); }
-                    index += width;
-                    start = index;
-                    current += 1;
-                } else { index += 1; }
-            }
-            if current == line && start < length { return content.substring(start, length - start); }
-        }
-        nil
-    }
-
-    def add(severity: Severity, message: String, file_path: String? = nil,
-            span: Span? = nil, code: String? = nil,
-            notes: Vec<String>? = nil) -> Void {
-        var location: SourceLocation? = nil;
-        var line: String? = nil;
-        if let path = file_path {
-            if let current = span {
-                location = SourceLocation { file_path: path, line: current.line,
-                    column: current.column, end_line: current.end_line,
-                    end_column: current.end_column };
-                line = self.source_line(path, current.line);
+            } else {
+                out.append(f"\n{self.paint("-->", "1;34")} {shown}");
             }
         }
-        self.diagnostics.push(Diagnostic.new(severity, message, code, location, line, notes));
-        switch severity {
-            case .error: self.error_count += 1;
-            case .warning: self.warning_count += 1;
-            default: {}
+        for note in diagnostic.notes {
+            out.append(f"\n{gutter} {self.paint("=", "1;34")} {self.paint("note", "1")}: {note}");
         }
+        out.to_string()
     }
 
-    pub def add_error(message: String, file_path: String? = nil,
-                      span: Span? = nil, code: String? = nil,
-                      notes: Vec<String>? = nil) -> Void {
-        self.add(Severity.error(), message, file_path, span, code, notes);
-    }
-    pub def add_warning(message: String, file_path: String? = nil,
-                        span: Span? = nil, code: String? = nil,
-                        notes: Vec<String>? = nil) -> Void {
-        self.add(Severity.warning(), message, file_path, span, code, notes);
-    }
-    pub def add_resolution_error(error: ResolutionError, file_path: String) -> Void {
-        let code = switch error.kind {
-            case .undefined_type: "E0001";
-            case .undefined_value: "E0002";
-            case .duplicate_type: "E0003";
-            case .duplicate_value: "E0004";
-        };
-        self.add_error(error.message, file_path, error.span, code);
-    }
-    pub def add_type_error(error: TypeError, file_path: String) -> Void {
-        let code = switch error.kind {
-            case .type_mismatch: "E0101";
-            case .undefined_member: "E0102";
-            case .not_callable: "E0103";
-            case .wrong_arg_count: "E0104";
-            case .wrong_arg_type: "E0105";
-            case .cannot_infer: "E0106";
-            case .not_assignable: "E0107";
-            case .invalid_operation: "E0108";
-            case .not_a_type: "E0109";
-            case .generic_arg_count: "E0110";
-            default: "E0199";
-        };
-        self.add_error(error.message, file_path, error.span, code);
-    }
-    pub def add_parse_error(message: String, file_path: String,
-                            line: i32 = 1, column: i32 = 1) -> Void {
-        self.add_error(message, file_path, Span.new(line, column, line, column), "E0000");
-    }
-    pub def add_codegen_error(message: String) -> Void {
-        self.add_error(message, nil, nil, "E0200");
-    }
-    pub def add_io_error(message: String, file_path: String? = nil) -> Void {
-        if let path = file_path { self.add_error(f"{path}: {message}", nil, nil, "E0300"); }
-        else { self.add_error(message, nil, nil, "E0300"); }
-    }
-
-    // The driver chooses the output stream; rendering remains deterministic.
-    pub def emit_all(formatter: DiagnosticFormatter) -> String {
-        let result = StringBuilder.new();
-        for diag in self.diagnostics {
-            result.append(formatter.format_diagnostic(diag));
-            result.append("\n\n");
-        }
-        result.to_string()
-    }
-    pub def summary() -> String {
+    // `2 errors generated.`, `1 warning generated.`, or "" when there is nothing to count.
+    pub def summary(diagnostics: Vec<Diagnostic>) -> String {
+        let errors = error_count(diagnostics);
+        let warnings = diagnostics.len() - errors;
         let parts = Vec<String>.new();
-        if self.error_count > 0 {
-            var suffix = "";
-            if self.error_count != 1 { suffix = "s"; }
-            parts.push(f"{self.error_count} error{suffix}");
-        }
-        if self.warning_count > 0 {
-            var suffix = "";
-            if self.warning_count != 1 { suffix = "s"; }
-            parts.push(f"{self.warning_count} warning{suffix}");
-        }
-        if parts.len() == 0 { return "no errors"; }
-        join_strings(parts, " and ") + " generated"
+        if warnings > 0 { parts.push(plural(warnings, "warning")); }
+        if errors > 0 { parts.push(plural(errors, "error")); }
+        if parts.len() == 0 { return ""; }
+        var text = parts[0];
+        if parts.len() > 1 { text += " and " + parts[1]; }
+        text + " generated."
     }
+
+    def underline(text: String, span: Span, severity: Severity) -> String {
+        let scalars = text.scalars();
+        var start = span.column - 1;
+        if start > scalars.len() { start = scalars.len(); }
+        var stop = scalars.len();
+        if span.end_line == span.line && span.end_column > span.column { stop = span.end_column - 1; }
+        if stop > scalars.len() { stop = scalars.len(); }
+        var padding = 0;
+        for index in 0..<start { padding += display_width(scalars[index]); }
+        var width = 0;
+        for index in start..<stop { width += display_width(scalars[index]); }
+        if width == 0 { width = 1; }
+        " ".repeat(padding) + self.paint("^".repeat(width), severity.color())
+    }
+
+    def source_line(file: String, line: i32) -> String? {
+        if !self.lines.contains(file) {
+            var text = self.sources[file];
+            if let loaded = text {} else { text = fs_read_text(file); }
+            let split = Vec<String>.new();
+            if let content = text {
+                for part in content.split("\n") {
+                    if part.ends_with("\r") { split.push(part.substring(0, (part.len() - 1) as i32)); }
+                    else { split.push(part); }
+                }
+            }
+            self.lines[file] = split;
+        }
+        guard let lines = self.lines[file] else { return nil; }
+        if line < 1 { return nil; }
+        if line > lines.len() { return nil; }
+        lines[line - 1]
+    }
+
+    def display_path(file: String) -> String {
+        if file.starts_with(self.directory) {
+            return file.substring(self.directory.len() as i32, (file.len() - self.directory.len()) as i32);
+        }
+        file
+    }
+
+    def paint(text: String, code: String) -> String {
+        if !self.color { return text; }
+        let out = StringBuilder.new();
+        out.append_byte(27 as u8);
+        out.append(f"[{code}m{text}");
+        out.append_byte(27 as u8);
+        out.append("[0m");
+        out.to_string()
+    }
+}
+
+def plural(count: i32, noun: String) -> String {
+    if count == 1 { return f"1 {noun}"; }
+    f"{count} {noun}s"
+}
+
+// Terminal columns: tabs render as four spaces and East Asian wide or emoji
+// scalars take two cells.
+def display_width(scalar: i32) -> i32 {
+    if scalar == 9 { return 4; }
+    if (scalar >= 4352 && scalar <= 4447) || (scalar >= 11904 && scalar <= 42191) ||
+       (scalar >= 44032 && scalar <= 55203) || (scalar >= 63744 && scalar <= 64255) ||
+       (scalar >= 65040 && scalar <= 65049) || (scalar >= 65072 && scalar <= 65135) ||
+       (scalar >= 65280 && scalar <= 65376) || (scalar >= 65504 && scalar <= 65510) ||
+       (scalar >= 127744 && scalar <= 129791) || (scalar >= 131072 && scalar <= 262141) { return 2; }
+    1
 }

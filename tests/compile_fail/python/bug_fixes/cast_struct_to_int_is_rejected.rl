@@ -1,4 +1,4 @@
-// expect-error: INVALID_OPERATION: cannot cast P to i32 using `as`. Heap types cannot be reinterpreted as integers.
+// expect-error: cannot cast P to i32 using `as`. Heap types cannot be reinterpreted as integers.
 
 struct P { var x: i32 }
 def main() -> i32 {

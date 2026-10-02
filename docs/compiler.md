@@ -43,9 +43,34 @@ Tool commands must name executable files; argument vectors preserve spaces and
 other path characters. A target triple alone does not supply a sysroot, target
 libraries or execution validation. The implemented ABI is 64-bit POSIX.
 
+## Diagnostics
+
+Errors and warnings go to stderr as `error: message`, followed by
+` --> file:line:column`, the source line and a caret underline of the span.
+Paths are shown relative to the working directory. Output is colored when
+stderr is a terminal, NO_COLOR is unset and TERM is not `dumb`;
+`--color=always|never` (or `--no-color`) overrides this. A summary such as
+`2 errors generated.` ends the output; the exit status is 1.
+
+The parser recovers at statement and declaration boundaries, so a run reports
+every syntax error in the file. Name resolution errors do not stop type
+checking; type errors caused by an earlier error (an operand of error type) are
+suppressed. Diagnostics are ordered by file, then position.
+
+Command-line errors print `rolangc: message` with a `--help` hint and exit
+with status 2; unknown options suggest the closest spelling.
+
+## Panics and backtraces
+
+A runtime panic prints `rolang panic: message` and aborts. With
+`ROLANG_BACKTRACE=1` it also prints the call stack, innermost first; inlined
+functions do not appear as frames, so -O0 shows the most detail. Generated
+functions keep frame pointers for this purpose.
+
 ## Inspection
 
-Use --parse/--resolve/--check/--hir/--mono/--mir/--mir-post/--llvm with --stdlib ROOT.
+Use `--inspect PASS` with --stdlib ROOT, where PASS is parse, resolve, check,
+hir, mono, mir, mir-post or llvm; `--check` is short for `--inspect check`.
 --fields with --mir/--mir-post emits the precise MIR field protocol. Normal
 --emit mir/--emit mir-opt produce readable MIR.
 

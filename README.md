@@ -82,9 +82,23 @@ to PATH when using the installed command.
 
 Text modes write to stdout unless `-o FILE` is given.
 `--clang`, `--cc` and `--linker` choose tools;
-`--stdlib` and `--runtime` override resources. Inspection modes include
-`--parse`, `--resolve`, `--check`, `--hir`, `--mono`, `--mir` and `--mir-post`;
-pass `--stdlib ROOT` to supply the std root in these modes.
+`--stdlib` and `--runtime` override resources. `--inspect PASS` (or `--check`,
+`--mir`, …) prints a compiler pass; pass `--stdlib ROOT` to supply the std root
+in these modes. `rolangc --help` lists every option.
+
+Errors point at the source with a caret underline, and one run reports every
+syntax error and the type errors that do not follow from earlier ones:
+
+~~~text
+error: Cannot assign String to i32 in variable initializer
+ --> main.rl:2:18
+  |
+2 |     let a: i32 = "x";
+  |                  ^^^
+~~~
+
+Diagnostics are colored on a terminal (`--color=always|never|auto`, NO_COLOR).
+A panicking program prints its call stack when run with `ROLANG_BACKTRACE=1`.
 See [compiler usage and artifacts](docs/compiler.md).
 
 ## Documentation

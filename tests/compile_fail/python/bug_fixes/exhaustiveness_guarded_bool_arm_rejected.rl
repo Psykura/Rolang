@@ -1,4 +1,4 @@
-// expect-error: NON_EXHAUSTIVE_MATCH: Switch must be exhaustive, missing cases: true
+// expect-error: Switch must be exhaustive, missing cases: true
 
 def f(b: Bool) -> i32 {
     switch b {

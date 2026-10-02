@@ -1,4 +1,4 @@
-// expect-error: NON_EXHAUSTIVE_MATCH: Switch must be exhaustive, missing cases: Red
+// expect-error: Switch must be exhaustive, missing cases: Red
 
 enum Color { case Red; case Green; case Blue; }
 def describe(c: Color) -> i32 {

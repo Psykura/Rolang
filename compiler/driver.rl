@@ -37,7 +37,9 @@ pub struct CompileResult {
     pub let success: Bool;
     pub let output: String;
     pub let cache_hit: Bool;
-    pub let errors: Vec<String>;
+    // Errors and warnings; `sources` holds the text of every parsed file for rendering them.
+    pub let diagnostics: Vec<Diagnostic>;
+    pub let sources: Dict<String, String>;
 }
 pub def find_tool(name: String) -> String? {
     if name.contains("/") {
@@ -67,18 +69,23 @@ pub def is_llvm_bitcode(data: String) -> Bool {
 }
 pub struct CompilationDriver {
     let options: CompileOptions;
-    let errors: Vec<String>;
+    let diagnostics: Vec<Diagnostic>;
+    var sources: Dict<String, String>;
     var temporary: String;
     var clang: String;
     var cc: String;
     var linker: String;
     let tool_watches: Dict<String, String>;
     pub static def new(options: CompileOptions) -> CompilationDriver {
-        CompilationDriver { options, errors: Vec<String>.new(), temporary: "", clang: "", cc: "", linker: "", tool_watches: Dict<String, String>.with_capacity(16, 1) }
+        CompilationDriver { options, diagnostics: Vec<Diagnostic>.new(), sources: Dict<String, String>.new(), temporary: "", clang: "", cc: "", linker: "", tool_watches: Dict<String, String>.with_capacity(16, 1) }
     }
     def fail(message: String = "") -> CompileResult {
-        if message.len() > 0 { self.errors.push(message); }
-        CompileResult { success: false, output: "", cache_hit: false, errors: self.errors }
+        if message.len() > 0 { self.error(message); }
+        self.result(false, "", false)
+    }
+    def error(message: String) -> Void { self.diagnostics.push(Diagnostic.error(message)); }
+    def result(success: Bool, output: String, cache_hit: Bool) -> CompileResult {
+        CompileResult { success, output, cache_hit, diagnostics: self.diagnostics, sources: self.sources }
     }
     def discover_resources() -> Void {
         let options = self.options;
@@ -97,7 +104,7 @@ pub struct CompilationDriver {
         }
         var standard = "";
         for candidate in candidates { if path_is_file(path_join(candidate, "std/range.rl")) { standard = path_resolve(candidate); break; } }
-        if options.stdlib.len() > 0 && standard.len() == 0 { self.errors.push("Standard library not found: " + options.stdlib); }
+        if options.stdlib.len() > 0 && standard.len() == 0 { self.error("Standard library not found: " + options.stdlib); }
         if standard.len() > 0 {
             options.stdlib = standard; var present = false;
             for root in options.include_roots { if path_resolve(root).equals(standard) { present = true; } }
@@ -117,7 +124,7 @@ pub struct CompilationDriver {
         if status != 0 {
             var message = stage + f" failed (exit {status})";
             if let report = fs_read_text(log, 4194304) { if report.len() > 0 { message += ":\n" + report; } }
-            self.errors.push(message); return false;
+            self.error(message); return false;
         }
         if let report = fs_read_text(log, 4194304) { if report.len() > 0 { eprintln(report); } }
         true
@@ -220,7 +227,7 @@ pub struct CompilationDriver {
         if !(self.options.lto.equals("none") || self.options.lto.equals("full") || self.options.lto.equals("thin")) {
             return self.fail("Unknown LTO mode: " + self.options.lto);
         }
-        self.discover_resources(); if self.errors.len() > 0 { return self.fail(); }
+        self.discover_resources(); if error_count(self.diagnostics) > 0 { return self.fail(); }
         let emit = self.options.emit; let entry = absolute_path(input);
         var output = self.options.output;
         let text_mode = emit.equals("llvm") || emit.equals("mir") || emit.equals("mir-opt") || emit.equals("llvm-opt") || emit.equals("asm");
@@ -268,7 +275,7 @@ pub struct CompilationDriver {
         let emit = self.options.emit; let cache = self.cache(entry, output);
         if let storage = cache { if storage.restore(output) {
             if self.options.verbose { eprintln("Cached -> " + output); }
-            return CompileResult { success: true, output, cache_hit: true, errors: self.errors };
+            return self.result(true, output, true);
         } }
         let frontend = Frontend.new(self.options.include_roots, self.options.cache_dir.len() > 0);
         if self.options.target.len() > 0 { frontend.module_target = self.options.target; }
@@ -289,16 +296,16 @@ pub struct CompilationDriver {
                     let llvm = compile_to_llvm(post, frontend.arena, owner);
                     // Code generation reports compiler defects, except for the release/trace hook ABI check.
                     for error in llvm.errors {
-                        if error.contains(" has an invalid signature; ") { self.errors.push(error); } else { self.errors.push(internal_compiler_error(error)); }
+                        if error.contains(" has an invalid signature; ") { self.error(error); } else { self.error(internal_compiler_error(error)); }
                     }
                     content = llvm.text;
                     if self.options.target.len() > 0 { content = "target triple = " + llvm_quote(self.options.target) + "\n" + content; }
                 }
             }
         }
-        for error in frontend.errors { self.errors.push(error); }
-        for warning in frontend.warnings { eprintln("warning: " + warning); }
-        if self.errors.len() > 0 || content.len() == 0 { return self.fail(); }
+        for diagnostic in frontend.diagnostics { self.diagnostics.push(diagnostic); }
+        self.sources = frontend.sources();
+        if error_count(self.diagnostics) > 0 || content.len() == 0 { return self.fail(); }
         for module in frontend.graph.get_all_modules() {
             if output.len() > 0 && path_resolve(output).equals(module.path) { return self.fail("Output would overwrite an imported source: " + module.path); }
         }
@@ -402,14 +409,14 @@ pub struct CompilationDriver {
         if !path_is_file(artifact) || !fs_move(artifact, output) { return self.fail("Cannot publish output: " + output); }
         if let storage = cache {
             for pair in self.tool_watches.entries() { frontend.input_watches[pair.key] = pair.value; }
-            if frontend.cache_inputs_stable && frontend.warnings.len() == 0 { storage.store(output, frontend.input_watches); }
+            if frontend.cache_inputs_stable && frontend.diagnostics.len() == 0 { storage.store(output, frontend.input_watches); }
         }
         if self.options.verbose { eprintln("Compiled -> " + output); }
-        CompileResult { success: true, output, cache_hit: false, errors: self.errors }
+        self.result(true, output, false)
     }
     def emit_text(content: String, output: String) -> CompileResult {
         if output.len() == 0 || output.equals("-") { print(content); }
         else if !fs_write_atomic(output, content) { return self.fail("Cannot write output: " + output); }
-        CompileResult { success: true, output, cache_hit: false, errors: self.errors }
+        self.result(true, output, false)
     }
 }

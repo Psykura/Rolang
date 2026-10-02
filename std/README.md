@@ -35,10 +35,11 @@ The [runtime core](../runtime/README.md) provides allocation, ARC/GC and schedul
 | [string_builder](string_builder.rl) | Reusable buffer and independent text snapshots |
 | [code_writer](code_writer.rl) | Indented generated source and C byte escaping |
 | [interner](interner.rl) | Stable string IDs scoped to an interner |
-| [io](io.rl) | Console and standard-stream I/O |
+| [io](io.rl) | Console and standard-stream I/O and terminal detection |
 | [fs](fs.rl) | File handles, checked reads, atomic writes/copies and filesystem operations |
 | [path](path.rl) | Path operations and directory listing |
 | [process](process.rl) | Arguments, environment, executable identity and argv-based processes |
+| [cli](cli.rl) | Command-line parsing: flags, options with values/choices, positionals, help and suggestions |
 | [task](task.rl) | Task ownership, cancellation, waits, sleep and yield |
 | [async_io](async_io.rl) | Async socket streams, pipes, TCP connections and listeners |
 | [math](math.rl) | Mathematical functions and numeric extension methods |
@@ -63,6 +64,33 @@ results. Checked reads distinguish empty content from failure. Async socket
 APIs return Result values with errno errors; console/filesystem I/O remains
 blocking. Some wrappers require explicit handle closure; automatic-memory
 management alone does not make every API a resource-owning abstraction.
+
+## Command-line parsing
+
+std.cli declares a program's options and parses the process arguments:
+
+~~~rolang
+import std.cli
+
+def main() -> i32 {
+    let cli = CommandLine.new("greet", "[options] NAME");
+    cli.flag("loud", "print in capitals").short("l");
+    cli.option("times", "N", "repeat N times").short("n");
+    cli.positional("NAME", "who to greet");
+    guard let args = cli.parse_process() else { return cli.status; }
+    let times = (args.value("times") ?? "1").to_i32();
+    0
+}
+~~~
+
+Options accept `--name value`, `--name=value`, `-n value` and `-nvalue`; short
+flags combine and `--` ends options. Repeating an option is allowed: `value`
+returns the last occurrence, `values` all of them in order. `choices` restricts
+values, `implicit` makes a value optional (`--lto` or `--lto=thin`), `preset`
+adds spellings that set a fixed value (`--no-lto`), and `exclusive` rejects
+combinations. `--help` output is generated from the declarations. Errors such
+as an unknown option (with a closest-spelling suggestion) print to stderr and
+leave `status` 2; `parse` returns them as a Result instead.
 
 ## Library development
 

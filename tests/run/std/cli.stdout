@@ -1,0 +1,25 @@
+missing required argument 'FILE'
+unknown option '--outptu'; did you mean '--output'?
+unknown option '--secre'
+invalid value '9' for '-L'; expected one of: 1, 2, 3
+options '-v' and '-q' cannot be used together
+option '-o' requires a value PATH
+option '--verbose' does not take a value
+option '-o' requires a nonempty value PATH
+unknown option '-z'
+usage: tool [options] FILE...
+
+Processes files.
+
+Arguments:
+  FILE  input files
+
+Options:
+  -o, --output PATH  where to write
+  -v, --verbose      more output
+  -q, --quiet        less output
+  -L, --level N      level [1|2|3]
+      --lto[=MODE]   link-time optimization [full|thin|none]
+  -D, --define NAME  define a name
+  -h, --help         print this help
+      --version      print the version

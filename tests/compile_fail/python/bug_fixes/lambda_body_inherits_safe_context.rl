@@ -1,4 +1,4 @@
-// expect-error: INVALID_OPERATION: calling external 'C' function is unsafe and must be used inside an unsafe block
+// expect-error: calling external 'C' function is unsafe and must be used inside an unsafe block
 
 extern "C" def rt_panic(msg: RawPtr) -> Void;
 

@@ -1,6 +1,7 @@
 // Standard library: process, environment, arguments
 import "string.rl"
 import "vec.rl"
+import "range.rl"
 
 pub extern "C" def rt_args_count() -> i32;
 pub extern "C" def rt_args_get_handle(index: i32) -> RawPtr;
@@ -21,6 +22,13 @@ pub def argc() -> i32 {
 
 pub def argv(index: i32) -> String {
     unsafe { return String.from_handle(rt_args_get_handle(index)); }
+}
+
+// The command-line arguments after the program name.
+pub def arguments() -> Vec<String> {
+    let values = Vec<String>.new();
+    for index in 1..<argc() { values.push(argv(index)); }
+    values
 }
 
 pub def env_get(name: String) -> String {

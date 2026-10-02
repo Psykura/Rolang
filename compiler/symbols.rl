@@ -148,25 +148,12 @@ pub struct SymbolTable {
 
 pub enum ResolutionErrorKind {
     case undefined_value; case undefined_type; case duplicate_value; case duplicate_type;
-    pub def name() -> String {
-        switch self {
-            case .undefined_value: "UNDEFINED_VALUE";
-            case .undefined_type: "UNDEFINED_TYPE";
-            case .duplicate_value: "DUPLICATE_VALUE";
-            case .duplicate_type: "DUPLICATE_TYPE";
-        }
-    }
 }
 pub struct ResolutionError {
     pub var kind: ResolutionErrorKind;
     pub var name: String;
     pub var message: String;
     pub var span: Span? = nil;
-    pub def to_string() -> String {
-        var location = "";
-        if let span = self.span { location = f" at line {span.line}, column {span.column}"; }
-        f"{self.kind.name()}: {self.message}{location}"
-    }
 }
 
 // Named records describe exported symbol and method metadata.

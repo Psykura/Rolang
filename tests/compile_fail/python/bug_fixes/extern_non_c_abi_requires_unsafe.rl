@@ -1,4 +1,4 @@
-// expect-error: INVALID_OPERATION: calling external 'rust' function is unsafe and must be used inside an unsafe block
+// expect-error: calling external 'rust' function is unsafe and must be used inside an unsafe block
 
 extern "rust" def some_fn() -> i32;
 

@@ -1,6 +1,7 @@
 // Executable source-loading, parsing and name-resolution pipeline. Later passes
 // consume this arena and its canonical symbol identities without reparsing.
 pub import "parser.rl"
+pub import "diagnostics.rl"
 pub import "resolver.rl"
 pub import "checker.rl"
 pub import "monomorphize.rl"
@@ -19,14 +20,18 @@ pub import "module_artifact.rl"
 import "module_abi.rl"
 import std.process
 
+def label_of(import: ImportDeclAst) -> String {
+    if import.module.len() > 0 { return join_strings(import.module, "."); }
+    import.path
+}
+
 pub struct Frontend {
     pub let arena: AstArena;
     pub let graph: ModuleGraph;
     pub let symbol_table: SymbolTable;
     pub let node_symbols: Dict<i32, SymbolId>;
     pub let resolutions: Dict<String, ResolutionResult>;
-    pub let errors: Vec<String>;
-    pub let warnings: Vec<String>;
+    pub let diagnostics: Vec<Diagnostic>;
     pub let input_watches: Dict<String, String>;
     pub var cache_inputs_stable: Bool;
     let track_inputs: Bool;
@@ -44,6 +49,8 @@ pub struct Frontend {
     pub let artifact_paths: Vec<String>;
     let implicit_imports: Dict<i32, String>;
     pub var module_target: String;
+    let failed_sources: Dict<String, String>;
+    var resolution_errors: i32;
     pub static def new(include_roots: Vec<String> = Vec<String>.new(), track_inputs: Bool = false) -> Frontend {
         let graph = ModuleGraph.new();
         var stdlib_path: String? = nil;
@@ -54,15 +61,29 @@ pub struct Frontend {
             if path_is_file(path_join(bundled, "range.rl")) { stdlib_path = path_resolve(bundled); }
         }
         if let standard = stdlib_path { graph.source_roots.push(standard); }
-        Frontend { arena: AstArena.new(), graph, symbol_table: SymbolTable.new(),
+        Frontend { arena: AstArena.new(true), graph, symbol_table: SymbolTable.new(),
             node_symbols: Dict<i32, SymbolId>.with_capacity(16, 0),
-            resolutions: Dict<String, ResolutionResult>.with_capacity(16, 1), errors: Vec<String>.new(), warnings: Vec<String>.new(),
+            resolutions: Dict<String, ResolutionResult>.with_capacity(16, 1), diagnostics: Vec<Diagnostic>.new(),
             input_watches: Dict<String, String>.with_capacity(16, 1), track_inputs,
             cache_inputs_stable: true,
             checked_program: nil, type_result: nil, hir_result: nil, mono_result: nil, mir_result: nil, post_result: nil, post_opt_level: -1,
             import_targets: Dict<i32, String>.with_capacity(16, 0), stdlib_path,
             module_sources: Dict<String, ModuleSource>.with_capacity(16, 1), module_objects: Dict<String, String>.with_capacity(16, 1),
-            artifact_paths: Vec<String>.new(), implicit_imports: Dict<i32, String>.with_capacity(16, 0), module_target: host_target() }
+            artifact_paths: Vec<String>.new(), implicit_imports: Dict<i32, String>.with_capacity(16, 0), module_target: host_target(), failed_sources: Dict<String, String>.new(), resolution_errors: 0 }
+    }
+    pub def has_errors() -> Bool { error_count(self.diagnostics) > 0 }
+    def error(message: String, file: String? = nil, span: Span? = nil) -> Void {
+        self.diagnostics.push(Diagnostic.error(message, file, span));
+    }
+    def warning(message: String, file: String? = nil, span: Span? = nil) -> Void {
+        self.diagnostics.push(Diagnostic.warning(message, file, span));
+    }
+    // Source text by path for every parsed module, for rendering diagnostics.
+    pub def sources() -> Dict<String, String> {
+        let sources = Dict<String, String>.new();
+        for pair in self.failed_sources.entries() { sources[pair.key] = pair.value; }
+        for module in self.graph.get_all_modules() { if let source = module.source { sources[module.path] = source; } }
+        sources
     }
     pub def module_key(path: String) -> String {
         if let standard = self.stdlib_path { if path.starts_with(standard + "/") {
@@ -84,7 +105,7 @@ pub struct Frontend {
     }
     def load_artifact(path: String) -> String? {
         self.watch_input(path); let parsed = read_module_artifact(path, self.module_target, module_abi_version());
-        guard let artifact = parsed.artifact else { self.errors.push("Cannot import " + path + ": " + parsed.error); return nil; }
+        guard let artifact = parsed.artifact else { self.error("Cannot import module: " + parsed.error, path); return nil; }
         if self.track_inputs {
             let expected = path_resolve(path) + "|file|" + parsed.input_hash;
             if !(self.input_watches[absolute_path(path)] ?? "").equals(expected) { self.cache_inputs_stable = false; }
@@ -92,16 +113,16 @@ pub struct Frontend {
         // Validate every conflict before mutating the shared source/object sets.
         for pair in artifact.sources.entries() {
             if let loaded = self.graph.get_module(self.module_path(pair.key)) {
-                if let source = loaded.source { if !source.equals(pair.value.text) { self.errors.push("Conflicting module source for " + pair.key); return nil; } }
+                if let source = loaded.source { if !source.equals(pair.value.text) { self.error("Conflicting module source for " + pair.key, path); return nil; } }
             }
             if let previous = self.module_sources[pair.key] {
                 var matches = previous.text.equals(pair.value.text) && previous.imports.len() == pair.value.imports.len();
                 for imported in previous.imports.entries() { if !(pair.value.imports[imported.key] ?? "").equals(imported.value) { matches = false; } }
-                if !matches { self.errors.push("Conflicting module versions for " + pair.key); return nil; }
+                if !matches { self.error("Conflicting module versions for " + pair.key, path); return nil; }
             }
         }
         for pair in artifact.objects.entries() { if let previous = self.module_objects[pair.key] {
-            if !previous.equals(pair.value) { self.errors.push("Conflicting native module objects for " + pair.key); return nil; }
+            if !previous.equals(pair.value) { self.error("Conflicting native module objects for " + pair.key, path); return nil; }
         } }
         for pair in artifact.sources.entries() { self.module_sources[pair.key] = pair.value; }
         for pair in artifact.objects.entries() { self.module_objects[pair.key] = pair.value; }
@@ -119,7 +140,7 @@ pub struct Frontend {
         else { self.watch_input(path); content = fs_read_text(canonical); }
         guard let source = content else {
             var message = "cannot read input"; if !path_is_file(canonical) { message = "cannot open input"; }
-            self.errors.push(canonical + ": " + message); return nil;
+            self.error(message, canonical); return nil;
         }
         if self.track_inputs && !self.module_sources.contains(self.module_key(canonical)) {
             let expected = canonical + "|file|" + sha256(source);
@@ -127,7 +148,9 @@ pub struct Frontend {
             if !(self.input_watches[name] ?? "").equals(expected) { self.cache_inputs_stable = false; }
         }
         let parsed = parse_program_text(source, self.arena);
-        if let error = parsed.error { self.errors.push(f"{canonical}: {error}"); return nil; }
+        for problem in parsed.errors { self.diagnostics.push(Diagnostic.error(problem.message, canonical, problem.span)); }
+        // Keep the source so diagnostics can show it.
+        if parsed.errors.len() > 0 { self.failed_sources[canonical] = source; return nil; }
         guard let program = parsed.program else { return nil; }
         let module = Module.new(canonical, canonical);
         module.source = source; module.program = program; module.state = ModuleState.parsed();
@@ -213,28 +236,28 @@ pub struct Frontend {
                             case .import_decl(let import):
                                 let implicit = self.implicit_imports.contains(id.id);
                                 if !implicit {
-                                    if import.path.len() == 0 && import.module.len() == 0 { self.errors.push(module.path + ": Empty import path"); continue; }
+                                    if import.path.len() == 0 && import.module.len() == 0 { self.error("Empty import path", module.path, item.span); continue; }
                                     var label = import.path; if import.module.len() > 0 { label = join_strings(import.module, "."); }
-                                    if seen.contains(label) { self.warnings.push(module.path + ": Duplicate import of '" + label + "'"); }
+                                    if seen.contains(label) { self.warning("Duplicate import of '" + label + "'", module.path, item.span); }
                                     seen[label] = true;
                                     if import.module.len() == 0 {
-                                        if !import.path.ends_with(".rl") && !import.path.ends_with(".rlm") { self.warnings.push(module.path + ": Imported file '" + import.path + "' does not end in '.rl' or '.rlm'"); }
-                                        if import.path.starts_with("/") { self.warnings.push(module.path + ": Imported absolute path '" + import.path + "'; consider a relative path or an -I include root"); }
+                                        if !import.path.ends_with(".rl") && !import.path.ends_with(".rlm") { self.warning("Imported file '" + import.path + "' does not end in '.rl' or '.rlm'", module.path, item.span); }
+                                        if import.path.starts_with("/") { self.warning("Imported absolute path '" + import.path + "'; consider a relative path or an -I include root", module.path, item.span); }
                                     }
                                 }
                                 let key = self.import_key(id, import); var target: String? = nil;
                                 if let saved = self.module_sources[self.module_key(module.path)] {
                                     if let preserved = saved.imports[key] { target = self.module_path(preserved); }
-                                    else { self.errors.push("Cannot import module: missing preserved dependency for " + module.path); continue; }
+                                    else { self.error("Cannot import module: missing preserved dependency", module.path, item.span); continue; }
                                 } else { target = self.import_path(module, import); }
                                 if let candidate = target {
                                     var canonical = candidate;
-                                    if canonical.equals(module.path) { self.errors.push(module.path + ": File '" + path_basename(module.path) + "' imports itself"); continue; }
+                                    if canonical.equals(module.path) { self.error("File '" + path_basename(module.path) + "' imports itself", module.path, item.span); continue; }
                                     if !implicit && import.path.len() > 0 {
                                         if let standard = self.stdlib_path {
                                             let bundled = path_join(standard, import.path);
                                             self.watch_input(bundled);
-                                            if path_is_file(bundled) && !path_resolve(bundled).equals(canonical) { self.warnings.push(module.path + ": Imported file '" + import.path + "' shadows the bundled standard library file at '" + bundled + "'"); }
+                                            if path_is_file(bundled) && !path_resolve(bundled).equals(canonical) { self.warning("Imported file '" + import.path + "' shadows the bundled standard library file at '" + bundled + "'", module.path, item.span); }
                                         }
                                     }
                                     if path_extension(canonical).equals("rlm") {
@@ -248,7 +271,7 @@ pub struct Frontend {
                                         module.import_paths[key] = self.module_key(dependency.path);
                                         if !known { pending.push(dependency); }
                                     }
-                                } else { self.errors.push(f"{module.path}: Module not found: '{import.path}'"); }
+                                } else { self.error(f"Module not found: '{label_of(import)}'", module.path, item.span); }
                             default: {}
                         }
                     }
@@ -258,16 +281,16 @@ pub struct Frontend {
         root
     }
     pub def resolve_modules() -> Void {
-        if self.errors.len() > 0 { return; }
+        if self.has_errors() { return; }
         let order = self.graph.get_compilation_order();
-        if let error = order.error { self.errors.push(error); return; }
+        if let error = order.error { self.error(error); return; }
         for module in order.modules {
             guard let program = module.program else { continue; }
             let result = NameResolver.new(self.arena, self.symbol_table, self.node_symbols,
                 self.graph, module, self.import_targets).resolve(program);
             self.resolutions[module.name] = result;
             module.symbol_table = self.symbol_table;
-            for error in result.errors { self.errors.push(module.path + ": " + error.to_string()); }
+            for error in result.errors { self.diagnostics.push(Diagnostic.error(error.message, module.path, error.span)); self.resolution_errors += 1; }
             self.publish_exports(module, program, result);
             module.state = ModuleState.resolved();
             if result.errors.len() > 0 { module.state = ModuleState.error(); }
@@ -275,10 +298,14 @@ pub struct Frontend {
     }
     pub def check_modules() -> TypeCheckResult? {
         if let cached = self.type_result { return cached; }
-        if self.errors.len() > 0 { return nil; }
+        // Name resolution errors leave error types behind; checking still reports
+        // the program's other errors in the same run.
+        if error_count(self.diagnostics) > self.resolution_errors { return nil; }
         let order = self.graph.get_compilation_order();
-        if let error = order.error { self.errors.push(error); return nil; }
-        let merged = ResolutionResult.new(self.symbol_table, self.node_symbols, Vec<ResolutionError>.new());
+        if let error = order.error { self.error(error); return nil; }
+        let earlier = Vec<ResolutionError>.new();
+        for pair in self.resolutions.entries() { for error in pair.value.errors { earlier.push(error); } }
+        let merged = ResolutionResult.new(self.symbol_table, self.node_symbols, earlier);
         let items = Vec<NodeId>.new();
         for module in order.modules {
             if let program = module.program { if let node = self.arena.get(program) {
@@ -301,46 +328,42 @@ pub struct Frontend {
         let program = self.arena.add(NodeForm.program(ProgramAst { items }));
         let result = TypeChecker.new(self.arena, merged).check(program);
         self.checked_program = program; self.type_result = result;
-        for error in result.errors { self.errors.push(error.to_string()); }
+        for error in result.errors { self.diagnostics.push(Diagnostic.error(error.message, error.file, error.span)); }
         for module in order.modules { if result.has_errors() { module.state = ModuleState.error(); } else { module.state = ModuleState.typechecked(); } }
         result
     }
     pub def build_hir_modules() -> HirBuildResult? {
-        if self.errors.len() > 0 { return nil; }
         if let cached = self.hir_result { return cached; }
         guard let types = self.check_modules() else { return nil; }
-        if types.has_errors() { return nil; }
+        if self.has_errors() { return nil; }
         guard let program = self.checked_program else { return nil; }
         let result = HirBuilder.new(self.arena, types, self.symbol_table, self.node_symbols).build(program);
         self.hir_result = result;
-        for error in result.errors { self.errors.push(error); }
+        for error in result.errors { self.error(error); }
         result
     }
     pub def monomorphize_modules() -> MonomorphizationResult? {
-        if self.errors.len() > 0 { return nil; }
         if let cached = self.mono_result { return cached; }
         guard let hir = self.build_hir_modules() else { return nil; }
-        if hir.has_errors() { return nil; }
+        if self.has_errors() { return nil; }
         let result = Monomorphizer.new(hir).run(); self.mono_result = result;
-        for error in result.errors { self.errors.push(error); }
+        for error in result.errors { self.error(error); }
         result
     }
     pub def build_mir_modules() -> MirBuildResult? {
-        if self.errors.len() > 0 { return nil; }
         if let cached = self.mir_result { return cached; }
         guard let mono = self.monomorphize_modules() else { return nil; }
-        if mono.has_errors() { return nil; }
+        if self.has_errors() { return nil; }
         let result = MirBuilder.new(mono).build();
         if !result.has_errors() { elide_outparam_default_init(result.program, result.type_table); }
         self.mir_result = result;
-        for error in result.errors { self.errors.push(error); }
+        for error in result.errors { self.error(error); }
         result
     }
     pub def postprocess_mir(opt_level: i32 = 2) -> MirPostResult? {
-        if self.errors.len() > 0 { return nil; }
         if let cached = self.post_result { if self.post_opt_level == opt_level { return cached; } }
         guard let mir = self.build_mir_modules() else { return nil; }
-        if mir.has_errors() { return nil; }
+        if self.has_errors() { return nil; }
         let copy = MirBuildResult { program: copy_mir_program(mir.program), type_table: mir.type_table, symbol_table: mir.symbol_table, errors: Vec<String>.new() };
         let result = lower_async(copy);
         if !result.has_errors() {
@@ -349,7 +372,7 @@ pub struct Frontend {
             if opt_level >= 1 { optimize_arc_program(result.program, result.type_table); }
             for error in validate_mir_program(result.program) { result.errors.push(error); }
         }
-        self.post_result = result; self.post_opt_level = opt_level; for error in result.errors { self.errors.push(error); } result
+        self.post_result = result; self.post_opt_level = opt_level; for error in result.errors { self.error(error); } result
     }
     def publish_exports(module: Module, program: NodeId, result: ResolutionResult) -> Void {
         guard let node = self.arena.get(program) else { return; }

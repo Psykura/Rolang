@@ -7,7 +7,7 @@ pub struct TypeParseResult {
     pub let type_node: NodeId?;
     pub let next_index: i32;
     pub let remaining: String;
-    pub let error: String?;
+    pub let error: SyntaxError?;
 }
 
 struct TypeCursor {
@@ -18,7 +18,7 @@ struct TypeCursor {
     var fragment_offset: i32;
     var end_line: i32;
     var end_column: i32;
-    var error: String?;
+    var error: SyntaxError?;
 
     def current() -> LexToken {
         if self.index < self.tokens.len() { return self.tokens[self.index]; }
@@ -69,7 +69,7 @@ struct TypeCursor {
         if let previous = self.error { return; }
         let found = self.spelling();
         let token = self.current();
-        self.error = f"expected {expected} at {token.span.line}:{token.span.column + self.fragment_offset}, found '{found}'";
+        self.error = SyntaxError.expected(expected, found, Span.new(token.span.line, token.span.column + self.fragment_offset, token.span.end_line, token.span.end_column));
     }
     def expect(wanted: String) -> Bool {
         if self.match_text(wanted) { return true; }
@@ -229,20 +229,4 @@ pub def parse_named_type_prefix(tokens: Vec<LexToken>, arena: AstArena,
         type_node, next_index: cursor.index, remaining: cursor.fragment,
         error: cursor.error
     }
-}
-
-pub def parse_type_text(source: String, arena: AstArena) -> TypeParseResult {
-    let lexed = tokenize(source);
-    if let problem = lexed.error {
-        return TypeParseResult { type_node: nil, next_index: 0, remaining: "", error: problem.message };
-    }
-    let result = parse_type_prefix(lexed.tokens, arena);
-    if let problem = result.error { return result; }
-    if result.remaining.len() > 0 || result.next_index < lexed.tokens.len() - 1 {
-        return TypeParseResult {
-            type_node: nil, next_index: result.next_index, remaining: result.remaining,
-            error: "unexpected token after type"
-        };
-    }
-    result
 }

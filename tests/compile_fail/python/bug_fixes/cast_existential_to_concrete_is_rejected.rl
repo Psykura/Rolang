@@ -1,4 +1,4 @@
-// expect-error: INVALID_OPERATION: cannot cast any P to S using `as`. Existential downcasts via `as` are not supported; use the runtime-
+// expect-error: cannot cast any P to S using `as`. Existential downcasts via `as` are not supported; use the runtime-
 
 protocol P {
     def kind() -> i32;

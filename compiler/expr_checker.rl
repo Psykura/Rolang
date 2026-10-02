@@ -269,7 +269,7 @@ pub struct ExprChecker {
                 }
                 for index in 0..<argc { if let arg = self.argument(data.arguments[index]) { if let value = arg.value {
                     let expected = self.state.generic_inference.substitute_type(func.params.get(index), mapping);
-                    self.state.check_assignable(self.state.infer_with_expected(value, expected), expected, f"argument {index + 1}");
+                    self.state.check_assignable(self.state.infer_with_expected(value, expected), expected, f"argument {index + 1}", value);
                 } } }
             }
             self.state.record_call(id, CalleeKind.static_call(), symbol);
@@ -296,7 +296,7 @@ pub struct ExprChecker {
         for index in 0..<args.len() { if let arg = self.argument(args[index]) { if let value = arg.value { let arg_type = self.state.infer_expr(value); self.state.generic_inference.infer_type_node_generics(case_def.payload[index].1, arg_type, names, mapping); } } }
         for index in 0..<args.len() { if let arg = self.argument(args[index]) { if let value = arg.value {
             let expected = self.state.generic_inference.substitute_type(self.state.resolve_type(case_def.payload[index].1), mapping);
-            self.state.check_assignable(self.state.infer_with_expected(value, expected), expected, f"enum payload {index + 1}");
+            self.state.check_assignable(self.state.infer_with_expected(value, expected), expected, f"enum payload {index + 1}", value);
         } } }
         if let data = decl { if data.generic_params.len() > 0 {
             let missing = self.unbound(data.generic_params, mapping);
@@ -540,8 +540,8 @@ pub struct ExprChecker {
         self.state.type_table.make_function(params, ret, data.is_async)
     }
     def coverage(id: NodeId, type: TypeId) -> Void {
-        let errors = self.state.result.errors;
-        ExhaustivenessChecker.new(self.state.arena, self.state.type_table, self.state.symbol_table, (kind: TypeErrorKind, message: String) -> { errors.push(TypeError { kind, message, span: nil }); }).check_switch(id, type);
+        let state = self.state;
+        ExhaustivenessChecker.new(state.arena, state.type_table, state.symbol_table, (kind: TypeErrorKind, message: String) -> { state.error(kind, message, id); }).check_switch(id, type);
     }
     def switch_expr(id: NodeId, data: SwitchExprAst) -> TypeId {
         var result = self.state.expected_type; let type = self.state.infer_with_expected(data.value, nil);
@@ -644,7 +644,7 @@ pub struct ExprChecker {
         } }
         for id in data.arguments { if let arg = self.argument(id) { if let value = arg.value {
             let actual = self.state.result.expr_types[value.id] ?? self.state.infer_expr(value);
-            if let label = arg.label { if let ann = annotations[label] { self.state.check_assignable(actual, self.state.generic_inference.substitute_type(self.state.resolve_type(ann), mapping), f"field '{label}'"); } }
+            if let label = arg.label { if let ann = annotations[label] { self.state.check_assignable(actual, self.state.generic_inference.substitute_type(self.state.resolve_type(ann), mapping), f"field '{label}'", value); } }
         } } }
         result
     }

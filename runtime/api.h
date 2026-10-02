@@ -20,6 +20,7 @@ int64_t rt_obj_live_count(void);
 int64_t rt_gc_cycle_count(void);
 __attribute__((noreturn))
 void rt_panic(const char* ctx);
+__attribute__((noreturn)) void rt_panic_finish(void);
 __attribute__((noreturn))
 void rt_panic_index_out_of_bounds(int64_t index, int64_t len);
 __attribute__((noreturn))

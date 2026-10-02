@@ -1,4 +1,4 @@
-// expect-error: NON_EXHAUSTIVE_MATCH: Switch on Optional must be exhaustive, missing: Some(...)
+// expect-error: Switch on Optional must be exhaustive, missing: Some(...)
 
 enum E { case A(i32); case B(i32); }
 def wrap() -> E? { return E.A(1); }

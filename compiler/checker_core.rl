@@ -27,37 +27,13 @@ pub enum TypeErrorKind {
     case not_assignable; case invalid_operation; case non_exhaustive_match;
     case not_a_type; case generic_arg_count; case not_a_protocol;
     case protocol_not_satisfied; case duplicate_member;
-
-    pub def name() -> String {
-        switch self {
-            case .type_mismatch: "TYPE_MISMATCH";
-            case .undefined_member: "UNDEFINED_MEMBER";
-            case .not_callable: "NOT_CALLABLE";
-            case .wrong_arg_count: "WRONG_ARG_COUNT";
-            case .wrong_arg_type: "WRONG_ARG_TYPE";
-            case .cannot_infer: "CANNOT_INFER";
-            case .not_assignable: "NOT_ASSIGNABLE";
-            case .invalid_operation: "INVALID_OPERATION";
-            case .non_exhaustive_match: "NON_EXHAUSTIVE_MATCH";
-            case .not_a_type: "NOT_A_TYPE";
-            case .generic_arg_count: "GENERIC_ARG_COUNT";
-            case .not_a_protocol: "NOT_A_PROTOCOL";
-            case .protocol_not_satisfied: "PROTOCOL_NOT_SATISFIED";
-            case .duplicate_member: "DUPLICATE_MEMBER";
-        }
-    }
 }
 
 pub struct TypeError {
     pub var kind: TypeErrorKind;
     pub var message: String;
     pub var span: Span? = nil;
-
-    pub def to_string() -> String {
-        var location = "";
-        if let span = self.span { location = f" at line {span.line}, column {span.column}"; }
-        f"{self.kind.name()}: {self.message}{location}"
-    }
+    pub var file: String? = nil;
 }
 
 pub struct TypeCheckResult {

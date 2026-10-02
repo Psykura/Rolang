@@ -1,4 +1,4 @@
-// expect-error: GENERIC_ARG_COUNT: Struct 'Box' expects 1 generic argument(s), got 2
+// expect-error: Struct 'Box' expects 1 generic argument(s), got 2
 
 struct Box<T> { var value: T; }
 def main() -> i32 {

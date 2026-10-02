@@ -4,7 +4,7 @@ pub import "literal_parser.rl"
 pub struct PatternParseResult {
     pub let pattern: NodeId?;
     pub let next_index: i32;
-    pub let error: String?;
+    pub let error: SyntaxError?;
 }
 
 struct PatternCursor {
@@ -13,7 +13,7 @@ struct PatternCursor {
     var index: i32;
     var end_line: i32;
     var end_column: i32;
-    var error: String?;
+    var error: SyntaxError?;
 
     def current() -> LexToken {
         if self.index < self.tokens.len() { return self.tokens[self.index]; }
@@ -41,7 +41,7 @@ struct PatternCursor {
     def fail(expected: String) -> Void {
         if let previous = self.error { return; }
         let token = self.current();
-        self.error = f"expected {expected} at {token.span.line}:{token.span.column}, found '{token.text}'";
+        self.error = SyntaxError.expected(expected, token.text, token.span);
     }
     def expect(wanted: String) -> Bool {
         if self.match_text(wanted) { return true; }
@@ -124,18 +124,4 @@ pub def parse_pattern_prefix(tokens: Vec<LexToken>, arena: AstArena,
     };
     let pattern = cursor.parse_pattern();
     PatternParseResult { pattern, next_index: cursor.index, error: cursor.error }
-}
-
-pub def parse_pattern_text(source: String, arena: AstArena) -> PatternParseResult {
-    let lexed = tokenize(source);
-    if let problem = lexed.error {
-        return PatternParseResult { pattern: nil, next_index: 0, error: problem.message };
-    }
-    let result = parse_pattern_prefix(lexed.tokens, arena);
-    if let problem = result.error { return result; }
-    if result.next_index < lexed.tokens.len() - 1 {
-        return PatternParseResult { pattern: nil, next_index: result.next_index,
-                                    error: "unexpected token after pattern" };
-    }
-    result
 }

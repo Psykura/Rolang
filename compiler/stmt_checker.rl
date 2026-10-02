@@ -32,9 +32,9 @@ pub struct StmtChecker {
         }
     }
     pub def coverage(id: NodeId, type: TypeId) -> Void {
-        let errors = self.state.result.errors;
-        let checker = ExhaustivenessChecker.new(self.state.arena, self.state.type_table, self.state.symbol_table,
-            (kind: TypeErrorKind, message: String) -> { errors.push(TypeError { kind, message, span: nil }); });
+        let state = self.state;
+        let checker = ExhaustivenessChecker.new(state.arena, state.type_table, state.symbol_table,
+            (kind: TypeErrorKind, message: String) -> { state.error(kind, message, id); });
         checker.check_switch(id, type);
     }
     pub def check_case(id: NodeId, type: TypeId) -> Void {
@@ -97,7 +97,7 @@ pub struct StmtChecker {
         if let annotation = data.type_annotation { type = self.state.resolve_type(annotation); }
         if let initializer = data.initializer {
             let init_type = self.state.infer_with_expected(initializer, type);
-            if let target = type { self.state.check_assignable(init_type, target, "variable initializer", id); }
+            if let target = type { self.state.check_assignable(init_type, target, "variable initializer", initializer); }
             else { type = init_type; }
         }
         if let inferred = type {} else {
@@ -134,7 +134,7 @@ pub struct StmtChecker {
                 self.state.error(TypeErrorKind.invalid_operation(), f"Type {self.state.type_table.format_type(object_type)} does not support subscript assignment; define __set__", target);
             }
         } } default: {} } }
-        if data.op.equals("=") { self.state.check_assignable(value_type, target_type, "assignment", id); }
+        if data.op.equals("=") { self.state.check_assignable(value_type, target_type, "assignment", data.value); }
         else {
             let op = compound_to_base_op(data.op);
             if let overloaded = self.state.try_operator_overload(nil, target_type, op, value_type) {}
@@ -144,7 +144,7 @@ pub struct StmtChecker {
     def check_return(id: NodeId, data: ReturnStmtAst) -> Void {
         if let value = data.value {
             let actual = self.state.infer_with_expected(value, self.state.current_function_return);
-            if let expected = self.state.current_function_return { self.state.check_assignable(actual, expected, "return value", id); }
+            if let expected = self.state.current_function_return { self.state.check_assignable(actual, expected, "return value", value); }
         } else {
             if let expected = self.state.current_function_return {
                 if expected != self.state.type_table.void_type { self.state.error(TypeErrorKind.type_mismatch(), f"Function expects return value of type {self.state.type_table.format_type(expected)}", id); }

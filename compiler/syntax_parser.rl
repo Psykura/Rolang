@@ -8,7 +8,7 @@ pub struct ExpressionParseResult {
     pub let expression: NodeId?;
     pub let next_index: i32;
     pub let remaining: String;
-    pub let error: String?;
+    pub let error: SyntaxError?;
 }
 
 def expression_before(tokens: Vec<LexToken>, arena: AstArena,
@@ -48,6 +48,13 @@ def scalar_comparison(op: String) -> Bool {
 def scalar_prefix(op: String) -> Bool {
     switch op {
         case "!", "-", "+", "~", "await", "spawn", "try": true;
+        default: false;
+    }
+}
+
+def type_argument_punctuation(word: String) -> Bool {
+    switch word {
+        case ",", "?", "(", ")", "[", "]", "->", ".", ":": true;
         default: false;
     }
 }
@@ -164,6 +171,24 @@ def template_whitespace(raw: String) -> Bool {
     true
 }
 
+// A missing `;` is reported right after the previous token when the next token
+// starts a later line; other expectations are reported at the found token.
+pub def expected_token(expected: String, found: String, tokens: Vec<LexToken>, index: i32, span: Span) -> SyntaxError {
+    if expected.equals("';'") && index > 0 && index < tokens.len() {
+        let previous = tokens[index - 1].span;
+        if tokens[index].span.line > previous.end_line {
+            return SyntaxError { message: "expected ';' at the end of the line",
+                                 span: Span.new(previous.end_line, previous.end_column, previous.end_line, previous.end_column) };
+        }
+    }
+    SyntaxError.expected(expected, found, span)
+}
+
+// True when `span` starts strictly before `other`.
+pub def span_before(span: Span, other: Span) -> Bool {
+    span.line < other.line || (span.line == other.line && span.column < other.column)
+}
+
 def rebase_template_span(local: Span, origin: (i32, i32)) -> Span {
     var column = local.column;
     var end_column = local.end_column;
@@ -225,7 +250,7 @@ struct ExpressionCursor {
     var fragment_offset: i32;
     var end_line: i32;
     var end_column: i32;
-    var error: String?;
+    var error: SyntaxError?;
 
     def current() -> LexToken {
         if self.index < self.tokens.len() { return self.tokens[self.index]; }
@@ -270,7 +295,7 @@ struct ExpressionCursor {
     def fail(expected: String) -> Void {
         if let previous = self.error { return; }
         let token = self.current();
-        self.error = f"expected {expected} at {token.span.line}:{token.span.column + self.fragment_offset}, found '{self.spelling()}'";
+        self.error = expected_token(expected, self.spelling(), self.tokens, self.index, Span.new(token.span.line, token.span.column + self.fragment_offset, token.span.end_line, token.span.end_column));
     }
     def expect(wanted: String) -> Bool {
         if self.match_text(wanted) { return true; }
@@ -325,7 +350,7 @@ struct ExpressionCursor {
     def parse_level(level: i32) -> NodeId? {
         if level == 3 { return self.parse_comparison(); }
         if level == 4 { return self.parse_range(); }
-        if level == 11 { return self.parse_prefix(); }
+        if level == 11 { return self.parse_cast(); }
         let start = self.current().span;
         guard let first = self.parse_level(level + 1) else { return nil; }
         var result = first;
@@ -334,6 +359,32 @@ struct ExpressionCursor {
             let op = self.take();
             guard let right = self.parse_level(level + 1) else { return nil; }
             result = self.arena.add(NodeForm.binary_op(BinaryOpAst { left: result, op, right }));
+            combined = true;
+        }
+        if combined { return self.finish(result, start); }
+        result
+    }
+    // `as`, `as?`, `as!` and `is` bind tighter than binary operators and looser
+    // than prefix operators: `-x as u32 + 1` is `((-x) as u32) + 1`.
+    def parse_cast() -> NodeId? {
+        let start = self.current().span;
+        guard let first = self.parse_prefix() else { return nil; }
+        var result = first;
+        var combined = false;
+        while true {
+            let op = self.spelling();
+            if op.equals("as") || op.equals("as?") || op.equals("as!") {
+                self.take();
+                guard let target_type = self.parse_type() else { return nil; }
+                var kind = "safe";
+                if op.equals("as?") { kind = "optional"; }
+                if op.equals("as!") { kind = "forced"; }
+                result = self.arena.add(NodeForm.cast(CastAst { expr: result, target_type, kind }));
+            } else if op.equals("is") {
+                self.take();
+                guard let checked_type = self.parse_type() else { return nil; }
+                result = self.arena.add(NodeForm.type_check(TypeCheckAst { expr: result, checked_type }));
+            } else { break; }
             combined = true;
         }
         if combined { return self.finish(result, start); }
@@ -350,17 +401,6 @@ struct ExpressionCursor {
                 self.take();
                 guard let right = self.parse_range() else { return nil; }
                 result = self.arena.add(NodeForm.binary_op(BinaryOpAst { left: result, op, right }));
-            } else if op.equals("as") || op.equals("as?") || op.equals("as!") {
-                self.take();
-                guard let target_type = self.parse_type() else { return nil; }
-                var kind = "safe";
-                if op.equals("as?") { kind = "optional"; }
-                if op.equals("as!") { kind = "forced"; }
-                result = self.arena.add(NodeForm.cast(CastAst { expr: result, target_type, kind }));
-            } else if op.equals("is") {
-                self.take();
-                guard let checked_type = self.parse_type() else { return nil; }
-                result = self.arena.add(NodeForm.type_check(TypeCheckAst { expr: result, checked_type }));
             } else { break; }
             combined = true;
         }
@@ -615,8 +655,8 @@ struct ExpressionCursor {
     def template_value(token: LexToken, start: i32, end: i32) -> NodeId? {
         let raw = token.text.substring(start, end - start);
         let lexed = tokenize(raw);
-        if let problem = lexed.error { self.error = problem.message; return nil; }
         let origin = template_position(token, start);
+        if let problem = lexed.error { self.error = SyntaxError { message: problem.message, span: rebase_template_span(problem.span, origin) }; return nil; }
         let shifted = Vec<LexToken>.new();
         for piece in lexed.tokens {
             shifted.push(LexToken {
@@ -851,7 +891,13 @@ struct ExpressionCursor {
             if word.equals("<") { depth += 1; saw_generic = true; }
             else if word.equals(">") { depth -= 1; }
             else if word.equals(">>") { depth -= 2; }
-            else if depth == 0 {
+            else if depth > 0 {
+                // Only type syntax can appear inside generic arguments, so `a < 1 || b > c.d` is a comparison.
+                switch token.kind {
+                    case .identifier: {}
+                    default: if !type_argument_punctuation(word) { return false; }
+                }
+            } else if depth == 0 {
                 if word.equals(".") {
                     if saw_generic { return true; }
                 } else {
@@ -946,29 +992,12 @@ pub def parse_expression_prefix(tokens: Vec<LexToken>, arena: AstArena,
     }
 }
 
-pub def parse_scalar_expression_text(source: String, arena: AstArena) -> ExpressionParseResult {
-    let lexed = tokenize(source);
-    if let problem = lexed.error {
-        return ExpressionParseResult { expression: nil, next_index: 0,
-                                       remaining: "", error: problem.message };
-    }
-    let result = parse_expression_prefix(lexed.tokens, arena);
-    if let problem = result.error { return result; }
-    if result.remaining.len() > 0 || result.next_index < lexed.tokens.len() - 1 {
-        return ExpressionParseResult {
-            expression: nil, next_index: result.next_index, remaining: result.remaining,
-            error: "unexpected token after expression"
-        };
-    }
-    result
-}
-
 // Statement and expression cursors share this module because lambda bodies
 // and statement expressions recursively depend on each other.
 pub struct StatementParseResult {
     pub let statement: NodeId?;
     pub let next_index: i32;
-    pub let error: String?;
+    pub let error: SyntaxError?;
 }
 
 def is_assignment_operator(word: String) -> Bool {
@@ -984,7 +1013,7 @@ struct StatementCursor {
     var index: i32;
     var end_line: i32;
     var end_column: i32;
-    var error: String?;
+    var error: SyntaxError?;
 
     def current() -> LexToken {
         if self.index < self.tokens.len() { return self.tokens[self.index]; }
@@ -1009,7 +1038,7 @@ struct StatementCursor {
     def fail(expected: String) -> Void {
         if let previous = self.error { return; }
         let token = self.current();
-        self.error = f"expected {expected} at {token.span.line}:{token.span.column}, found '{token.text}'";
+        self.error = expected_token(expected, token.text, self.tokens, self.index, token.span);
     }
     def expect(wanted: String) -> Bool {
         if self.match_text(wanted) { return true; }
@@ -1214,31 +1243,65 @@ struct StatementCursor {
                 case .eof: self.fail("'}'"); return nil;
                 default: {}
             }
-            let word = self.spelling();
-            if word.equals("let") || word.equals("var") || word.equals("return") ||
-               word.equals("break") || word.equals("continue") || word.equals("if") ||
-               word.equals("guard") || word.equals("while") || word.equals("for") ||
-               (word.equals("switch") && braced_switch_ahead(self.tokens, self.index)) || word.equals("defer") || word.equals("unsafe") ||
-               word.equals("{") ||
-               self.assignment_ahead() {
-                guard let statement = self.parse_statement() else { return nil; }
-                statements.push(statement);
-                continue;
-            }
-            let expression_start = self.current().span;
-            guard let expression = self.parse_expression() else { return nil; }
-            if self.spelling().equals("}") {
-                statements.push(self.arena.add(NodeForm.return_stmt(ReturnStmtAst {
-                    value: expression, implicit: true
-                })));
-                break;
-            }
-            let statement = self.make(NodeForm.expr_stmt(ExprStmtAst { expr: expression }),
-                                      expression_start);
-            if !self.expect(";") { return nil; }
-            statements.push(statement);
+            let first = self.index;
+            if let trailing = self.parse_body_item(statements) {
+                if trailing { break; }
+            } else if !self.recover(first) { return nil; }
         }
         statements
+    }
+    // Parses one body statement into `statements`; true when it was the trailing value.
+    def parse_body_item(statements: Vec<NodeId>) -> Bool? {
+        let word = self.spelling();
+        if word.equals("let") || word.equals("var") || word.equals("return") ||
+           word.equals("break") || word.equals("continue") || word.equals("if") ||
+           word.equals("guard") || word.equals("while") || word.equals("for") ||
+           (word.equals("switch") && braced_switch_ahead(self.tokens, self.index)) || word.equals("defer") || word.equals("unsafe") ||
+           word.equals("{") ||
+           self.assignment_ahead() {
+            guard let statement = self.parse_statement() else { return nil; }
+            statements.push(statement);
+            return false;
+        }
+        let expression_start = self.current().span;
+        guard let expression = self.parse_expression() else { return nil; }
+        if self.spelling().equals("}") {
+            statements.push(self.arena.add(NodeForm.return_stmt(ReturnStmtAst {
+                value: expression, implicit: true
+            })));
+            return true;
+        }
+        let statement = self.make(NodeForm.expr_stmt(ExprStmtAst { expr: expression }),
+                                  expression_start);
+        if !self.expect(";") { return nil; }
+        statements.push(statement);
+        false
+    }
+    // Records the failed statement starting at `first` and resumes at the next
+    // statement: after a `;` or before a `}` at the error's nesting depth, or at
+    // a later line indented no deeper than the failed statement.
+    def recover(first: i32) -> Bool {
+        guard let problem = self.error else { return false; }
+        if !self.arena.recovering { return false; }
+        self.arena.syntax_errors.push(problem);
+        self.error = nil;
+        let column = self.tokens[first].span.column;
+        var index = first + 1;
+        while index < self.tokens.len() - 1 && span_before(self.tokens[index].span, problem.span) { index += 1; }
+        var depth = 0;
+        while index < self.tokens.len() - 1 {
+            let token = self.tokens[index];
+            let text = token.text;
+            if depth == 0 && token.span.line > self.tokens[index - 1].span.end_line && token.span.column <= column { break; }
+            if text.equals("(") || text.equals("[") || text.equals("{") { depth += 1; }
+            else if text.equals(")") || text.equals("]") || text.equals("}") {
+                if depth == 0 { if text.equals("}") { break; } }
+                else { depth -= 1; }
+            } else if depth == 0 && text.equals(";") { index += 1; break; }
+            index += 1;
+        }
+        self.index = index;
+        true
     }
     def parse_block() -> NodeId? {
         let start = self.current().span;
@@ -1437,18 +1500,4 @@ pub def parse_statement_prefix(tokens: Vec<LexToken>, arena: AstArena,
     };
     let statement = cursor.parse_statement();
     StatementParseResult { statement, next_index: cursor.index, error: cursor.error }
-}
-
-pub def parse_statement_text(source: String, arena: AstArena) -> StatementParseResult {
-    let lexed = tokenize(source);
-    if let problem = lexed.error {
-        return StatementParseResult { statement: nil, next_index: 0, error: problem.message };
-    }
-    let result = parse_statement_prefix(lexed.tokens, arena);
-    if let problem = result.error { return result; }
-    if result.next_index < lexed.tokens.len() - 1 {
-        return StatementParseResult { statement: nil, next_index: result.next_index,
-                                      error: "unexpected token after statement" };
-    }
-    result
 }

@@ -19,3 +19,17 @@ void rt_io_eprintln_str(void* object) {
     if (text.data && text.len > 0) fwrite(text.data, 1, (size_t)text.len, stderr);
     fputc('\n', stderr);
 }
+
+void rt_io_eprint_str(void* object) {
+    StringVal text = rt_string_obj_value(object);
+    if (text.data && text.len > 0) fwrite(text.data, 1, (size_t)text.len, stderr);
+}
+
+int32_t rt_io_is_terminal(int32_t fd) {
+#if defined(__unix__) || defined(__APPLE__)
+    return isatty(fd) ? 1 : 0;
+#else
+    (void)fd;
+    return 0;
+#endif
+}

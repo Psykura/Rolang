@@ -7,7 +7,7 @@ pub struct DeclarationParseResult {
     pub let declaration: NodeId?;
     pub let next_index: i32;
     pub let remaining: String;
-    pub let error: String?;
+    pub let error: SyntaxError?;
     // Declarations synthesized alongside `declaration`, such as the extension for `struct S: P`.
     pub let extra: Vec<NodeId>;
 }
@@ -20,7 +20,7 @@ struct DeclarationCursor {
     var fragment_offset: i32;
     var end_line: i32;
     var end_column: i32;
-    var error: String?;
+    var error: SyntaxError?;
     let extra: Vec<NodeId>;
 
     def current() -> LexToken {
@@ -66,7 +66,7 @@ struct DeclarationCursor {
     def fail(expected: String) -> Void {
         if let previous = self.error { return; }
         let token = self.current();
-        self.error = f"expected {expected} at {token.span.line}:{token.span.column + self.fragment_offset}, found '{self.spelling()}'";
+        self.error = expected_token(expected, self.spelling(), self.tokens, self.index, Span.new(token.span.line, token.span.column + self.fragment_offset, token.span.end_line, token.span.end_column));
     }
     def expect(wanted: String) -> Bool {
         if self.match_text(wanted) { return true; }
@@ -686,21 +686,4 @@ pub def parse_declaration_prefix(tokens: Vec<LexToken>, arena: AstArena,
     DeclarationParseResult {
         declaration, next_index: cursor.index, remaining: cursor.fragment, error: cursor.error, extra: cursor.extra
     }
-}
-
-pub def parse_declaration_text(source: String, arena: AstArena) -> DeclarationParseResult {
-    let lexed = tokenize(source);
-    if let problem = lexed.error {
-        return DeclarationParseResult { declaration: nil, next_index: 0,
-                                        remaining: "", error: problem.message, extra: Vec<NodeId>.new() };
-    }
-    let result = parse_declaration_prefix(lexed.tokens, arena);
-    if let problem = result.error { return result; }
-    if result.remaining.len() > 0 || result.next_index < lexed.tokens.len() - 1 {
-        return DeclarationParseResult {
-            declaration: nil, next_index: result.next_index, remaining: result.remaining,
-            error: "unexpected token after declaration", extra: Vec<NodeId>.new()
-        };
-    }
-    result
 }

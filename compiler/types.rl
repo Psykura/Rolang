@@ -332,7 +332,9 @@ pub struct TypeTable {
                 if data.arguments.len() == 0 { return self.symbol_name(data.symbol_id, "protocol"); }
                 return self.symbol_name(data.symbol_id, "protocol") + "<" + self.format_types(data.arguments) + ">";
             case .existential(let data): return f"any {self.format_type(data.protocol_id)}";
-            case .type_variable(let data): return f"${data.name}";
+            case .type_variable(let data):
+                if data.name.equals("__nil") { return "nil"; }
+                return data.name;
             case .error: return "<error>";
             case .never: return "Never";
         }
