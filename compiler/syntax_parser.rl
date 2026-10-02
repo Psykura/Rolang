@@ -61,9 +61,6 @@ pub def continues_condition_expression(word: String) -> Bool {
     }
 }
 
-// Keywords are contextual identifiers in the reference grammar. Only treat
-// `switch` as syntax when a body follows its scrutinee, rather than rejecting
-// expressions such as `switch + 1` or a function named `switch`.
 // `(` at `index` starts a closure when its matching `)` is followed by `->`.
 def arrow_lambda_ahead(tokens: Vec<LexToken>, index: i32) -> Bool {
     var depth = 0; var look = index;
@@ -75,6 +72,9 @@ def arrow_lambda_ahead(tokens: Vec<LexToken>, index: i32) -> Bool {
     }
     false
 }
+// Keywords are contextual identifiers in the reference grammar. Only treat
+// `switch` as syntax when a body follows its scrutinee, rather than rejecting
+// expressions such as `switch + 1` or a function named `switch`.
 def braced_switch_ahead(tokens: Vec<LexToken>, index: i32) -> Bool {
     // A type named `switch` can introduce a struct literal. A switch
     // scrutinee cannot start with generic type arguments.
@@ -83,24 +83,8 @@ def braced_switch_ahead(tokens: Vec<LexToken>, index: i32) -> Bool {
     while look < tokens.len() {
         let word = tokens[look].text;
         if depth == 0 {
-            if word.equals("{") {
-                if look > index + 1 { return true; }
-                // An immediate brace belongs to a struct literal or a
-                // lambda scrutinee. Only the latter has a following body.
-                var after = look + 1; var braces = 1;
-                while after < tokens.len() && braces > 0 {
-                    let nested = tokens[after].text;
-                    if nested.equals("{") { braces += 1; }
-                    else if nested.equals("}") { braces -= 1; }
-                    after += 1;
-                }
-                if braces != 0 || after >= tokens.len() { return false; }
-                let following = tokens[after].text;
-                if following.equals("{") { return true; }
-                if !continues_condition_expression(following) { return false; }
-                look = after;
-                continue;
-            }
+            // An immediate brace belongs to a struct literal of a type named `switch`.
+            if word.equals("{") { return look > index + 1; }
             if is_assignment_operator(word) { return false; }
             if word.equals(";") || word.equals("}") || word.equals(")") || word.equals("]") { return false; }
         }
@@ -813,13 +797,12 @@ struct ExpressionCursor {
         if !self.expect("}") { return nil; }
         self.make(NodeForm.switch_expr(SwitchExprAst { value, cases }), start)
     }
-    def parse_lambda_expr(arrow: Bool = false) -> NodeId? {
+    def parse_lambda_expr() -> NodeId? {
         let cursor = StatementCursor {
             tokens: self.tokens, arena: self.arena, index: self.index,
             end_line: self.end_line, end_column: self.end_column, error: nil
         };
-        var expression: NodeId? = nil;
-        if arrow { expression = cursor.parse_arrow_lambda(); } else { expression = cursor.parse_lambda(); }
+        let expression = cursor.parse_arrow_lambda();
         if let problem = cursor.error { self.error = problem; return nil; }
         self.index = cursor.index;
         self.end_line = cursor.end_line;
@@ -899,12 +882,12 @@ struct ExpressionCursor {
             self.take();
             return self.make(form, start);
         }
-        if self.spelling().equals("(") && arrow_lambda_ahead(self.tokens, self.index) { return self.parse_lambda_expr(true); }
+        if self.spelling().equals("(") && arrow_lambda_ahead(self.tokens, self.index) { return self.parse_lambda_expr(); }
         if self.spelling().equals("(") { return self.parse_parenthesized(start); }
         if self.spelling().equals("[") { return self.parse_collection(start); }
         if self.spelling().equals("switch") && braced_switch_ahead(self.tokens, self.index) { return self.parse_switch_expr(start); }
         if self.spelling().equals("if") { return self.parse_if_expr(start); }
-        if self.spelling().equals("{") { return self.parse_lambda_expr(); }
+        if self.spelling().equals("{") { self.fail("expression (closures are written `(params) -> { body }`)"); return nil; }
         if self.typed_primary_ahead() { return self.parse_typed_primary(start); }
         if self.at_identifier() {
             let name = self.spelling();
@@ -1206,7 +1189,7 @@ struct StatementCursor {
                word.equals("break") || word.equals("continue") || word.equals("if") ||
                word.equals("guard") || word.equals("while") || word.equals("for") ||
                (word.equals("switch") && braced_switch_ahead(self.tokens, self.index)) || word.equals("defer") || word.equals("unsafe") ||
-               (word.equals("{") && !self.braced_lambda_ahead()) ||
+               word.equals("{") ||
                self.assignment_ahead() {
                 guard let statement = self.parse_statement() else { return nil; }
                 statements.push(statement);
@@ -1234,81 +1217,6 @@ struct StatementCursor {
         if !self.expect("}") { return nil; }
         self.make(NodeForm.block(BlockAst { statements, is_unsafe: false }), start)
     }
-    def lambda_params_ahead() -> Bool {
-        let first = self.spelling();
-        if first.equals("for") || first.equals("if") || first.equals("guard") ||
-           first.equals("while") || first.equals("switch") || first.equals("defer") ||
-           first.equals("unsafe") || first.equals("return") || first.equals("break") ||
-           first.equals("continue") { return false; }
-        var nesting = 0;
-        var look = self.index;
-        while look < self.tokens.len() {
-            let word = self.tokens[look].text;
-            if nesting == 0 {
-                if word.equals("in") { return true; }
-                if word.equals(";") || word.equals("{") || word.equals("}") { return false; }
-            }
-            if word.equals("(") || word.equals("[") { nesting += 1; }
-            else if word.equals(")") || word.equals("]") { nesting -= 1; }
-            look += 1;
-        }
-        false
-    }
-    def braced_lambda_ahead() -> Bool {
-        if !self.spelling().equals("{") { return false; }
-        let cursor = StatementCursor {
-            tokens: self.tokens, arena: self.arena, index: self.index + 1,
-            end_line: self.end_line, end_column: self.end_column, error: nil
-        };
-        if cursor.lambda_params_ahead() { return true; }
-        var nesting = 1;
-        var look = self.index + 1;
-        while look < self.tokens.len() && nesting > 0 {
-            let word = self.tokens[look].text;
-            if word.equals("{") { nesting += 1; }
-            else if word.equals("}") { nesting -= 1; }
-            look += 1;
-        }
-        if nesting != 0 || look >= self.tokens.len() { return false; }
-        let following = self.tokens[look].text;
-        // Consecutive lexical blocks are separate statements. An opening
-        // brace cannot be a postfix operation on a lambda expression.
-        if following.equals("{") { return false; }
-        if following.equals(";") { return true; }
-        if !continues_condition_expression(following) { return false; }
-        // Prefer a lexical block when the suffix independently forms the next
-        // statement (e.g. a negative or tuple tail). A suffix such as `()` that
-        // cannot stand alone still belongs to an immediately invoked lambda.
-        let probe = parse_expression_prefix(self.tokens, AstArena.new(), look);
-        if let problem = probe.error { return true; }
-        if probe.remaining.len() > 0 || probe.next_index <= look || probe.next_index >= self.tokens.len() { return true; }
-        let end = self.tokens[probe.next_index].text;
-        !end.equals(";") && !end.equals("}")
-    }
-    def parse_lambda() -> NodeId? {
-        let start = self.current().span;
-        if !self.expect("{") { return nil; }
-        let params = Vec<(NodeId, NodeId?)>.new();
-        if self.lambda_params_ahead() {
-            while true {
-                guard let pattern = self.parse_pattern() else { return nil; }
-                var annotation: NodeId? = nil;
-                if self.match_text(":") {
-                    guard let type_node = self.parse_type() else { return nil; }
-                    annotation = type_node;
-                }
-                params.push((pattern, annotation));
-                if !self.match_text(",") { break; }
-            }
-            if !self.expect("in") { return nil; }
-        }
-        guard let body = self.parse_braced_body() else { return nil; }
-        if !self.expect("}") { return nil; }
-        promote_tail_switch(self.arena, body);
-        self.make(NodeForm.lambda(LambdaAst { params, body, return_type: nil }), start)
-    }
-    // `(a: i32, b) -> i32 { body }`; parameter types may come from context, and
-    // `(a) -> { body }` infers the return type.
     def parse_arrow_lambda() -> NodeId? {
         let start = self.current().span;
         if !self.expect("(") { return nil; }
@@ -1452,7 +1360,7 @@ struct StatementCursor {
     }
     def parse_statement() -> NodeId? {
         let word = self.spelling();
-        if word.equals("{") && !self.braced_lambda_ahead() { return self.parse_block(); }
+        if word.equals("{") { return self.parse_block(); }
         if word.equals("if") { return self.parse_if(); }
         if word.equals("guard") { return self.parse_guard(); }
         if word.equals("while") { return self.parse_while(); }

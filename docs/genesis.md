@@ -7,7 +7,9 @@ The resulting compiler can compile subsequent versions of itself.
 ## Source builds
 
 Download the matching Genesis Compiler binary and verify its SHA-256 against
-the release's SHA256SUMS. Make it executable, then build:
+the release's SHA256SUMS. The current sources use arrow closures and require a
+Genesis Compiler from release 0.2.0 or later; 0.1.0 builds only the 0.1.0 and
+0.2.0 sources. Make it executable, then build:
 
 ~~~sh
 chmod +x /path/to/rolang-genesis

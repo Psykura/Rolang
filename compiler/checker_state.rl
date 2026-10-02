@@ -36,7 +36,7 @@ pub struct CheckerState {
         let errors = result.errors;
         let resolver = TypeResolver.new(arena, types, resolution.symbol_table,
             resolution.node_symbols, resolution.imported_symbols,
-            { kind: String, message: String, id: NodeId? in
+            (kind: String, message: String, id: NodeId?) -> {
                 var error_kind = TypeErrorKind.not_a_type();
                 if kind.equals("GENERIC_ARG_COUNT") { error_kind = TypeErrorKind.generic_arg_count(); }
                 var span: Span? = nil;
@@ -48,7 +48,7 @@ pub struct CheckerState {
             member_resolver: MemberResolver.new(arena, types, resolution.symbol_table),
             conformance_checker: ConformanceChecker.new(arena, types, resolution.symbol_table),
             generic_inference: GenericInference.new(arena, types, resolution.symbol_table, resolver, result.expr_types, nil,
-                { kind: TypeErrorKind, message: String in errors.push(TypeError { kind, message, span: nil }); }),
+                (kind: TypeErrorKind, message: String) -> { errors.push(TypeError { kind, message, span: nil }); }),
             layout: LayoutService.new(arena, types, resolution.symbol_table, resolver), result,
             type_env: Dict<i32, TypeId>.with_capacity(16, 0), lowered_expressions: result.lowered_expressions,
             current_function_return: nil, current_self_type: nil, expected_type: nil,

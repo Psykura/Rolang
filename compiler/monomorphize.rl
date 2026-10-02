@@ -348,8 +348,8 @@ pub struct Monomorphizer {
                 return self.arena.add(HirForm.enum_case_pattern(HirEnumCasePatternData { case_name: data.case_name, case_symbol: data.case_symbol, payload, enum_type }));
             default: {}
         }
-        let child: (HirId) -> HirId = { value in self.clone_node(value, subst) };
-        let type: (TypeId) -> TypeId = { value in self.specialized_type(value, subst) };
+        let child: (HirId) -> HirId = (value) -> { self.clone_node(value, subst) };
+        let type: (TypeId) -> TypeId = (value) -> { self.specialized_type(value, subst) };
         self.arena.add(node.form.remap(child, type))
     }
     def signature(func: HirFunctionData, subst: TypeSubstitution, result: TypeId? = nil) -> TypeId {

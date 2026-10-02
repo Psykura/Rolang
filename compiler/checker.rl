@@ -14,9 +14,9 @@ pub struct TypeChecker {
     }
     pub def check(program: NodeId) -> TypeCheckResult {
         let expr = self.expressions; let stmt = self.statements; let state = self.state;
-        let infer: (NodeId) -> TypeId = { id: NodeId in expr.infer_expr(id) };
-        let check: (NodeId) -> Void = { id: NodeId in stmt.check_stmt(id); };
-        let contextual: (NodeId, TypeId?) -> TypeId = { id: NodeId, expected: TypeId? in state.infer_with_expected(id, expected) };
+        let infer: (NodeId) -> TypeId = (id: NodeId) -> { expr.infer_expr(id) };
+        let check: (NodeId) -> Void = (id: NodeId) -> { stmt.check_stmt(id); };
+        let contextual: (NodeId, TypeId?) -> TypeId = (id: NodeId, expected: TypeId?) -> { state.infer_with_expected(id, expected) };
         state.infer_callback = infer; state.statement_callback = check;
         state.generic_inference.set_infer_expression(contextual);
         defer { state.infer_callback = nil; state.statement_callback = nil; state.generic_inference.set_infer_expression(nil); }

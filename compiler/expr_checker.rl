@@ -463,7 +463,7 @@ pub struct ExprChecker {
     }
     def coverage(id: NodeId, type: TypeId) -> Void {
         let errors = self.state.result.errors;
-        ExhaustivenessChecker.new(self.state.arena, self.state.type_table, self.state.symbol_table, { kind: TypeErrorKind, message: String in errors.push(TypeError { kind, message, span: nil }); }).check_switch(id, type);
+        ExhaustivenessChecker.new(self.state.arena, self.state.type_table, self.state.symbol_table, (kind: TypeErrorKind, message: String) -> { errors.push(TypeError { kind, message, span: nil }); }).check_switch(id, type);
     }
     def switch_expr(id: NodeId, data: SwitchExprAst) -> TypeId {
         var result = self.state.expected_type; let type = self.state.infer_with_expected(data.value, nil);

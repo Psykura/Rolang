@@ -318,7 +318,9 @@ the dispatch behavior needed.
 ## Closures and higher-order functions
 
 Function values can be stored in fields, passed to functions and returned.
-Closures use explicit typed parameters or infer them from a contextual signature.
+A closure is written `(params) -> ReturnType { body }`. Parameter types may be
+omitted when a contextual function type supplies them, and the return type may be
+omitted to infer it from the body.
 Captured values are stored in a managed closure object; captured managed objects
 retain reference semantics and remain alive while owned by the closure.
 Because captures are copies, assigning to a captured variable inside a closure
@@ -327,24 +329,23 @@ is an error; keep shared mutable state in a struct field.
 <!-- example: closures -->
 ~~~rolang
 def make_adder(base: i32) -> (i32) -> i32 {
-    { n: i32 in base + n }
+    (n: i32) -> { base + n }
 }
 def apply(f: (i32) -> i32, value: i32) -> i32 { f(value) }
 def twice(n: i32) -> i32 { n * 2 }
 
 def main() -> i32 {
     let add = make_adder(40);
-    let contextual: (i32) -> i32 = { n in n + 1 };
+    let contextual: (i32) -> i32 = (n) -> { n + 1 };
     if add(2) == 42 && apply(twice, 21) == 42 && contextual(41) == 42 { return 0; }
     1
 }
 ~~~
 
-The arrow form `(n: i32) -> i32 { n + 1 }` declares the return type. Parameter
-types may be omitted when the context supplies them, and the return type may be
-omitted to infer it: `values.map((x) -> { x * 2 })`, `() -> { counter.tick(); }`.
-Closure parameters can be patterns, as in `((a, b)) -> { a + b }` for a tuple
-argument.
+Further forms: `(n: i32) -> i32 { n + 1 }` declares every type,
+`values.map((x) -> { x * 2 })` infers them, `() -> { counter.tick(); }` takes no
+arguments, and `((a, b)) -> { a + b }` destructures a tuple argument. A `{` in
+expression position is not a closure.
 Named synchronous, non-generic safe functions can be adapted to function values.
 Use wrappers for generic/unsafe functions. Async closures and dynamic async
 protocol calls are outside the current async implementation.
@@ -368,7 +369,7 @@ import std.iterator
 def main() -> i32 {
     let values = [1, 2, 3, 4];
     let (base, _) = (30, 99);
-    let selected = values.iter().filter({ n in n > 1 }).map({ n in n * 2 }).collect();
+    let selected = values.iter().filter((n) -> { n > 1 }).map((n) -> { n * 2 }).collect();
     let first = selected[0..<2];
     var sum = base;
     for value in first { sum += value; }

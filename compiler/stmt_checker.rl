@@ -34,7 +34,7 @@ pub struct StmtChecker {
     pub def coverage(id: NodeId, type: TypeId) -> Void {
         let errors = self.state.result.errors;
         let checker = ExhaustivenessChecker.new(self.state.arena, self.state.type_table, self.state.symbol_table,
-            { kind: TypeErrorKind, message: String in errors.push(TypeError { kind, message, span: nil }); });
+            (kind: TypeErrorKind, message: String) -> { errors.push(TypeError { kind, message, span: nil }); });
         checker.check_switch(id, type);
     }
     pub def check_case(id: NodeId, type: TypeId) -> Void {

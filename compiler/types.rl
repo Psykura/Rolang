@@ -249,7 +249,7 @@ pub struct TypeTable {
     }
 
     def format_types(types: FrozenVec<TypeId>) -> String {
-        join_type_names(types.map({ type in self.format_type(type) }))
+        join_type_names(types.map((type) -> { self.format_type(type) }))
     }
     def format_named(symbol_id: SymbolId, prefix: String, args: FrozenVec<TypeId>) -> String {
         let name = self.symbol_name(symbol_id, prefix);

@@ -25,7 +25,8 @@ Project/workspace/package management and LSP are planned in the
 
 Use a 64-bit POSIX host, LLVM clang, a compatible C compiler/linker, make and a
 bootstrap compiler executable for your host platform. The bootstrap compiler is a
-released Rolang compiler binary used to compile the current Rolang sources.
+released Rolang compiler binary used to compile the current Rolang sources; the
+current sources require the 0.2.0 release or later.
 
 Download the matching bootstrap compiler release asset, make it executable and
 pass its path to make:
