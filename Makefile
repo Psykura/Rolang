@@ -2,7 +2,7 @@ CLANG ?= clang
 CC = $(CLANG)
 GENESIS ?= $(CURDIR)/genesis/rolangc
 PREFIX ?= $(HOME)/.local
-VERSION ?= 0.2.0
+VERSION ?= 0.3.0
 SOURCES := $(wildcard compiler/*.rl compiler/codegen/*.rl std/*.rl std/*.c std/*.h runtime/*.c runtime/*.h)
 
 .PHONY: all rebuild release install clean
@@ -15,7 +15,7 @@ rebuild:
 	GENESIS="$(GENESIS)" CLANG="$(CLANG)" CC="$(CC)" ./scripts/build.sh
 
 release: bin/rolangc
-	GENESIS="$(GENESIS)" VERSION="$(VERSION)" ./scripts/release.sh
+	VERSION="$(VERSION)" ./scripts/release.sh
 
 install: bin/rolangc
 	./scripts/install.sh "$(DESTDIR)$(PREFIX)"

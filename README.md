@@ -28,12 +28,11 @@ bootstrap compiler executable for your host platform. The bootstrap compiler is 
 released Rolang compiler binary used to compile the current Rolang sources; the
 current sources require the 0.2.0 release or later.
 
-Download the matching bootstrap compiler release asset, make it executable and
-pass its path to make:
+Download and extract the release bundle for your platform and pass its compiler
+to make:
 
 ~~~sh
-chmod +x /path/to/rolangc
-make GENESIS=/path/to/rolangc CLANG=/path/to/clang
+make GENESIS=/path/to/rolang-VERSION-OS-ARCH/bin/rolangc CLANG=/path/to/clang
 ~~~
 
 Alternatively, place the executable at genesis/rolangc and run make. The build

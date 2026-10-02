@@ -1,9 +1,9 @@
 # Contributing to Rolang
 
-Build with a Genesis Compiler and LLVM clang:
+Build with a released Rolang compiler (see [Genesis and releases](docs/genesis.md)) and LLVM clang:
 
 ~~~sh
-make GENESIS=/path/to/rolang-genesis CLANG=/path/to/clang
+make GENESIS=/path/to/rolang-VERSION-OS-ARCH/bin/rolangc CLANG=/path/to/clang
 ~~~
 
 Compiler source lives in compiler/, std in std/, and the C runtime core in runtime/.

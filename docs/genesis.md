@@ -1,25 +1,25 @@
 # Genesis Compiler and releases
 
-A Genesis Compiler is a platform-specific Rolang compiler executable supplied
-with a release. It compiles the Rolang source in compiler/ to produce bin/rolangc.
-The resulting compiler can compile subsequent versions of itself.
+The Genesis Compiler is the initial Rolang compiler executable, produced outside
+this source tree and published once, as the rolang-genesis asset of release
+0.1.0. Every later release ships its compiler in the release bundle, and that
+compiler builds the next sources, so no further genesis binaries are needed.
 
 ## Source builds
 
-Download the matching Genesis Compiler binary and verify its SHA-256 against
-the release's SHA256SUMS. The current sources use arrow closures and require a
-Genesis Compiler from release 0.2.0 or later; 0.1.0 builds only the 0.1.0 and
-0.2.0 sources. Make it executable, then build:
+Building compiler/ needs an existing Rolang compiler for the host platform (the
+GENESIS make variable). Use bin/rolangc from a release bundle: download the
+matching rolang-VERSION-OS-ARCH.tar.gz, verify its SHA-256 against the release's
+SHA256SUMS and extract it. The current sources require release 0.2.0 or later.
 
 ~~~sh
-chmod +x /path/to/rolang-genesis
-make GENESIS=/path/to/rolang-genesis CLANG=/path/to/clang
+make GENESIS=/path/to/rolang-VERSION-OS-ARCH/bin/rolangc CLANG=/path/to/clang
 ~~~
 
-The default Genesis location is genesis/rolangc. This directory is local and
-ignored by Git. The compiler receives explicit paths to this checkout's std/
-and runtime/ and compiles compiler/main.rl once at O3. LLVM clang and a compatible
-C compiler/linker are required to produce native programs.
+The default location is genesis/rolangc. This directory is local and ignored by
+Git. The compiler receives explicit paths to this checkout's std/ and runtime/
+and compiles compiler/main.rl once at O3. LLVM clang and a compatible C
+compiler/linker are required to produce native programs.
 
 Once built, bin/rolangc can compile the next source changes:
 
@@ -28,31 +28,27 @@ make rebuild GENESIS="$PWD/bin/rolangc" CLANG=/path/to/clang
 ~~~
 
 The existing executable is replaced after compilation succeeds. Keep a released
-Genesis Compiler outside bin/ for clean builds; make clean removes bin/ and
-build/ while preserving genesis/.
+compiler outside bin/ for clean builds; make clean removes bin/ and build/ while
+preserving genesis/.
 
 ## Preparing a release
 
-The release producer supplies a Genesis Compiler executable that understands the
-release sources and runtime ABI. Its initial generation happens outside this
-source tree. Later releases can use a compatible released Rolang compiler.
-
-Build and package on each supported host platform:
+Build the release sources with a released compiler, rebuild them with the result
+so the shipped compiler is self-built, then package on each supported host:
 
 ~~~sh
-make rebuild GENESIS=/path/to/rolang-genesis CLANG=/path/to/clang
-make release VERSION=0.2.0 GENESIS=/path/to/rolang-genesis
+make rebuild GENESIS=/path/to/released/bin/rolangc CLANG=/path/to/clang
+cp bin/rolangc build/stage1-rolangc
+make rebuild GENESIS="$PWD/build/stage1-rolangc" CLANG=/path/to/clang
+make release VERSION=0.3.0
 ~~~
 
 dist/VERSION/ contains:
 
 - rolang-VERSION-OS-ARCH.tar.gz: the built compiler, std, runtime and license.
-- rolang-genesis-VERSION-OS-ARCH: the supplied Genesis Compiler executable.
-- SHA256SUMS: checksums for both assets.
+- SHA256SUMS: the bundle checksum.
 
-Publish these files together. A Genesis binary belongs to its OS/architecture;
-prepare a separate binary and bundle for each host. Packaging uses the host OS
-and architecture, so provide a compiler built for that host.
+A bundle belongs to its OS/architecture; package each host separately.
 
 The compiler bundle has bin/rolangc and lib/rolang/{std,runtime}. Extract it and
 add its bin/ directory to PATH, or use make install PREFIX=/installation/path
