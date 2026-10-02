@@ -427,7 +427,9 @@ bindings and discarded components.
 `..<` excludes the upper range bound; `...` includes it. Bounds are i32;
 descending ranges are empty. Vector/string slices clamp bounds and return
 copies; managed vector elements stay shared, and string indices count bytes.
-Slice assignment and omitted bounds are not implemented.
+Bounds may be omitted: `v[..<3]`, `v[...2]`, `v[2...]` and `v[...]` (an open upper
+bound runs to the i32 maximum, which slicing clamps). Assigning to a Vec slice,
+`v[1..<3] = [x, y, z]`, replaces that range with values of any length.
 
 <!-- example: iteration -->
 ~~~rolang

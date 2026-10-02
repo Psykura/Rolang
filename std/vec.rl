@@ -73,6 +73,17 @@ pub struct Vec<T> {
         return out;
     }
 
+    // Replaces the clamped `bounds` with `values`, which may have a different length.
+    pub def replace_range(bounds: IndexRange, values: Vec<T>) -> Void {
+        let start = bounds.lower(self.len());
+        var end = bounds.upper(self.len()); if end < start { end = start; }
+        let incoming = values.slice(IndexRange { start: 0, end: values.len(), inclusive: false });
+        let tail = self.slice(IndexRange { start: end, end: self.len(), inclusive: false });
+        while self.len() > start { self.pop(); }
+        for value in incoming { self.push(value); }
+        for value in tail { self.push(value); }
+    }
+
     pub def __iter__() -> VecIter<T> {
         return VecIter<T> { vec: self, pos: 0 };
     }

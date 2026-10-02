@@ -200,7 +200,14 @@ pub struct GenericInference {
                 guard let value = arg.value else { continue; }
                 guard let value_node = self.arena.get(value) else { continue; }
                 var lambda = false;
-                switch value_node.form { case .lambda: lambda = true; default: {} }
+                switch value_node.form {
+                    case .lambda: lambda = true;
+                    // Empty literals carry no type information; they are checked against the
+                    // inferred parameter type afterwards.
+                    case .array_literal(let literal): if literal.elements.len() == 0 { continue; }
+                    case .dict_literal(let literal): if literal.entries.len() == 0 { continue; }
+                    default: {}
+                }
                 if lambda != (lambda_pass == 1) { continue; }
                 let annotation = self.param_annotation(decl.params[index]);
                 var actual = self.type_table.error_type;

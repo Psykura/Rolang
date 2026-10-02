@@ -356,18 +356,37 @@ struct ExpressionCursor {
         if combined { return self.finish(result, start); }
         result
     }
+    // `a..<b` and `a...b`; `..<b`, `...b` start at 0 and `a...` runs to the i32 maximum,
+    // which slicing clamps to the length.
     def parse_range() -> NodeId? {
         let start = self.current().span;
-        guard let first = self.parse_level(5) else { return nil; }
+        var first: NodeId? = nil;
+        if self.spelling().equals("..<") || self.spelling().equals("...") {
+            first = self.arena.add(NodeForm.literal(LiteralAst { value: LiteralValue.integer("0"), kind: "int" }));
+        } else {
+            guard let lower = self.parse_level(5) else { return nil; }
+            first = lower;
+        }
         let op = self.spelling();
         if !op.equals("..<") && !op.equals("...") { return first; }
         self.take();
-        guard let last = self.parse_level(5) else { return nil; }
-        let type_name = self.arena.add(NodeForm.named_type(NamedTypeAst {
-            name: "IndexRange", module_path: Vec<String>.new(), generic_args: Vec<NodeId>.new()
-        }));
+        var last: NodeId? = nil;
+        let next = self.spelling();
+        if op.equals("...") && (next.equals("]") || next.equals(")") || next.equals(",") || next.equals(";") || next.equals("{") || next.equals("}") || next.len() == 0) {
+            last = self.arena.add(NodeForm.literal(LiteralAst { value: LiteralValue.integer("2147483647"), kind: "int" }));
+            let open = self.arena.add(NodeForm.literal(LiteralAst { value: LiteralValue.boolean(false), kind: "bool" }));
+            return self.range_literal(first, last, open, start);
+        }
+        guard let upper = self.parse_level(5) else { return nil; }
+        last = upper;
         let inclusive = self.arena.add(NodeForm.literal(LiteralAst {
             value: LiteralValue.boolean(op.equals("...")), kind: "bool"
+        }));
+        self.range_literal(first, last, inclusive, start)
+    }
+    def range_literal(first: NodeId?, last: NodeId?, inclusive: NodeId, start: Span) -> NodeId {
+        let type_name = self.arena.add(NodeForm.named_type(NamedTypeAst {
+            name: "IndexRange", module_path: Vec<String>.new(), generic_args: Vec<NodeId>.new()
         }));
         let arguments = Vec<NodeId>.new();
         arguments.push(self.arena.add(NodeForm.argument(ArgumentAst { label: "start", value: first })));

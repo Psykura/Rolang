@@ -208,6 +208,7 @@ pub struct HirBuilder {
             case .block: return self.block(id);
             case .var_decl(let data): return self.var_decl(data);
             case .assignment(let data):
+                if let lowered = self.result.lowered_expressions[id.id] { return self.arena.add(HirForm.expr_stmt(HirExprStmtData { expr: self.expr(lowered) })); }
                 var op: String? = nil; if !data.op.equals("=") { op = compound_to_base_op(data.op); }
                 return self.arena.add(HirForm.assign(HirAssignData { target: self.expr(data.target), value: self.expr(data.value), compound_op: op }));
             case .expr_stmt(let data): return self.arena.add(HirForm.expr_stmt(HirExprStmtData { expr: self.expr(data.expr) }));

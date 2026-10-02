@@ -64,6 +64,25 @@ pub struct StmtChecker {
             }
         }
     }
+    // `v[range] = values` replaces part of a Vec: it is checked and lowered as
+    // `v.replace_range(range, values)`.
+    def check_slice_assignment(id: NodeId, data: AssignmentAst, sub: SubscriptAst) -> Void {
+        guard let object = sub.object else { return; }
+        let object_type = self.state.result.expr_types[object.id] ?? self.state.type_table.error_type;
+        if !data.op.equals("=") { self.state.error(TypeErrorKind.invalid_operation(), f"compound assignment '{data.op}' to a slice is not supported", id); return; }
+        guard let method = self.state.member_resolver.get_method(object_type, "replace_range") else {
+            self.state.error(TypeErrorKind.invalid_operation(), f"{self.state.type_table.format_type(object_type)} slices cannot be assigned; only Vec supports replacing a range", id); return;
+        }
+        var span: Span? = nil; if let node = self.state.arena.get(id) { span = node.span; }
+        let callee = self.state.arena.add(NodeForm.member_access(MemberAccessAst { object, member: "replace_range" }), span);
+        let arguments = Vec<NodeId>.new();
+        let none: String? = nil;
+        arguments.push(self.state.arena.add(NodeForm.argument(ArgumentAst { label: none, value: sub.indices[0] }), span));
+        arguments.push(self.state.arena.add(NodeForm.argument(ArgumentAst { label: none, value: data.value }), span));
+        let call = self.state.arena.add(NodeForm.call(CallAst { callee, arguments, is_interpolation: false }), span);
+        self.state.lowered_expressions[id.id] = call;
+        self.state.infer_expr(call);
+    }
     def irrefutable(id: NodeId) -> Bool {
         guard let node = self.state.arena.get(id) else { return false; }
         switch node.form {
@@ -103,9 +122,7 @@ pub struct StmtChecker {
         }
         let target_type = self.state.infer_expr(target);
         if self.state.lowered_expressions.contains(target.id) {
-            if let node = self.state.arena.get(target) {
-                switch node.form { case .subscript: self.state.error(TypeErrorKind.invalid_operation(), "slice assignment is not supported; slices are copies", id); return; default: {} }
-            }
+            if let node = self.state.arena.get(target) { switch node.form { case .subscript(let sub): self.check_slice_assignment(id, data, sub); return; default: {} } }
         }
         // A plain assignment gives the value its target type as context, e.g. for closures and [].
         var value_type = self.state.type_table.error_type;
