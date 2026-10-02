@@ -84,9 +84,18 @@ pub def insert_arc_function(func: MirFunction, types: TypeTable) -> Void {
             let ownership = mir_ownership(op, refs, types);
             for place in ownership.copies { out.push(MirOp.retain(MirRetainData { operand: MirOperand.copy(place) })); }
             for place in ownership.pre_releases { out.push(MirOp.release(MirReleaseData { operand: MirOperand.copy(place) })); }
-            switch op { case .assign(let d): if d.place.projections.len() == 0 && owned.contains(d.place.base) && !params.contains(d.place.base) && mir_needs_arc(d.place.type_id, types) {
-                out.push(MirOp.release(MirReleaseData { operand: MirOperand.copy(d.place) })); owned.remove(d.place.base);
-            } default: {} }
+            switch op {
+                case .assign(let d): if d.place.projections.len() == 0 && owned.contains(d.place.base) && !params.contains(d.place.base) && mir_needs_arc(d.place.type_id, types) {
+                    out.push(MirOp.release(MirReleaseData { operand: MirOperand.copy(d.place) })); owned.remove(d.place.base);
+                }
+                // Any other definition also replaces an owned value, e.g. an async segment's
+                // temporary reloaded from the frame and then recomputed. An operation reading its
+                // own result keeps the old value until it has run.
+                default: if let result = ownership.produces { if owned.contains(result) && !params.contains(result) {
+                    var reads = false; for operand in mir_op_operands(op) { if let local = mir_operand_local(operand) { if local == result { reads = true; } } }
+                    if !reads { out.push(mir_release_local(func, result)); owned.remove(result); }
+                } }
+            }
             out.push(op);
             for place in ownership.post_retains { out.push(MirOp.retain(MirRetainData { operand: MirOperand.copy(place) })); }
             if let result = ownership.produces { owned.add(result); consumed.remove(result); }

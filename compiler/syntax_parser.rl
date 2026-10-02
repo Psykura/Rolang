@@ -69,13 +69,16 @@ def escape_length(raw: String, index: i32, limit: i32) -> i32 {
     }
     2
 }
-// `(` at `index` starts a closure when its matching `)` is followed by `->`.
+// `(` at `index` starts a closure when its matching `)` is followed by `->` or `async ->`.
 def arrow_lambda_ahead(tokens: Vec<LexToken>, index: i32) -> Bool {
     var depth = 0; var look = index;
     while look < tokens.len() {
         let word = tokens[look].text;
         if word.equals("(") || word.equals("[") { depth += 1; }
-        else if word.equals(")") || word.equals("]") { depth -= 1; if depth == 0 { return look + 1 < tokens.len() && tokens[look + 1].text.equals("->"); } }
+        else if word.equals(")") || word.equals("]") { depth -= 1; if depth == 0 {
+            var next = look + 1; if next < tokens.len() && tokens[next].text.equals("async") { next += 1; }
+            return next < tokens.len() && tokens[next].text.equals("->");
+        } }
         look += 1;
     }
     false
@@ -1261,6 +1264,7 @@ struct StatementCursor {
             }
         }
         if !self.expect(")") { return nil; }
+        let is_async = self.match_text("async");
         if !self.expect("->") { return nil; }
         var return_type: NodeId? = nil;
         if !self.spelling().equals("{") {
@@ -1271,7 +1275,7 @@ struct StatementCursor {
         guard let body = self.parse_braced_body() else { return nil; }
         if !self.expect("}") { return nil; }
         promote_tail_switch(self.arena, body);
-        self.make(NodeForm.lambda(LambdaAst { params, body, return_type }), start)
+        self.make(NodeForm.lambda(LambdaAst { params, body, return_type, is_async }), start)
     }
     def parse_if() -> NodeId? {
         let start = self.current().span;

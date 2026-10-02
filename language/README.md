@@ -421,8 +421,10 @@ expression position is not a closure.
 Named synchronous, non-generic safe functions can be adapted to function values,
 and `value.method` without a call is a closure bound to that receiver, which is
 evaluated once (`value?.method` gives an optional closure).
-Use wrappers for generic/unsafe functions. Async closures and dynamic async
-protocol calls are outside the current async implementation.
+Use wrappers for generic/unsafe functions. Async functions are values too:
+`let f = fetch` or `(id: i32) async -> String { ... }` has type `(i32) async ->
+String`; calling it inside async code awaits the call, and `spawn f(1)` starts it
+as a Task. Dynamic dispatch of async protocol requirements is not supported.
 
 ## Collections, tuples, ranges and iteration
 

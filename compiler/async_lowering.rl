@@ -14,7 +14,7 @@ def mir_sorted_blocks(func: MirFunction) -> Vec<MirBlockId> {
 def mir_await_points(func: MirFunction, names: Dict<String, MirFunction>) -> Vec<MirAwaitPoint> {
     let out = Vec<MirAwaitPoint>.new(); for id in mir_sorted_blocks(func) { if let block = func.get_block(id) {
         var index = 0; for op in block.ops { switch op { case .call_static(let call):
-            if names.contains(call.func_name) || call.func_name.equals("__rolang_await_task") || call.func_name.equals("rt_task_wait_done") {
+            if names.contains(call.func_name) || call.func_name.equals("__rolang_await_task") || call.func_name.equals("__rolang_await_started_task") || call.func_name.equals("rt_task_wait_done") {
                 out.push(MirAwaitPoint { block: id, index, global_index: out.len(), call });
             } default: {} } index += 1;
         }
@@ -52,12 +52,15 @@ struct MirAsyncBuilder {
         })); }
     }
     def is_spawn(point: MirAwaitPoint) -> Bool {
-        !point.call.func_name.equals("__rolang_await_task") && !point.call.func_name.equals("rt_task_wait_done")
+        !point.call.func_name.equals("__rolang_await_task") && !point.call.func_name.equals("__rolang_await_started_task") && !point.call.func_name.equals("rt_task_wait_done")
     }
+    // The awaiting task owns the child, releasing it when the result is taken: direct async
+    // calls, and tasks started through async function values (whose handle has no other owner).
+    def owns_child(point: MirAwaitPoint) -> Bool { self.is_spawn(point) || point.call.func_name.equals("__rolang_await_started_task") }
     def await_call(point: MirAwaitPoint, ops: Vec<MirOp>) -> Void {
         let ptr = self.ptr_type(); let task_field = self.field(f"$task{point.global_index}", ptr);
         var handle: MirOperand; var consume = "0";
-        if !self.is_spawn(point) { handle = point.call.args[0]; }
+        if !self.is_spawn(point) { handle = point.call.args[0]; if self.owns_child(point) { consume = "1"; } }
         else {
             let task = self.local(f"_task_res{point.global_index}", ptr, true);
             guard let callee = self.callees[point.call.func_name] else { return; }
@@ -79,7 +82,7 @@ struct MirAsyncBuilder {
         ops.push(MirOp.assign(MirAssignData { place: mir_bare_place(handle, ptr), value: MirOperand.copy(self.field(f"$task{point.global_index}", ptr)) }));
         var result: MirLocalId;
         if let id = point.call.result { result = id; } else { result = self.local(f"_void_join_{point.global_index}", self.types.void_type); }
-        ops.push(MirOp.task_get_result(MirTaskGetResultData { result, task_handle: mir_copy(handle, ptr), result_type: point.call.result_type, consume: self.is_spawn(point) }));
+        ops.push(MirOp.task_get_result(MirTaskGetResultData { result, task_handle: mir_copy(handle, ptr), result_type: point.call.result_type, consume: self.owns_child(point) }));
     }
     def resume(points: Vec<MirAwaitPoint>) -> MirFunction {
         let state = self.local("_state", self.int_type(), true);

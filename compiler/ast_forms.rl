@@ -133,6 +133,7 @@ pub struct LambdaAst {
     pub var params: Vec<(NodeId, NodeId?)>;
     pub var body: Vec<NodeId>;
     pub var return_type: NodeId?;
+    pub var is_async: Bool;
 }
 pub struct StructLiteralAst {
     pub var type_name: NodeId?;

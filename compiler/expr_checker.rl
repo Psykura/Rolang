@@ -532,12 +532,12 @@ pub struct ExprChecker {
         let old_unsafe = self.state.in_unsafe; let old_async = self.state.in_async_function;
         var expected_return: TypeId? = nil; if let func = context { if !self.state.type_table.has_type_variables(func.return_type) { expected_return = func.return_type; } }
         if let declared = data.return_type { expected_return = self.state.resolve_type(declared); }
-        self.state.current_function_return = expected_return; self.state.expected_type = nil; self.state.in_unsafe = false; self.state.in_async_function = false;
+        self.state.current_function_return = expected_return; self.state.expected_type = nil; self.state.in_unsafe = false; self.state.in_async_function = data.is_async;
         defer { self.state.current_function_return = old_return; self.state.expected_type = old_expected; self.state.in_unsafe = old_unsafe; self.state.in_async_function = old_async; }
         for stmt in data.body { self.state.check_stmt(stmt); }
         let ret = expected_return ?? self.block_return(data.body);
         if ret != self.state.type_table.void_type && !self.state.definitely_returns(data.body) { self.state.error(TypeErrorKind.type_mismatch(), "lambda must return a value on all paths", id); }
-        self.state.type_table.make_function(params, ret)
+        self.state.type_table.make_function(params, ret, data.is_async)
     }
     def coverage(id: NodeId, type: TypeId) -> Void {
         let errors = self.state.result.errors;
@@ -680,7 +680,7 @@ pub struct ExprChecker {
         let call = arena.add(NodeForm.call(CallAst { callee, arguments, is_interpolation: false }), span);
         var body = arena.add(NodeForm.return_stmt(ReturnStmtAst { value: call, implicit: true }), span);
         if func.return_type == self.state.type_table.void_type { body = arena.add(NodeForm.expr_stmt(ExprStmtAst { expr: call }), span); }
-        let lambda = arena.add(NodeForm.lambda(LambdaAst { params, body: [body], return_type: nil }), span);
+        let lambda = arena.add(NodeForm.lambda(LambdaAst { params, body: [body], return_type: nil, is_async: false }), span);
         self.state.synthetic_lambda_types[lambda.id] = method.signature;
         let arm = arena.add(NodeForm.expr_stmt(ExprStmtAst { expr: lambda }), span);
         let branch = arena.add(NodeForm.switch_case(SwitchCaseAst { patterns: [(receiver_pattern, untyped)], body: [arm], is_default: false }), span);

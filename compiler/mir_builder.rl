@@ -23,6 +23,8 @@ pub struct MirFunctionBuilder {
     pub let errors: Vec<String>;
     pub let bindings: Dict<i32, MirLocalId>;
     pub let pending_lambdas: Vec<MirPendingLambda>;
+    // Starters for named async functions used as values (see mir_async_starter).
+    pub let pending_starters: Vec<MirFunction>;
     pub var captures: Vec<CaptureInfo>;
     pub var lambda_mode: Bool;
     var next_value_id: i32;
@@ -33,7 +35,7 @@ pub struct MirFunctionBuilder {
         MirFunctionBuilder { ast, hir, program, func, types, symbols, members: MemberResolver.new(ast, types, symbols), args: Vec<MirLocal>.new(), locals: Vec<MirLocal>.new(),
             blocks: Dict<i32, MirBlock>.with_capacity(16, 0), block_order: Vec<MirBlockId>.new(),
             errors: Vec<String>.new(), bindings: Dict<i32, MirLocalId>.with_capacity(16, 0),
-            pending_lambdas: Vec<MirPendingLambda>.new(), captures: Vec<CaptureInfo>.new(), lambda_mode: false, next_value_id: 0,
+            pending_lambdas: Vec<MirPendingLambda>.new(), pending_starters: Vec<MirFunction>.new(), captures: Vec<CaptureInfo>.new(), lambda_mode: false, next_value_id: 0,
             current: nil, loops: Vec<MirLoopScope>.new(), defer_scopes: Vec<Vec<HirId>>.new() }
     }
     def void_type() -> TypeId { self.types.void_type }
@@ -361,6 +363,7 @@ pub struct MirFunctionBuilder {
                 args[index] = self.coerce(args[index], signature.params.get(index)); index += 1;
             }
         } else if let signature = self.types.get_closure_data(callee_type) {
+            is_async = signature.is_async;
             var index = 0; while index < args.len() && index < signature.params.len() {
                 args[index] = self.coerce(args[index], signature.params.get(index)); index += 1;
             }
@@ -375,6 +378,14 @@ pub struct MirFunctionBuilder {
         var result: MirLocalId? = nil;
         if data.type_id != self.void_type() { result = self.temp(data.type_id); }
         if let callee = local_callee {
+            if is_async {
+                // The closure's starter returns the spawned task; the call awaits and then releases it.
+                let ptr_type = self.types.get_builtin("RawPtr") ?? self.void_type(); let handle = self.temp(ptr_type);
+                self.emit(MirOp.call_closure(MirCallClosureData { result: handle, closure: callee, args, result_type: ptr_type }));
+                self.static_call(result, "__rolang_await_started_task", [self.copy(handle, ptr_type)], data.type_id);
+                if let local = result { return self.copy(local, data.type_id); }
+                return mir_unit(self.void_type());
+            }
             self.emit(MirOp.call_closure(MirCallClosureData { result, closure: callee, args, result_type: data.type_id }));
         } else {
             if is_async { if let symbol = data.callee_symbol { name = abi_async_name(symbol, name, self.symbols, self.types); } }
@@ -907,16 +918,27 @@ pub struct MirFunctionBuilder {
         } }
         let params = Vec<TypeId>.new(); for id in data.params { params.push(self.hir_type(id)); }
         var return_type = self.void_type(); if let signature = self.types.get_function_data(data.type_id) { return_type = signature.return_type; }
-        let closure_type = self.types.make_closure(params, return_type, capture_types);
+        var is_async = false; if let signature = self.types.get_function_data(data.type_id) { is_async = signature.is_async; }
+        let closure_type = self.types.make_closure(params, return_type, capture_types, is_async);
         self.pending_lambdas.push(MirPendingLambda { name, lambda: data, captures, closure_type });
+        var entry = name; if is_async { entry = name + "$start"; }
         let result = self.temp(closure_type); self.emit(MirOp.make_closure(MirMakeClosureData {
-            result, func_name: name, captures: capture_values, result_type: closure_type })); self.copy(result, closure_type)
+            result, func_name: entry, captures: capture_values, result_type: closure_type })); self.copy(result, closure_type)
     }
     def lower_var(data: HirVarData) -> MirOperand {
         if let local = self.bindings[data.symbol_id.id] { return self.copy(local, self.locals[local.id].type_id); }
         if let symbol = self.symbols.get_symbol(data.symbol_id) { switch symbol.kind { case .function | .extern_func:
             if let signature = self.types.get_function_data(data.type_id) {
-                if signature.is_async { self.errors.push("Async function values are not supported; call and await the function directly"); return self.nil_operand(data.type_id); }
+                if signature.is_async {
+                    // An async function value is a closure over a starter that spawns the call.
+                    let target = abi_async_name(data.symbol_id, data.name, self.symbols, self.types);
+                    let closure_type = self.types.make_closure(signature.params.to_vec(), signature.return_type, Vec<TypeId>.new(), true);
+                    let starter = target + "$start";
+                    self.pending_starters.push(mir_async_starter(starter, target, closure_type, signature.params, self.types));
+                    let result = self.temp(closure_type);
+                    self.emit(MirOp.make_closure(MirMakeClosureData { result, func_name: starter, captures: Vec<MirOperand>.new(), result_type: closure_type }));
+                    return self.copy(result, closure_type);
+                }
                 if let decl_id = symbol.decl_node { if let node = self.ast.get(decl_id) { switch node.form { case .func_decl(let decl):
                     if decl.is_unsafe { self.errors.push("Unsafe function values require a wrapper with an explicit unsafe block"); return self.nil_operand(data.type_id); }
                     if decl.generic_params.len() > 0 { self.errors.push("Generic function values require a non-generic wrapper"); return self.nil_operand(data.type_id); }
@@ -940,7 +962,13 @@ pub struct MirFunctionBuilder {
         if data.op.equals("spawn") {
             self.lower_expr(data.operand);
             if let block = self.current_block() { if block.ops.len() > 0 { let last = block.ops.pop(); switch last {
-                case .call_static(let call): let ptr_type = self.types.get_builtin("RawPtr") ?? self.void_type(); let handle = self.temp(ptr_type);
+                case .call_static(let call):
+                    if call.func_name.equals("__rolang_await_started_task") && call.args.len() == 1 {
+                        // A call through an async function value already started its task.
+                        let result = self.temp(data.type_id); self.emit(MirOp.make_struct(MirMakeStructData { result, struct_type: data.type_id,
+                            fields: [("handle", call.args[0])] })); return self.copy(result, data.type_id);
+                    }
+                    let ptr_type = self.types.get_builtin("RawPtr") ?? self.void_type(); let handle = self.temp(ptr_type);
                     self.emit(MirOp.task_spawn(MirTaskSpawnData { result: handle, async_func_name: call.func_name, args: call.args, result_type: ptr_type, frame: nil }));
                     let result = self.temp(data.type_id); self.emit(MirOp.make_struct(MirMakeStructData { result, struct_type: data.type_id,
                         fields: [("handle", self.copy(handle, ptr_type))] })); return self.copy(result, data.type_id);
@@ -1075,30 +1103,59 @@ pub struct MirFunctionBuilder {
     }
 }
 
+// A synchronous starter behind an async function value: it spawns `target` with the
+// arguments (and, for an async closure, the closure itself first) and returns the task
+// handle, which callers await or keep as a Task.
+pub def mir_async_starter(name: String, target: String, closure_type: TypeId, params: FrozenVec<TypeId>, types: TypeTable, pass_closure: Bool = false) -> MirFunction {
+    let ptr_type = types.get_builtin("RawPtr") ?? types.void_type;
+    let locals = Vec<MirLocal>.new(); let args = Vec<MirLocal>.new(); let spawn_args = Vec<MirOperand>.new();
+    let closure = MirLocal { id: MirLocalId { id: 0 }, symbol_id: nil, name: "__closure", type_id: closure_type, is_mutable: false, is_arg: true };
+    locals.push(closure); args.push(closure);
+    if pass_closure { spawn_args.push(mir_copy(closure.id, closure_type)); }
+    for index in 0..<params.len() {
+        let arg = MirLocal { id: MirLocalId { id: index + 1 }, symbol_id: nil, name: f"__arg{index}", type_id: params.get(index), is_mutable: false, is_arg: true };
+        locals.push(arg); args.push(arg); spawn_args.push(mir_copy(arg.id, arg.type_id));
+    }
+    let handle = MirLocal { id: MirLocalId { id: locals.len() }, symbol_id: nil, name: "__task", type_id: ptr_type, is_mutable: false, is_arg: false };
+    locals.push(handle);
+    let entry = MirBlockId { id: 0 }; let blocks = Dict<i32, MirBlock>.with_capacity(1, 0);
+    let ops = Vec<MirOp>.new();
+    ops.push(MirOp.task_spawn(MirTaskSpawnData { result: handle.id, async_func_name: target, args: spawn_args, result_type: ptr_type, frame: nil }));
+    blocks[0] = MirBlock { id: entry, ops, terminator: MirTerm.return_stmt(MirReturnData { value: mir_copy(handle.id, ptr_type) }) };
+    MirFunction { name, symbol_id: nil, args, locals, ret_type: ptr_type, blocks, block_order: [entry], entry_block: entry, is_async: false, is_method: false }
+}
 pub struct MirBuilder {
     pub let mono: MonomorphizationResult;
     pub let errors: Vec<String>;
     let pending: Vec<MirPendingLambda>;
-    pub static def new(mono: MonomorphizationResult) -> MirBuilder { MirBuilder { mono, errors: Vec<String>.new(), pending: Vec<MirPendingLambda>.new() } }
+    let starter_names: Dict<String, Bool>;
+    pub static def new(mono: MonomorphizationResult) -> MirBuilder { MirBuilder { mono, errors: Vec<String>.new(), pending: Vec<MirPendingLambda>.new(), starter_names: Dict<String, Bool>.with_capacity(8, 1) } }
     def build_function(data: HirFunctionData, functions: Vec<MirFunction>) -> Void {
         let builder = MirFunctionBuilder.new(self.mono.ast, self.mono.arena, self.mono.program, data, self.mono.type_table, self.mono.symbol_table);
         functions.push(builder.build());
         for error in builder.errors { self.errors.push(data.name + ": " + error); }
         for lambda in builder.pending_lambdas { self.pending.push(lambda); }
+        self.add_starters(builder.pending_starters, functions);
+    }
+    def add_starters(starters: Vec<MirFunction>, functions: Vec<MirFunction>) -> Void {
+        for starter in starters { if !self.starter_names.contains(starter.name) { self.starter_names[starter.name] = true; functions.push(starter); } }
     }
     def build_lambda(pending: MirPendingLambda, functions: Vec<MirFunction>) -> Void {
         let params = Vec<HirId>.new(); params.push(self.mono.arena.add(HirForm.param(HirParamData {
             name: "__closure", symbol_id: SymbolId { id: -1 }, type_id: pending.closure_type, external_name: nil, has_default: false })));
         for id in pending.lambda.params { params.push(id); }
-        var return_type = self.mono.type_table.void_type;
-        if let signature = self.mono.type_table.get_function_data(pending.lambda.type_id) { return_type = signature.return_type; }
+        var return_type = self.mono.type_table.void_type; var is_async = false; var param_types = FrozenVec<TypeId>.empty();
+        if let signature = self.mono.type_table.get_function_data(pending.lambda.type_id) { return_type = signature.return_type; is_async = signature.is_async; param_types = signature.params; }
         let data = HirFunctionData { name: pending.name, symbol_id: SymbolId { id: -1 }, params, return_type,
-            body: pending.lambda.body, is_async: false, is_method: false, is_static: false };
+            body: pending.lambda.body, is_async, is_method: false, is_static: false };
         let builder = MirFunctionBuilder.new(self.mono.ast, self.mono.arena, self.mono.program, data, self.mono.type_table, self.mono.symbol_table);
         builder.captures = pending.captures; builder.lambda_mode = true; let function = builder.build();
         for error in builder.errors { self.errors.push(error); }
         for child in builder.pending_lambdas { self.build_lambda(child, functions); }
+        self.add_starters(builder.pending_starters, functions);
         functions.push(function);
+        // An async closure's object points at a starter that passes the closure itself first.
+        if is_async { functions.push(mir_async_starter(pending.name + "$start", function.name, pending.closure_type, param_types, self.mono.type_table, true)); }
     }
     def build_method(owner: String, receiver_type: TypeId, method_id: HirId, functions: Vec<MirFunction>) -> Void {
         guard let node = self.mono.arena.get(method_id) else { return; }

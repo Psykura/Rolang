@@ -42,8 +42,10 @@ def main() async -> i32 {
 Arguments are evaluated when spawning, and the task retains heap arguments until
 its frame is released. `spawn` returns immediately; the function body runs when
 the scheduler next gets control. Named async functions, generic specializations,
-and statically resolved methods are supported. Async closures, dynamic protocol
-dispatch, and spawning external C functions directly are not supported.
+statically resolved methods, async function values and async closures
+(`(x: i32) async -> i32 { ... }`) can be spawned; awaiting a call through an
+async function value starts and awaits its task. Dynamic protocol dispatch of
+async requirements and spawning external C functions directly are not supported.
 
 `Task<T>` has reference semantics: copying a binding aliases the same task.
 `await task` returns a value of type `T`, including `Void`. A completed result can
