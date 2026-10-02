@@ -12,7 +12,6 @@
 #include "../std/fs.c"
 #include "../std/path.c"
 #include "../std/process.c"
-#include "../std/fmt.c"
 #include "../std/panic.c"
 #include "../std/sha256.c"
 #include "../std/string_builder.c"

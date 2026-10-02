@@ -37,19 +37,16 @@ pub struct DictEntry<K, V> {
     pub let value: V;
 }
 
-pub enum DictKeyKind {
-    case BYTES
-    case STRING
-}
-
 pub struct Dict<K, V> {
     var handle: RawPtr;
 
-    pub static def new(capacity: i32, key_kind: i32, key_type_id: i32, value_type_id: i32) -> Dict<K, V> {
-        return dict_new(capacity, size_of(K), size_of(V), key_kind, type_id(K), type_id(V));
-    }
+    // An empty dictionary. The compiler picks the key comparison for each key type:
+    // String keys compare by content, other keys by their bytes.
+    pub static def new() -> Dict<K, V> { [:] }
 
-    pub static def with_capacity(capacity: i32, key_kind: i32) -> Dict<K, V> {
+    // Constructor emitted for dictionary literals: key_kind is 1 for String keys
+    // (content comparison) and 0 for byte-compared keys.
+    static def with_capacity(capacity: i32, key_kind: i32) -> Dict<K, V> {
         return dict_new(capacity, size_of(K), size_of(V), key_kind, type_id(K), type_id(V));
     }
 
@@ -170,13 +167,6 @@ pub struct Dict<K, V> {
         return result;
     }
 
-    pub def free() -> Void {
-        unsafe {
-            rt_dict_free(self.handle);
-            self.handle = 0 as RawPtr;
-        }
-    }
-
     // Exposes the underlying runtime dictionary handle for low-level FFI
     // helpers such as key iteration. Marked unsafe because callers can break
     // ownership and layout invariants if they pass it to the wrong runtime API.
@@ -185,10 +175,9 @@ pub struct Dict<K, V> {
     }
 }
 
-// Generic constructor. Pass key_kind=1 for String keys, 0 otherwise.
-// key_type_id and value_type_id: 0 for primitives, type descriptor id
-// for heap types.
-pub def dict_new<K, V>(capacity: i32, key_size: i32, value_size: i32,
+// Runtime constructor behind Dict.with_capacity; type ids are nonzero for managed
+// key and value types.
+def dict_new<K, V>(capacity: i32, key_size: i32, value_size: i32,
                        key_kind: i32, key_type_id: i32, value_type_id: i32) -> Dict<K, V> {
     var result: Dict<K, V>;
     unsafe {
@@ -196,22 +185,4 @@ pub def dict_new<K, V>(capacity: i32, key_size: i32, value_size: i32,
                                     key_kind, key_type_id, value_type_id);
     }
     return result;
-}
-
-// ---- Convenience constructors for common types ----
-
-pub def dict_i32_i32_new() -> Dict<i32, i32> {
-    return Dict<i32, i32>.with_capacity(16, 0);
-}
-
-pub def dict_i32_i64_new() -> Dict<i32, i64> {
-    return Dict<i32, i64>.with_capacity(16, 0);
-}
-
-pub def dict_string_i32_new() -> Dict<String, i32> {
-    return Dict<String, i32>.with_capacity(16, 1);
-}
-
-pub def dict_string_i64_new() -> Dict<String, i64> {
-    return Dict<String, i64>.with_capacity(16, 1);
 }

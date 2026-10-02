@@ -1,9 +1,8 @@
 import "range.rl"
 // Standard library: mathematical utilities
 //
-// Available as free functions (abs_i32, min_i64, sqrt, sin, cos, ...)
-// AND as extension methods on numeric values:
-//   (-5).abs(), 3.min(7), 2.pow(10), 4.0.sqrt(), 0.5.sin()
+// Extension methods on numeric values, e.g. (-5).abs(), 3.min(7), 2.pow(10),
+// 4.0.sqrt(), 0.5.sin(); plus pi() and atan2(y, x).
 
 // ---- constants ----
 
@@ -11,13 +10,10 @@ pub def pi() -> f64 { 3.14159265358979323846 }
 
 // ===================================================================
 //  Pure-Rolang floating-point math (no libm dependency)
-//
-//  Free functions:  math_sqrt(x)   math_sin(x)   math_cos(x)   math_atan2(y,x)
-//  Extension methods on f64:  x.sqrt()   x.sin()   x.cos()
 // ===================================================================
 
 // sqrt via Newton's method
-pub def math_sqrt(x: f64) -> f64 {
+def newton_sqrt(x: f64) -> f64 {
     if x <= 0.0 {
         return 0.0;
     }
@@ -29,7 +25,7 @@ pub def math_sqrt(x: f64) -> f64 {
 }
 
 // sin via Taylor series with argument reduction to [-pi, pi]
-pub def math_sin(x: f64) -> f64 {
+def taylor_sin(x: f64) -> f64 {
     // reduce to [-pi, pi]
     var t: f64 = x;
     let two_pi: f64 = 6.283185307179586;
@@ -51,15 +47,15 @@ pub def math_sin(x: f64) -> f64 {
 }
 
 // cos via cos(x) = sin(pi/2 - x)
-pub def math_cos(x: f64) -> f64 {
+def taylor_cos(x: f64) -> f64 {
     let half_pi: f64 = 1.5707963267948966;
-    return math_sin(half_pi - x);
+    return taylor_sin(half_pi - x);
 }
 
 // atan2 via atan approximation, then quadrant adjustment
 // uses rational approximation: atan(z) ≈ z / (1 + 0.28*z^2) for |z| <= 1
 // with refinement for accuracy
-pub def math_atan2(y: f64, x: f64) -> f64 {
+pub def atan2(y: f64, x: f64) -> f64 {
     let pi: f64 = 3.141592653589793;
     let half_pi: f64 = 1.5707963267948966;
 
@@ -113,24 +109,6 @@ pub def math_atan2(y: f64, x: f64) -> f64 {
     }
 
     return atan_z;
-}
-
-// ---- Free function wrappers (safe now that extension methods are excluded from exports) ----
-
-pub def sqrt(x: f64) -> f64 {
-    return math_sqrt(x);
-}
-
-pub def sin(x: f64) -> f64 {
-    return math_sin(x);
-}
-
-pub def cos(x: f64) -> f64 {
-    return math_cos(x);
-}
-
-pub def atan2(y: f64, x: f64) -> f64 {
-    return math_atan2(y, x);
 }
 
 // ---- Extension methods on builtin numeric types ----
@@ -211,15 +189,15 @@ pub extension i64 {
 
 pub extension f64 {
     pub def sqrt() -> f64 {
-        return math_sqrt(self);
+        return newton_sqrt(self);
     }
 
     pub def sin() -> f64 {
-        return math_sin(self);
+        return taylor_sin(self);
     }
 
     pub def cos() -> f64 {
-        return math_cos(self);
+        return taylor_cos(self);
     }
 
     pub def abs() -> f64 {
@@ -236,34 +214,4 @@ pub extension f64 {
         if self > other { return self; }
         return other;
     }
-}
-
-// ---- Free functions (for cross-module import compatibility) ----
-
-pub def abs_i32(x: i32) -> i32 {
-    return x.abs();
-}
-
-pub def abs_i64(x: i64) -> i64 {
-    return x.abs();
-}
-
-pub def min_i32(a: i32, b: i32) -> i32 {
-    return a.min(b);
-}
-
-pub def max_i32(a: i32, b: i32) -> i32 {
-    return a.max(b);
-}
-
-pub def min_i64(a: i64, b: i64) -> i64 {
-    return a.min(b);
-}
-
-pub def max_i64(a: i64, b: i64) -> i64 {
-    return a.max(b);
-}
-
-pub def pow_i32(base: i32, exp: i32) -> i32 {
-    return base.pow(exp);
 }

@@ -191,7 +191,19 @@ pub struct ExprChecker {
         if self.state.type_table.can_widen_int(a, b) { return b; } if self.state.type_table.can_widen_int(b, a) { return a; }
         if let inner = self.state.type_table.get_optional_inner(a) { if !self.state.type_table.is_optional(b) && self.state.types_equal(inner, b) { return a; } }
         if let inner = self.state.type_table.get_optional_inner(b) { if !self.state.type_table.is_optional(a) && self.state.types_equal(inner, a) { return b; } }
+        // A contextual type both branches fit, or `nil` against a value making it optional.
+        if let want = self.state.expected_type { if self.converts_to(a, want) && self.converts_to(b, want) { return want; } }
+        let table = self.state.type_table;
+        if a == table.nil_type && !table.is_optional(b) && !table.is_error(b) { return table.make_optional(b); }
+        if b == table.nil_type && !table.is_optional(a) && !table.is_error(a) { return table.make_optional(a); }
         self.state.error(TypeErrorKind.type_mismatch(), f"Ternary branches have incompatible types: '{self.state.type_table.format_type(a)}' vs '{self.state.type_table.format_type(b)}'"); a
+    }
+    // Whether a value of `source` converts implicitly to `target` (equal, widened or wrapped).
+    def converts_to(source: TypeId, target: TypeId) -> Bool {
+        let table = self.state.type_table;
+        if self.state.types_equal(source, target) || table.can_widen_int(source, target) { return true; }
+        if let inner = table.get_optional_inner(target) { return source == table.nil_type || self.converts_to(source, inner); }
+        false
     }
     def argument(id: NodeId) -> ArgumentAst? { if let node = self.state.arena.get(id) { switch node.form { case .argument(let data): return data; default: {} } } nil }
     def decl_params(sid: SymbolId?) -> Vec<NodeId>? {

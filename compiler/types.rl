@@ -4,6 +4,8 @@ import "symbols.rl"
 import "members.rl"
 import std.string_builder
 
+// Formats a defect detected after type checking, as opposed to an error in the program.
+pub def internal_compiler_error(message: String) -> String { "internal compiler error: " + message + " (this is a compiler bug; please report it)" }
 pub struct TypeTable {
     let types: Vec<TypeInfo>;
     let builtins: Dict<String, TypeId>;

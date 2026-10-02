@@ -1,5 +1,5 @@
-// Recursive-descent parser for every `type` production in grammar.lark.
-// The future declaration parser shares this token cursor and AstArena.
+// Recursive-descent parser for type syntax.
+// The declaration parser shares this token cursor and AstArena.
 pub import "lexer.rl"
 pub import "ast.rl"
 
@@ -174,19 +174,17 @@ struct TypeCursor {
             }
         }
         var is_async = false;
-        var throws = false;
         if self.match_text("async") { is_async = true; }
-        if self.match_text("throws") { throws = true; }
         if self.match_text("->") {
             if has_label { self.fail("unlabeled function parameter"); return nil; }
             guard let return_type = self.parse_type() else { return nil; }
             let params = Vec<NodeId>.new();
             for element in elements { params.push(element.1); }
             return self.make(NodeForm.function_type(FunctionTypeAst {
-                params, return_type, is_async, throws
+                params, return_type, is_async
             }), start.line, start.column);
         }
-        if is_async || throws { self.fail("'->'"); return nil; }
+        if is_async { self.fail("'->'"); return nil; }
         if elements.len() == 1 && !had_comma && !has_label { return elements[0].1; }
         if elements.len() >= 2 {
             return self.make(NodeForm.tuple_type(TupleTypeAst { elements }),

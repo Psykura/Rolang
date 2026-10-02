@@ -56,8 +56,21 @@ pub struct StmtChecker {
                 case .expression(let id): self.state.check_boolean(self.state.infer_expr(id), context);
                 case .binding(let pattern, let expr):
                     let type = self.state.infer_expr(expr);
+                    // Without an optional, only a refutable pattern (such as an enum case) can fail.
+                    if !self.state.type_table.is_optional(type) && !self.state.type_table.is_error(type) && self.irrefutable(pattern) {
+                        self.state.error(TypeErrorKind.type_mismatch(), f"`let` in {context} needs an optional value or a refutable pattern such as an enum case; {self.state.type_table.format_type(type)} is not optional", expr);
+                    }
                     self.state.bind_pattern(pattern, self.state.type_table.get_optional_inner(type) ?? type);
             }
+        }
+    }
+    def irrefutable(id: NodeId) -> Bool {
+        guard let node = self.state.arena.get(id) else { return false; }
+        switch node.form {
+            case .identifier_pattern | .wildcard_pattern: return true;
+            case .typed_pattern(let data): if let inner = data.pattern { return self.irrefutable(inner); } return true;
+            case .tuple_pattern(let data): for pair in data.elements { if !self.irrefutable(pair.1) { return false; } } return true;
+            default: return false;
         }
     }
     def check_var(id: NodeId, data: VarDeclAst) -> Void {

@@ -1,4 +1,4 @@
-// Recursive-descent parser for grammar.lark's `pattern` productions.
+// Recursive-descent parser for patterns.
 pub import "literal_parser.rl"
 
 pub struct PatternParseResult {

@@ -253,10 +253,6 @@ pub struct String {
     }
 }
 
-pub def string_vec_new(capacity: i32) -> Vec<String> {
-    return Vec<String>.with_capacity(capacity);
-}
-
 pub extension i32 {
     pub def to_string() -> String {
         unsafe { return String.from_handle(rt_int_to_string_handle(self as i64)); }

@@ -211,10 +211,12 @@ dot shorthand.
 
 ## Optionals, guards and propagation
 
-`T?` represents a value or `nil`. `if let` binds a present value, `guard let`
-requires one and keeps the binding after the guard, `??` supplies a fallback,
-and `?.` performs optional chaining. `x == nil` and `x != nil` test for a value.
-A guard's else branch must leave the path.
+`T?` represents a value or `nil`. `if let` binds a present value, `while let`
+repeats while one is present, `guard let` requires one and keeps the binding
+after the guard, `??` supplies a fallback, and `?.` performs optional chaining.
+`x == nil` and `x != nil` test for a value. A guard's else branch must leave the
+path. With a non-optional value these bindings need a refutable pattern, such as
+`while let .item(value) = next()`.
 Chaining covers fields, method calls and subscripts (`a?.items[0]`,
 `a?.find(key)`); an optional member is not wrapped again, so `a?.next?.value`
 has type `T?`. Chained calls must not return Void.
@@ -443,7 +445,9 @@ def main() -> i32 {
 }
 ~~~
 
-Dict preserves insertion order; get/remove return optional values. keys/values/
+`Dict<K, V>.new()` and `Set<T>.new()` create empty collections (as do `[:]`
+and annotated literals); String keys compare by content and other keys by their
+bytes. Dict preserves insertion order; get/remove return optional values. keys/values/
 entries produce snapshots owning their references. Structural mutation during
 live iteration is not supported. `HashMap<K, V>` accepts explicit hash/equality
 callbacks for structural keys.

@@ -159,12 +159,12 @@ pub struct ByteString {
     pub def trim_ascii() -> ByteString {
         let n = self.len();
         var start = 0;
-        while start < n && bytestring_is_ascii_space(self.byte_at(start)) {
+        while start < n && is_ascii_space(self.byte_at(start)) {
             start = start + 1;
         }
 
         var end = n - 1;
-        while end >= start && bytestring_is_ascii_space(self.byte_at(end)) {
+        while end >= start && is_ascii_space(self.byte_at(end)) {
             end = end - 1;
         }
 
@@ -173,19 +173,7 @@ pub struct ByteString {
     }
 }
 
-pub def bytestring_new() -> ByteString {
-    return ByteString.new();
-}
-
-pub def bytestring_with_capacity(capacity: i32) -> ByteString {
-    return ByteString.with_capacity(capacity);
-}
-
-pub def bytestring_from_byte(byte: u8) -> ByteString {
-    return ByteString.from_byte(byte);
-}
-
-pub def bytestring_is_ascii_space(byte: u8) -> Bool {
+def is_ascii_space(byte: u8) -> Bool {
     let b = byte as i32;
     return b == 32 || b == 9 || b == 10 || b == 13;
 }

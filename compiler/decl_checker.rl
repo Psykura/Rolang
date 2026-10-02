@@ -176,11 +176,6 @@ pub struct DeclChecker {
             }
         }
         let ret = self.return_type(data.return_type);
-        if data.throws {
-            var is_enum = false;
-            if let info = self.state.type_table.get_type(ret) { switch info.data { case .enum_type: is_enum = true; default: {} } }
-            if !is_enum { self.state.error(TypeErrorKind.invalid_operation(), f"function '{data.name}' is declared 'throws' but does not return a Result-shaped type; declare a Result<T, E> return type or remove 'throws'"); }
-        }
         let old_return = self.state.current_function_return; let old_async = self.state.in_async_function;
         self.state.current_function_return = ret; self.state.in_async_function = data.is_async;
         defer { self.state.current_function_return = old_return; self.state.in_async_function = old_async; }

@@ -7,8 +7,7 @@ import "range.rl"
 //   - Heap types (struct, enum, tuple) are stored as pointers with
 //     automatic retain/release on push/set/pop/free.
 //
-// Use `vec_new<T>(capacity)` or the typed convenience constructors
-// (`Vec<i32>.new()`, `Vec<String>.new()`, ...) to allocate.
+// Create vectors with `Vec<T>.new()`, `Vec<T>.with_capacity(n)` or a literal.
 
 pub extern "C" def rt_gvec_new(capacity: i32, elem_size: i32, elem_type_id: i32) -> RawPtr;
 pub extern "C" def rt_gvec_len(vec: RawPtr) -> i32;
@@ -92,13 +91,6 @@ pub struct Vec<T> {
         unsafe { self.handle = rt_gvec_resize(self.handle, new_capacity); }
     }
 
-    pub def free() -> Void {
-        unsafe {
-            rt_gvec_free(self.handle);
-            self.handle = 0 as RawPtr;
-        }
-    }
-
     // Exposes the underlying gvec handle so cross-module stdlib helpers
     // (and the runtime FFI) can read the buffer without violating field
     // visibility. Marked `unsafe` because callers can read past the
@@ -109,52 +101,13 @@ pub struct Vec<T> {
     }
 }
 
-// Generic constructor — caller supplies elem_size and elem_type_id.
-// Pass 0 for elem_type_id for primitives, the type descriptor id for
-// heap types. Prefer the typed constructors below in user code.
-pub def vec_new<T>(capacity: i32, elem_size: i32, elem_type_id: i32) -> Vec<T> {
+// Runtime constructor behind Vec.new/with_capacity; elem_type_id is nonzero for
+// managed element types.
+def vec_new<T>(capacity: i32, elem_size: i32, elem_type_id: i32) -> Vec<T> {
     var result: Vec<T>;
     unsafe { result.handle = rt_gvec_new(capacity, elem_size, elem_type_id); }
     result.elem_size = elem_size;
     return result;
-}
-
-// ---- Typed constructors for common element types ----
-
-pub def vec_i32_new() -> Vec<i32> {
-    return Vec<i32>.new();
-}
-
-pub def vec_i32_new_cap(capacity: i32) -> Vec<i32> {
-    return Vec<i32>.with_capacity(capacity);
-}
-
-pub def vec_i64_new() -> Vec<i64> {
-    return Vec<i64>.new();
-}
-
-pub def vec_i64_new_cap(capacity: i32) -> Vec<i64> {
-    return Vec<i64>.with_capacity(capacity);
-}
-
-pub def vec_f32_new() -> Vec<f32> {
-    return Vec<f32>.new();
-}
-
-pub def vec_f64_new() -> Vec<f64> {
-    return Vec<f64>.new();
-}
-
-pub def vec_bool_new() -> Vec<Bool> {
-    return Vec<Bool>.new();
-}
-
-pub def vec_u8_new() -> Vec<u8> {
-    return Vec<u8>.new();
-}
-
-pub def vec_u8_new_cap(capacity: i32) -> Vec<u8> {
-    return Vec<u8>.with_capacity(capacity);
 }
 
 // ============================================================================

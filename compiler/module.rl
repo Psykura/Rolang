@@ -47,7 +47,7 @@ pub struct Module {
             name, path, source: nil, program: nil, symbol_table: nil,
             exports: Dict<String, ModuleExport>.with_capacity(16, 1),
             extension_exports: Vec<ExtensionExport>.new(),
-            dependencies: Set<String>.new(16, 1, 0), dependents: Set<String>.new(16, 1, 0),
+            dependencies: Set<String>.new(), dependents: Set<String>.new(),
             state: ModuleState.discovered(), errors: Vec<String>.new(), import_paths: Dict<String, String>.with_capacity(16, 1)
         }
     }

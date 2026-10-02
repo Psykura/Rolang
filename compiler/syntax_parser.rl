@@ -1274,6 +1274,19 @@ struct StatementCursor {
     def parse_while() -> NodeId? {
         let start = self.current().span;
         self.take();
+        if self.spelling().equals("let") {
+            // `while let p = e { body }` is `while true { if let p = e { body } else { break; } }`,
+            // so continue re-evaluates e and break leaves the loop.
+            guard let binding = self.parse_condition("{") else { return nil; }
+            guard let body = self.parse_block() else { return nil; }
+            let exit = Vec<NodeId>.new(); exit.push(self.make(NodeForm.break_stmt, start));
+            let otherwise = self.make(NodeForm.block(BlockAst { statements: exit, is_unsafe: false }), start);
+            let step = Vec<NodeId>.new();
+            step.push(self.make(NodeForm.if_stmt(IfStmtAst { condition: binding, then_block: body, else_block: otherwise }), start));
+            let loop_body = self.make(NodeForm.block(BlockAst { statements: step, is_unsafe: false }), start);
+            let always = self.make(NodeForm.literal(LiteralAst { value: LiteralValue.boolean(true), kind: "bool" }), start);
+            return self.make(NodeForm.while_stmt(WhileStmtAst { condition: always, body: loop_body }), start);
+        }
         guard let condition = self.parse_condition_expression("{") else { return nil; }
         guard let body = self.parse_block() else { return nil; }
         self.make(NodeForm.while_stmt(WhileStmtAst { condition, body }), start)

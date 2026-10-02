@@ -491,7 +491,7 @@ pub struct NameResolver {
             case "def", "let", "var", "if", "else", "while", "for", "return", "import",
                  "as", "in", "where", "struct", "enum", "protocol", "typealias", "extension",
                  "extern", "init", "deinit", "self", "Self", "pub", "private", "internal",
-                 "async", "await", "try", "throws", "true", "false", "nil", "is", "switch",
+                 "async", "await", "try", "true", "false", "nil", "is", "switch",
                  "case", "default", "guard", "defer", "break", "continue":
                 self.error(ResolutionErrorKind.duplicate_value(), alias, f"import alias '{alias}' is a reserved word", id);
                 return false;

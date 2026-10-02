@@ -15,7 +15,7 @@ and standard-library primitives beside their Rolang APIs in std/.
 | platform.h | Platform and system-library includes |
 
 The std modules with C implementations are string, vec, dict, char, io, fs, path,
-process, fmt, panic, sha256, string_builder, task and async_io. Each keeps its .c
+process, panic, sha256, string_builder, task and async_io. Each keeps its .c
 and .h beside the .rl API. Collections share the small-copy helper in
 std/collections.h. String, vector and task layouts are shared through headers.
 Pure Rolang modules reuse these APIs and do not need an empty C companion.

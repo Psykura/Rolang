@@ -228,7 +228,7 @@ pub struct HirBuilder {
                 return self.arena.add(HirForm.for_stmt(HirForData { pattern: p, iterable, body: self.prepend(self.block(data.body, true), cells) }));
             case .switch_stmt(let data): return self.switch_stmt(data.value, data.cases);
             case .defer_stmt(let data): return self.arena.add(HirForm.defer_stmt(HirDeferData { body: self.block(data.body) }));
-            default: self.errors.push("Unknown statement type: <class 'rolang.ast." + node.form.kind() + "'>"); return self.empty_block();
+            default: self.errors.push(internal_compiler_error("HIR lowering does not handle statement " + node.form.kind())); return self.empty_block();
         }
     }
     def var_decl(data: VarDeclAst) -> HirId {
@@ -393,7 +393,7 @@ pub struct HirBuilder {
                     default: {}
                 } }
                 return self.arena.add(HirForm.switch_expr(HirSwitchExprData { type_id, switch: switch_id, result_symbol: sid }));
-            default: self.errors.push("Unknown expression type: <class 'rolang.ast." + node.form.kind() + "'>"); return self.error_expr();
+            default: self.errors.push(internal_compiler_error("HIR lowering does not handle expression " + node.form.kind())); return self.error_expr();
         }
     }
     def arguments(ids: Vec<NodeId>) -> Vec<(String?, HirId)> {

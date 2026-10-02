@@ -46,7 +46,6 @@ pub struct FunctionTypeAst {
     pub var params: Vec<NodeId>;
     pub var return_type: NodeId?;
     pub var is_async: Bool;
-    pub var throws: Bool;
 }
 pub struct AnyTypeAst {
     pub var protocol: NodeId?;
@@ -263,7 +262,6 @@ pub struct FuncDeclAst {
     pub var constraints: Vec<NodeId>;
     pub var body: NodeId?;
     pub var is_async: Bool;
-    pub var throws: Bool;
     pub var is_static: Bool;
     pub var is_unsafe: Bool;
 }
@@ -276,7 +274,6 @@ pub struct ExternFuncDeclAst {
     pub var return_type: NodeId?;
     pub var constraints: Vec<NodeId>;
     pub var is_async: Bool;
-    pub var throws: Bool;
 }
 pub struct StructDeclAst {
     pub var visibility: String;
@@ -307,7 +304,6 @@ pub struct ProtocolFuncReqAst {
     pub var params: Vec<NodeId>;
     pub var return_type: NodeId?;
     pub var is_async: Bool;
-    pub var throws: Bool;
 }
 pub struct ProtocolPropReqAst {
     pub var visibility: String;

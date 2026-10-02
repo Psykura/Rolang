@@ -32,8 +32,9 @@ def work(n: i32) async -> i32 {
 def main() async -> i32 {
     let first = spawn work(20);   // Task<i32>
     let second = spawn work(21);
-    println_i32(await first);
-    println_i32(await second);
+    let a = await first;
+    let b = await second;
+    println(f"{a} {b}");
     return 0;
 }
 ```

@@ -347,8 +347,8 @@ pub struct MirFunctionBuilder {
         let local = self.temp(data.type_id); let result = self.place(local, data.type_id);
         let yes = self.create_block(); let no = self.create_block(); let merge = self.create_block();
         self.cond_branch(condition, yes, no);
-        self.switch_to(yes); let yes_value = self.lower_expr(data.then_expr); self.assign(result, yes_value); self.branch(merge);
-        self.switch_to(no); let no_value = self.lower_expr(data.else_expr); self.assign(result, no_value); self.branch(merge);
+        self.switch_to(yes); let yes_value = self.coerce(self.lower_expr(data.then_expr), data.type_id); self.assign(result, yes_value); self.branch(merge);
+        self.switch_to(no); let no_value = self.coerce(self.lower_expr(data.else_expr), data.type_id); self.assign(result, no_value); self.branch(merge);
         self.switch_to(merge); self.copy(local, data.type_id)
     }
     def lower_call(data: HirCallData) -> MirOperand {

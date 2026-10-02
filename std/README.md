@@ -6,7 +6,7 @@ source files. Other modules use explicit imports such as `import std.io`.
 
 Modules with platform or storage primitives have a matching .c implementation
 and .h interface beside their .rl API: string, vec, dict, char, io, fs, path,
-process, fmt, panic, sha256, string_builder, task and async_io. Other modules use
+process, panic, sha256, string_builder, task and async_io. Other modules use
 Rolang implementations, shared std operations or system math functions.
 The [runtime core](../runtime/README.md) provides allocation, ARC/GC and scheduling.
 
@@ -18,19 +18,19 @@ The [runtime core](../runtime/README.md) provides allocation, ARC/GC and schedul
 | [dict](dict.rl) | Ordered Dict<K,V>, optional lookup/removal and snapshots |
 | [string](string.rl) | Byte-oriented String operations, conversions and literals |
 | [range](range.rl) | Half-open/inclusive language range support |
+| [cell](cell.rl) | Compiler support: shared storage for variables captured and reassigned by closures |
 | [array](array.rl) | Numeric Vec<i32> helpers: sum, product, search and extrema |
 | [set](set.rl) | Set<T>, membership, removal and snapshots |
 | [linked_list](linked_list.rl) | Generic linked-list storage and operations |
 | [hash_map](hash_map.rl) | Structural-key maps with supplied hash/equality callbacks |
 | [collections](collections.rl) | Vector transforms, folds, search, slicing and string joining |
-| [iter](iter.rl) | Range, byte-character and dictionary iteration helpers |
+| [iter](iter.rl) | Byte-character and lazy dictionary-key iteration |
 | [iterator](iterator.rl) | Lazy Iter<T>, map/filter/take/zip/enumerate/collect/fold |
 | [option](option.rl) | Combinators on the language's T? type |
 | [result](result.rl) | Result<T,E>, map/map_err/and_then and fallback operations |
 | [bytestring](bytestring.rl) | Mutable byte-string helpers |
 | [char](char.rl) | ASCII byte classification and case conversion |
 | [string_builder](string_builder.rl) | Reusable buffer and independent text snapshots |
-| [fmt](fmt.rl) | Library formatting helpers |
 | [code_writer](code_writer.rl) | Indented generated source and C byte escaping |
 | [interner](interner.rl) | Stable string IDs scoped to an interner |
 | [io](io.rl) | Console and standard-stream I/O |

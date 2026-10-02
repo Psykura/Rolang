@@ -315,7 +315,6 @@ struct DeclarationCursor {
         guard let generic_params = self.parse_generic_params() else { return nil; }
         guard let params = self.parse_params() else { return nil; }
         let is_async = self.match_text("async");
-        let throws = self.match_text("throws");
         var return_type: NodeId? = nil;
         if self.match_text("->") {
             guard let result = self.parse_type() else { return nil; }
@@ -344,7 +343,7 @@ struct DeclarationCursor {
         }
         self.make(NodeForm.func_decl(FuncDeclAst {
             visibility, name, generic_params, params, return_type, constraints, body,
-            is_async, throws, is_static, is_unsafe
+            is_async, is_static, is_unsafe
         }), start)
     }
     def parse_extern_func() -> NodeId? {
@@ -364,9 +363,8 @@ struct DeclarationCursor {
         let name = self.take();
         guard let generic_params = self.parse_generic_params() else { return nil; }
         guard let params = self.parse_params() else { return nil; }
-        // Extern marks are accepted without setting declaration flags.
+        // An `async` mark is accepted without setting the declaration flag.
         self.match_text("async");
-        self.match_text("throws");
         var return_type: NodeId? = nil;
         if self.match_text("->") {
             guard let result = self.parse_type() else { return nil; }
@@ -376,7 +374,7 @@ struct DeclarationCursor {
         if !self.expect(";") { return nil; }
         self.make(NodeForm.extern_func_decl(ExternFuncDeclAst {
             visibility, abi, name, generic_params, params, return_type, constraints,
-            is_async: false, throws: false
+            is_async: false
         }), start)
     }
     def parse_property() -> NodeId? {
@@ -518,7 +516,6 @@ struct DeclarationCursor {
         guard let generic_params = self.parse_generic_params() else { return nil; }
         guard let params = self.parse_params() else { return nil; }
         let is_async = self.match_text("async");
-        let throws = self.match_text("throws");
         var return_type: NodeId? = nil;
         if self.match_text("->") {
             guard let result = self.parse_type() else { return nil; }
@@ -527,7 +524,7 @@ struct DeclarationCursor {
         if !self.expect(";") { return nil; }
         self.make(NodeForm.protocol_func_req(ProtocolFuncReqAst {
             visibility: "internal", name, generic_params, params, return_type,
-            is_async, throws
+            is_async
         }), start)
     }
     def parse_protocol_property() -> NodeId? {
