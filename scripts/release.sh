@@ -2,7 +2,7 @@
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
-VERSION=${VERSION:-0.1.0}
+VERSION=${VERSION:-0.2.0}
 case "$VERSION" in
     ''|*[!A-Za-z0-9._-]*) echo "VERSION must contain letters, digits, dots, underscores or hyphens" >&2; exit 2 ;;
 esac

@@ -39,7 +39,7 @@ Build and package on each supported host platform:
 
 ~~~sh
 make rebuild GENESIS=/path/to/rolang-genesis CLANG=/path/to/clang
-make release VERSION=0.1.0 GENESIS=/path/to/rolang-genesis
+make release VERSION=0.2.0 GENESIS=/path/to/rolang-genesis
 ~~~
 
 dist/VERSION/ contains:
