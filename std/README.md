@@ -74,8 +74,8 @@ import std.cli
 
 def main() -> i32 {
     let cli = CommandLine.new("greet", "[options] NAME");
-    cli.flag("loud", "print in capitals").short("l");
-    cli.option("times", "N", "repeat N times").short("n");
+    cli.flag("loud", "print in capitals", short: "l");
+    cli.option("times", "N", "repeat N times", short: "n");
     cli.positional("NAME", "who to greet");
     guard let args = cli.parse_process() else { return cli.status; }
     let times = (args.value("times") ?? "1").to_i32();
@@ -85,8 +85,9 @@ def main() -> i32 {
 
 Options accept `--name value`, `--name=value`, `-n value` and `-nvalue`; short
 flags combine and `--` ends options. Repeating an option is allowed: `value`
-returns the last occurrence, `values` all of them in order. `choices` restricts
-values, `implicit` makes a value optional (`--lto` or `--lto=thin`), `preset`
+returns the last occurrence, `values` all of them in order. Labeled parameters
+configure an option: `choices` restricts values, `implicit` makes a value
+optional (`--lto` or `--lto=thin`), `hidden` leaves it out of help. `preset`
 adds spellings that set a fixed value (`--no-lto`), and `exclusive` rejects
 combinations. `--help` output is generated from the declarations. Errors such
 as an unknown option (with a closest-spelling suggestion) print to stderr and

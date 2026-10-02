@@ -1,8 +1,8 @@
 // Standard library: command-line argument parsing.
 //
 //     let cli = CommandLine.new("greet", "[options] NAME");
-//     cli.flag("loud", "print in capitals").short("l");
-//     cli.option("times", "N", "repeat N times").short("n");
+//     cli.flag("loud", "print in capitals", short: "l");
+//     cli.option("times", "N", "repeat N times", short: "n");
 //     cli.positional("name", "who to greet");
 //     guard let args = cli.parse_process() else { return cli.status; }
 //     let times = (args.value("times") ?? "1").to_i32();
@@ -32,27 +32,18 @@ pub struct CliOption {
     // Value placeholder for help; empty for flags.
     pub let value_name: String;
     pub let help: String;
-    pub var short_name: String;
-    pub var hidden: Bool;
-    pub var allow_empty: Bool;
+    // `-x` spelling; one character, or empty.
+    pub let short_name: String;
+    // Accepted but not listed in help.
+    pub let hidden: Bool;
+    pub let allow_empty: Bool;
     // Value used when the option is given without `=value`; empty when a value is required.
-    pub var implicit_value: String;
+    pub let implicit_value: String;
+    // Allowed values; empty allows any.
     pub let allowed: Vec<String>;
     pub let presets: Vec<CliPreset>;
 
     pub def takes_value() -> Bool { self.value_name.len() > 0 }
-    // `-x` spelling; one character.
-    pub def short(name: String) -> CliOption { self.short_name = name; self }
-    // Accepted but not listed in help.
-    pub def hide() -> CliOption { self.hidden = true; self }
-    pub def empty_allowed() -> CliOption { self.allow_empty = true; self }
-    // Restricts values to `values`.
-    pub def choices(values: Vec<String>) -> CliOption {
-        for value in values { self.allowed.push(value); }
-        self
-    }
-    // Makes the value optional: `--name` alone means `value`; a value must use `--name=value`.
-    pub def implicit(value: String) -> CliOption { self.implicit_value = value; self }
     pub def preset(spellings: Vec<String>, value: String, help: String = "") -> CliOption {
         self.presets.push(CliPreset { spellings, value, help });
         self
@@ -63,12 +54,9 @@ pub struct CliOption {
 pub struct CliPositional {
     pub let name: String;
     pub let help: String;
-    pub var required: Bool;
-    pub var many: Bool;
-
-    pub def optional() -> CliPositional { self.required = false; self }
+    pub let required: Bool;
     // Collects every remaining argument.
-    pub def variadic() -> CliPositional { self.many = true; self }
+    pub let variadic: Bool;
 }
 
 // One option occurrence in command-line order.
@@ -121,19 +109,25 @@ pub struct CommandLine {
                       positionals: Vec<CliPositional>.new(), exclusive_groups: Vec<Vec<String>>.new() }
     }
 
-    pub def flag(name: String, help: String) -> CliOption { self.add(name, "", help) }
-    pub def option(name: String, value_name: String, help: String) -> CliOption { self.add(name, value_name, help) }
-    pub def positional(name: String, help: String = "") -> CliPositional {
-        let positional = CliPositional { name, help, required: true, many: false };
-        self.positionals.push(positional);
-        positional
+    pub def flag(name: String, help: String, short: String = "", hidden: Bool = false) -> CliOption {
+        self.add(CliOption { name, value_name: "", help, short_name: short, hidden, allow_empty: false,
+            implicit_value: "", allowed: Vec<String>.new(), presets: Vec<CliPreset>.new() })
+    }
+    // `choices` restricts values; `implicit` makes the value optional (`--name`
+    // alone means it, a value needs `--name=value`); `allow_empty` accepts "".
+    pub def option(name: String, value_name: String, help: String, short: String = "",
+                   choices: Vec<String> = Vec<String>.new(), implicit: String = "",
+                   hidden: Bool = false, allow_empty: Bool = false) -> CliOption {
+        self.add(CliOption { name, value_name, help, short_name: short, hidden, allow_empty,
+            implicit_value: implicit, allowed: choices, presets: Vec<CliPreset>.new() })
+    }
+    pub def positional(name: String, help: String = "", required: Bool = true, variadic: Bool = false) -> Void {
+        self.positionals.push(CliPositional { name, help, required, variadic });
     }
     // The named options cannot be combined; repeating one with the same value is allowed.
     pub def exclusive(names: Vec<String>) -> Void { self.exclusive_groups.push(names); }
 
-    def add(name: String, value_name: String, help: String) -> CliOption {
-        let option = CliOption { name, value_name, help, short_name: "", hidden: false,
-            allow_empty: false, implicit_value: "", allowed: Vec<String>.new(), presets: Vec<CliPreset>.new() };
+    def add(option: CliOption) -> CliOption {
         self.options.push(option);
         option
     }
@@ -221,7 +215,7 @@ pub struct CommandLine {
         var next = 0;
         for positional in self.positionals {
             let values = Vec<String>.new();
-            if positional.many {
+            if positional.variadic {
                 while next < loose.len() { values.push(loose[next]); next += 1; }
             } else if next < loose.len() {
                 values.push(loose[next]); next += 1;

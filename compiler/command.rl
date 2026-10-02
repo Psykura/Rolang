@@ -48,12 +48,12 @@ def command_line() -> CommandLine {
     cli.about = "Compiles a Rolang program and its imports to an executable.";
     cli.version = "rolangc 0.4.2";
     cli.positional("input.rl", "the program's main source file");
-    cli.option("output", "FILE", "output path (default: the input without .rl)").short("o");
-    let emit = cli.option("emit", "KIND", "output kind").choices(["exe", "obj", "module", "llvm", "llvm-opt", "asm", "mir", "mir-opt"]);
+    cli.option("output", "FILE", "output path (default: the input without .rl)", short: "o");
+    let emit = cli.option("emit", "KIND", "output kind", choices: ["exe", "obj", "module", "llvm", "llvm-opt", "asm", "mir", "mir-opt"]);
     emit.preset(["-c", "--compile-only"], "obj", "emit an object file (--emit obj)");
-    cli.option("opt-level", "N", "optimization level (default: 2)").short("O").choices(["0", "1", "2", "3"]);
-    cli.option("lto", "MODE", "link-time optimization (default: none)").choices(["full", "thin", "none"]).implicit("full").preset(["--no-lto"], "none");
-    cli.option("include-path", "ROOT", "add a source root").short("I");
+    cli.option("opt-level", "N", "optimization level (default: 2)", short: "O", choices: ["0", "1", "2", "3"]);
+    cli.option("lto", "MODE", "link-time optimization (default: none)", choices: ["full", "thin", "none"], implicit: "full").preset(["--no-lto"], "none");
+    cli.option("include-path", "ROOT", "add a source root", short: "I");
     cli.option("stdlib", "ROOT", "use the standard library under ROOT");
     cli.option("runtime", "FILE", "use this runtime C source");
     cli.option("clang", "FILE", "LLVM compiler");
@@ -62,12 +62,12 @@ def command_line() -> CommandLine {
     cli.option("target", "TRIPLE", "64-bit target triple");
     cli.option("cache-dir", "DIR", "reuse build outputs from DIR");
     cli.flag("no-cache", "disable the build cache");
-    cli.option("cache-context", "TEXT", "extra build cache key").hide();
-    cli.option("color", "WHEN", "colored diagnostics (default: auto)").choices(["auto", "always", "never"]).implicit("always").preset(["--no-color"], "never");
-    cli.flag("debug", "emit debug information for debuggers (a .dSYM on macOS)").short("g");
-    cli.flag("verbose", "print build commands and cache decisions").short("v");
+    cli.option("cache-context", "TEXT", "extra build cache key", hidden: true);
+    cli.option("color", "WHEN", "colored diagnostics (default: auto)", choices: ["auto", "always", "never"], implicit: "always").preset(["--no-color"], "never");
+    cli.flag("debug", "emit debug information for debuggers (a .dSYM on macOS)", short: "g");
+    cli.flag("verbose", "print build commands and cache decisions", short: "v");
     let passes = ["parse", "resolve", "check", "hir", "mono", "mir", "mir-post", "llvm"];
-    let inspect = cli.option("inspect", "PASS", "print a pass and stop; --PASS is short for this").choices(passes);
+    let inspect = cli.option("inspect", "PASS", "print a pass and stop; --PASS is short for this", choices: passes);
     for pass in passes { inspect.preset(["--" + pass], pass); }
     cli.flag("fields", "with --mir or --mir-post, print MIR fields");
     cli.exclusive(["inspect", "emit"]);

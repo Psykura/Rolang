@@ -5,14 +5,14 @@ def spec() -> CommandLine {
     let cli = CommandLine.new("tool", "[options] FILE...");
     cli.version = "tool 1.0";
     cli.about = "Processes files.";
-    cli.positional("FILE", "input files").variadic();
-    cli.option("output", "PATH", "where to write").short("o");
-    cli.flag("verbose", "more output").short("v");
-    cli.flag("quiet", "less output").short("q");
-    cli.option("level", "N", "level").short("L").choices(["1", "2", "3"]);
-    cli.option("lto", "MODE", "link-time optimization").choices(["full", "thin", "none"]).implicit("full").preset(["--no-lto"], "none");
-    cli.option("define", "NAME", "define a name").short("D");
-    cli.option("secret", "X", "hidden").hide();
+    cli.positional("FILE", "input files", variadic: true);
+    cli.option("output", "PATH", "where to write", short: "o");
+    cli.flag("verbose", "more output", short: "v");
+    cli.flag("quiet", "less output", short: "q");
+    cli.option("level", "N", "level", short: "L", choices: ["1", "2", "3"]);
+    cli.option("lto", "MODE", "link-time optimization", choices: ["full", "thin", "none"], implicit: "full").preset(["--no-lto"], "none");
+    cli.option("define", "NAME", "define a name", short: "D");
+    cli.option("secret", "X", "hidden", hidden: true);
     cli.exclusive(["verbose", "quiet"]);
     cli
 }
