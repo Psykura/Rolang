@@ -33,15 +33,11 @@ preserving genesis/.
 
 ## Preparing a release
 
-Build the release sources with a released compiler, rebuild them with the result
-so the shipped compiler is self-built, then package on each supported host:
-
-~~~sh
-make rebuild GENESIS=/path/to/released/bin/rolangc CLANG=/path/to/clang
-cp bin/rolangc build/stage1-rolangc
-make rebuild GENESIS="$PWD/build/stage1-rolangc" CLANG=/path/to/clang
-make release VERSION=0.3.0
-~~~
+Releases are produced by the GitHub Actions release workflow when a vX.Y.Z tag is
+pushed (see [CONTRIBUTING](../CONTRIBUTING.md#releases)). It fetches the
+BOOTSTRAP_VERSION compiler, builds the sources, rebuilds them with the result so
+the shipped compiler is self-built and reproducible (`make check-selfhost`), runs
+the tests and runs `make release VERSION=X.Y.Z`.
 
 dist/VERSION/ contains:
 

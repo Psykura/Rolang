@@ -1,0 +1,49 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish (macOS arm64)
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Release version
+        run: |
+          echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Check version
+        run: ./scripts/check-version.sh "$VERSION"
+
+      - name: Install LLVM
+        run: |
+          brew install llvm
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch bootstrap compiler
+        run: make bootstrap
+
+      - name: Build self-hosted compiler
+        run: |
+          make
+          make check-selfhost
+
+      - name: Test suite
+        run: make test
+
+      - name: Package
+        run: make release VERSION="$VERSION"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/"$VERSION"/* \
+            --verify-tag --title "Rolang $VERSION" --notes-from-tag

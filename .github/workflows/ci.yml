@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build and test (macOS arm64)
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM
+        run: |
+          brew install llvm
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch bootstrap compiler
+        run: make bootstrap
+
+      - name: Build compiler
+        run: make
+
+      - name: Self-hosting fixpoint
+        run: make check-selfhost
+
+      - name: Test suite
+        run: make test

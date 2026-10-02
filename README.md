@@ -28,14 +28,17 @@ bootstrap compiler executable for your host platform. The bootstrap compiler is 
 released Rolang compiler binary used to compile the current Rolang sources; the
 current sources require the 0.2.0 release or later.
 
-Download and extract the release bundle for your platform and pass its compiler
-to make:
+`make bootstrap` downloads the release named in BOOTSTRAP_VERSION for your
+platform, verifies it and installs its compiler as genesis/rolangc, which make
+uses by default:
 
 ~~~sh
-make GENESIS=/path/to/rolang-VERSION-OS-ARCH/bin/rolangc CLANG=/path/to/clang
+make bootstrap
+make CLANG=/path/to/clang
 ~~~
 
-Alternatively, place the executable at genesis/rolangc and run make. The build
+Alternatively, pass any release bundle's compiler with
+`make GENESIS=/path/to/rolang-VERSION-OS-ARCH/bin/rolangc`. The build
 compiles compiler/main.rl and its imports once at O3, then installs the result
 as bin/rolangc. CC defaults to CLANG; LTO needs a compatible linker.
 
@@ -100,10 +103,15 @@ See [compiler usage and artifacts](docs/compiler.md).
 
 ~~~sh
 make rebuild GENESIS="$PWD/bin/rolangc" CLANG=/path/to/clang
+make test
+make check-selfhost
 ~~~
 
 After the first build, the resulting compiler can compile subsequent source
 changes. Keep a released bootstrap compiler available for a clean build.
+`make test` runs the [test suite](tests/README.md) and `make check-selfhost`
+requires the compiler to rebuild itself identically; CI runs both, and tagged
+releases are published by GitHub Actions (see [CONTRIBUTING](CONTRIBUTING.md)).
 The language uses reference semantics even when an optimization replaces an
 allocation with scalars. Build and install instructions apply to each platform
 with a matching bootstrap compiler and compatible toolchain.

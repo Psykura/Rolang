@@ -1,0 +1,6 @@
+#include <stdio.h>
+int main(void) {
+  const char bytes[] = "a\0007f\077\"\\\012\347\214\253";
+  fwrite(bytes, 1, sizeof(bytes) - 1, stdout);
+  return 0;
+}

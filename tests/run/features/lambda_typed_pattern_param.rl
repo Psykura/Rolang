@@ -1,0 +1,1 @@
+def main() -> i32 { let f = ((a, b): (i32, i32)) -> { a + b }; if f((40, 2)) == 42 { return 0; } 1 }

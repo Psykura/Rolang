@@ -1,10 +1,16 @@
 # Contributing to Rolang
 
-Build with a released Rolang compiler (see [Genesis and releases](docs/genesis.md)) and LLVM clang:
+Fetch the pinned bootstrap compiler (BOOTSTRAP_VERSION) into genesis/, then
+build with LLVM clang:
 
 ~~~sh
-make GENESIS=/path/to/rolang-VERSION-OS-ARCH/bin/rolangc CLANG=/path/to/clang
+make bootstrap
+make CLANG=/path/to/clang
 ~~~
+
+Any released compiler can be used instead with
+`make GENESIS=/path/to/rolang-VERSION-OS-ARCH/bin/rolangc`; see
+[Genesis and releases](docs/genesis.md).
 
 Compiler source lives in compiler/, std in std/, and the C runtime core in runtime/.
 Keep C standard-library implementations in std/ beside the matching .rl API and
@@ -18,6 +24,34 @@ After the first build, use the current compiler to build source changes:
 ~~~sh
 make rebuild GENESIS="$PWD/bin/rolangc" CLANG=/path/to/clang
 ~~~
+
+## Testing
+
+Run `make test` for the suite in tests/ (conventions in
+[tests/README.md](tests/README.md)) and `make check-selfhost` to require the
+compiler to rebuild itself identically. Add a test for every fixed bug and
+language change. CI runs the bootstrap, build, self-hosting check and tests for
+every push to main and every pull request.
+
+When the compiler sources start using a feature newer than BOOTSTRAP_VERSION,
+release a version containing that feature first, then raise BOOTSTRAP_VERSION.
+
+## Releases
+
+Releases are built and published by GitHub Actions. Set the new version in
+compiler/cli.rl (`rolangc X.Y.Z`) and the Makefile (`VERSION ?= X.Y.Z`), commit,
+then push an annotated tag whose message becomes the release notes:
+
+~~~sh
+git tag -a vX.Y.Z -F notes.md
+git push origin vX.Y.Z
+~~~
+
+The release workflow checks that the tag matches the sources, builds a
+self-hosted compiler from the bootstrap, runs the tests and publishes the bundle
+with SHA256SUMS.
+
+## Compatibility
 
 Version incompatible module/runtime contracts and update the
 [artifact guide](docs/compiler.md). Release assets and the initial compiler

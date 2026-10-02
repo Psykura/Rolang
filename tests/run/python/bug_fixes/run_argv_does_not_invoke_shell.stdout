@@ -1,0 +1,1 @@
+hello; rm -rf /tmp/SHOULD_NOT_HAPPEN && false

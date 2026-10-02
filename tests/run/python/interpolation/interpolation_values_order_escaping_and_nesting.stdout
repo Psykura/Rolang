@@ -1,0 +1,6 @@
+  {1} 2 3  
+true/false: 猫 nested 42
+18446744073709551615 255 -7 3.5
+// unchanged text /* yes */
+"quote" \ {literal}
+{ordinary}

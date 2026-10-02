@@ -1,0 +1,1 @@
+pub typealias Id = i32; pub typealias List = Vec<Id>;
