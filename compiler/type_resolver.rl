@@ -13,6 +13,8 @@ pub struct TypeResolver {
     pub let error_reporter: ((String, String, NodeId?) -> Void)?;
     pub let allow_symbol_table_lookup: Bool;
     let resolving_aliases: Dict<i32, Bool>;
+    // While resolving protocol requirements, `Self` is the conforming type's placeholder.
+    pub var protocol_self: Bool;
 
     pub static def new(arena: AstArena, type_table: TypeTable, symbol_table: SymbolTable,
                        node_symbols: Dict<i32, SymbolId>? = nil,
@@ -24,7 +26,7 @@ pub struct TypeResolver {
             node_symbols: node_symbols ?? Dict<i32, SymbolId>.with_capacity(16, 0),
             imported_symbols: imported_symbols ?? Dict<String, SymbolId>.with_capacity(16, 1),
             error_reporter, allow_symbol_table_lookup,
-            resolving_aliases: Dict<i32, Bool>.with_capacity(16, 0)
+            resolving_aliases: Dict<i32, Bool>.with_capacity(16, 0), protocol_self: false
         }
     }
 
@@ -116,6 +118,7 @@ pub struct TypeResolver {
             if let replacements = subst {
                 if let replacement = replacements[named.name] { return replacement; }
             }
+            if self.protocol_self && named.name.equals("Self") { return self.type_table.make_type_variable("Self"); }
         }
 
         if named.module_path.len() == 1 && named.generic_args.len() == 0 { if let base = self.node_symbols[named_id.id] {

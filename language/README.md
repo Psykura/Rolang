@@ -309,6 +309,23 @@ method (`def map<U>(f: (i32) -> U) -> U;`); a witness declares the same number
 of generic parameters, and calls through a constrained type parameter infer them
 from the arguments.
 
+`Self` in a requirement is the conforming type (`def beats(other: Self) -> Bool;`).
+Such members are used through a bounded type parameter, not through `any P`.
+Requirements named after operator methods make the operators available on a
+bounded parameter: the implicitly imported `Equatable` (`__eq__`) and `Comparable`
+(`__lt__`, inheriting Equatable) let generic code write `a == b`, `a != b`,
+`a < b`, `a > b`, `a <= b` and `a >= b`, the last three and `!=` derived from
+`__lt__` and `__eq__`. Numbers satisfy them with their built-in operators, Bool
+is Equatable, and String conforms through its methods; a struct conforms by
+defining `__eq__` and `__lt__`, after which all six operators also work on it
+directly. Vec uses them for `sort()`, `sorted()`, `min()`, `max()`,
+`binary_search()`, `contains()` and `index_of()`.
+
+A method of a generic type may bound the type's parameters with `where`
+(`def total_area() -> i32 where T: Shape`); the body may use T as a Shape and each
+call checks the receiver's type argument. Extensions of generic types name the
+parameters after `extension`: `extension<T> Box<T> { ... }`.
+
 A protocol may declare associated types (`associatedtype Item;`, or primary
 associated types in its header: `protocol Container<Item> { ... }`) and use them in
 its requirements. Each conformance infers them from its members, e.g. a

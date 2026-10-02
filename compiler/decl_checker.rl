@@ -42,6 +42,8 @@ pub struct DeclChecker {
                 if self.collected_protocols.contains(symbol.id) { return; }
                 self.collected_protocols[symbol.id] = true;
                 let funcs = Vec<FuncRequirement>.new(); let props = Vec<PropRequirement>.new();
+                self.state.type_resolver.protocol_self = true;
+                defer { self.state.type_resolver.protocol_self = false; }
                 for member in data.members {
                     if let child = self.state.arena.get(member) {
                         switch child.form {
@@ -161,6 +163,24 @@ pub struct DeclChecker {
         self.state.rigid_generics = rigid;
         previous
     }
+    // `where T: P` on a method of a generic type bounds the type's parameter T in the method.
+    def owner_bounds(data: FuncDeclAst) -> Dict<String, Vec<TypeId>> {
+        let bounds = Dict<String, Vec<TypeId>>.new();
+        for entry in self.state.where_bounds.entries() { bounds[entry.key] = entry.value; }
+        let own = Dict<String, Bool>.new(); for param in data.generic_params { own[self.state.generic_name(param)] = true; }
+        for id in data.constraints { if let node = self.state.arena.get(id) { switch node.form { case .constraint(let constraint):
+            if !constraint.kind.equals("conforms") { continue; }
+            guard let subject = constraint.subject else { continue; }
+            var name = "";
+            switch subject { case .type_ref(let ref): if let child = self.state.arena.get(ref) { switch child.form { case .named_type(let named): name = named.name; default: {} } } case .name(let value): name = value; }
+            if name.len() == 0 || own.contains(name) { continue; }
+            let list = bounds[name] ?? Vec<TypeId>.new();
+            for bound in constraint.bounds { let resolved = self.state.resolve_type(bound); if self.state.type_table.is_protocol(resolved) { list.push(resolved); } }
+            bounds[name] = list;
+            default: {}
+        } } }
+        bounds
+    }
     def check_function(id: NodeId, data: FuncDeclAst) -> Void {
         let outer_generics = self.enter_generics(data.generic_params);
         defer { self.state.rigid_generics = outer_generics; }
@@ -173,6 +193,9 @@ pub struct DeclChecker {
         } } }
         self.state.projection_equalities = equalities;
         defer { self.state.projection_equalities = old_equalities; }
+        let old_where = self.state.where_bounds;
+        self.state.where_bounds = self.owner_bounds(data);
+        defer { self.state.where_bounds = old_where; }
         if !data.is_static {
             if let type = self.state.current_self_type { if let symbol = self.state.node_symbols[id.id] { if let bound = self.state.resolution.self_symbols[symbol.id] { self.state.type_env[bound.id] = type; } } }
         }

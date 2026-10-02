@@ -43,6 +43,8 @@ pub struct CheckerState {
     // Arguments synthesized for parameters skipped by a later label.
     pub let default_arguments: Dict<i32, Bool>;
     let reported: Dict<String, Bool>;
+    // Bounds a method's `where T: P` adds to its type's generic parameter T.
+    pub var where_bounds: Dict<String, Vec<TypeId>>;
     pub var current_file: String?;
     pub static def new(arena: AstArena, resolution: ResolutionResult) -> CheckerState {
         let types = TypeTable.new(); types.attach_symbol_table(resolution.symbol_table);
@@ -65,7 +67,7 @@ pub struct CheckerState {
             layout: LayoutService.new(arena, types, resolution.symbol_table, resolver), result,
             type_env: Dict<i32, TypeId>.with_capacity(16, 0), lowered_expressions: result.lowered_expressions,
             current_function_return: nil, current_self_type: nil, expected_type: nil,
-            in_async_function: false, in_unsafe: false, projection_equalities: Dict<String, TypeId>.with_capacity(4, 1), computing_constants: Dict<i32, Bool>.with_capacity(4, 0), rigid_generics: Dict<String, Bool>.with_capacity(4, 1), synthetic_lambda_types: Dict<i32, TypeId>.with_capacity(4, 0), infer_callback: nil, statement_callback: nil, current_node: nil, current_file: nil, default_arguments: Dict<i32, Bool>.new(), reported: Dict<String, Bool>.new() };
+            in_async_function: false, in_unsafe: false, projection_equalities: Dict<String, TypeId>.with_capacity(4, 1), computing_constants: Dict<i32, Bool>.with_capacity(4, 0), rigid_generics: Dict<String, Bool>.with_capacity(4, 1), synthetic_lambda_types: Dict<i32, TypeId>.with_capacity(4, 0), infer_callback: nil, statement_callback: nil, current_node: nil, current_file: nil, default_arguments: Dict<i32, Bool>.new(), reported: Dict<String, Bool>.new(), where_bounds: Dict<String, Vec<TypeId>>.new() };
         // Inference errors are located at the expression being checked.
         state.generic_inference.error_reporter = (kind: TypeErrorKind, message: String) -> { state.error(kind, message); };
         state
@@ -87,6 +89,12 @@ pub struct CheckerState {
         if self.reported.contains(key) { return; }
         self.reported[key] = true;
         self.result.errors.push(TypeError { kind, message, span, file });
+    }
+    // A type variable's declared bounds plus those of an enclosing method's where clause.
+    pub def variable_bounds(variable: TypeVariableData) -> Vec<TypeId> {
+        let bounds = variable.bounds.to_vec();
+        if let extra = self.where_bounds[variable.name] { for bound in extra { bounds.push(bound); } }
+        bounds
     }
     // Makes `id` the location of errors reported without a node when it has a
     // source span; returns the previous location for restoring.

@@ -309,6 +309,7 @@ pub struct HirBuilder {
                 if let syntax = data.type_name { if let child = self.ast.get(syntax) { switch child.form { case .named_type(let value): name = value.name; case .builtin_type(let value): name = value.name; default: {} } } }
                 return self.arena.add(HirForm.var_ref(HirVarData { type_id, name, symbol_id: sid }));
             case .binary_op(let data):
+                if let lowered = self.result.lowered_expressions[ref.id] { return self.expr(lowered); }
                 if data.op.equals("??") { return self.coalesce(data, type_id); }
                 let left = self.expr(data.left); let right = self.expr(data.right);
                 if data.op.equals("==") || data.op.equals("!=") {

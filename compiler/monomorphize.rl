@@ -300,6 +300,8 @@ pub struct Monomorphizer {
         guard let node = self.arena.get(id) else { return id; }
         let new_type = self.specialized_type(node.form.type_id() ?? self.types.error_type, subst);
         switch node.form {
+            case .binary_op(let data):
+                if let call = self.operator_method(data, subst, new_type) { return call; }
             case .literal(let data):
                 switch data.value { case .type_id(let target):
                     if data.kind.equals("size_of") || data.kind.equals("align_of") || data.kind.equals("type_id") {
@@ -357,6 +359,32 @@ pub struct Monomorphizer {
         let child: (HirId) -> HirId = (value) -> { self.clone_node(value, subst) };
         let type: (TypeId) -> TypeId = (value) -> { self.specialized_type(value, subst) };
         self.arena.add(node.form.remap(child, type))
+    }
+    // An operator on a type parameter bounded by a protocol such as Comparable
+    // becomes the requirement's method once the parameter is a struct or enum:
+    // a < b calls a.__lt__(b); >, <= and >= use __lt__ and != uses __eq__.
+    // Numbers keep their built-in operators.
+    def operator_method(data: HirBinaryOpData, subst: TypeSubstitution, new_type: TypeId) -> HirId? {
+        let original = self.arena.type_of(data.left, self.types.error_type);
+        if !self.types.has_type_variables(original) { return nil; }
+        guard let info = self.types.get_type(subst.apply(original, self.types)) else { return nil; }
+        switch info.data { case .struct_type | .enum_type: {} default: return nil; }
+        let method = to_method_name(data.op);
+        if method.len() == 0 { return nil; }
+        var receiver = data.left; var argument = data.right; var name = method; var negate = false;
+        switch data.op {
+            case ">": receiver = data.right; argument = data.left; name = "__lt__";
+            case "<=": receiver = data.right; argument = data.left; name = "__lt__"; negate = true;
+            case ">=": name = "__lt__"; negate = true;
+            case "!=": name = "__eq__"; negate = true;
+            default: {}
+        }
+        let label: String? = nil;
+        var result_type = new_type; if negate { result_type = self.types.get_builtin("Bool") ?? new_type; }
+        let call = self.specialize_method_call(receiver, HirMethodCallData { type_id: result_type, receiver, method_name: name,
+            arguments: [(label, argument)], method_symbol: nil, is_static: false }, subst, result_type);
+        if !negate { return call; }
+        self.arena.add(HirForm.unary_op(HirUnaryOpData { type_id: result_type, op: "!", operand: call }))
     }
     def signature(func: HirFunctionData, subst: TypeSubstitution, result: TypeId? = nil) -> TypeId {
         let params = Vec<TypeId>.new(); for param in func.params { params.push(self.specialized_type(self.arena.type_of(param, self.types.error_type), subst)); }

@@ -78,6 +78,8 @@ pub struct ConformanceChecker {
         if let actual = self.type_table.get_type(concrete) { known = true; }
         if !known { result.errors.push(f"Unknown type: TypeId({concrete.id})"); return result; }
         self.bindings = Dict<String, TypeId>.with_capacity(4, 1);
+        // `Self` in a requirement is the conforming type.
+        self.bindings["Self"] = concrete;
         self.type_scope = self.type_arguments(concrete);
         for requirement in data.func_requirements {
             if let witness = self.find_func_witness(concrete, requirement, result.errors) { result.witnesses.push(witness); }
@@ -138,7 +140,7 @@ pub struct ConformanceChecker {
         nil
     }
     def find_func_witness(concrete: TypeId, requirement: FuncRequirement, errors: Vec<String>) -> WitnessEntry? {
-        guard let members = self.type_members(concrete) else { return nil; }
+        guard let members = self.type_members(concrete) else { return self.builtin_operator(concrete, requirement); }
         let original_errors = errors.len();
         if let witness = self.find_func_in(members, requirement, errors) { return witness; }
         if errors.len() != original_errors { return nil; }
@@ -160,6 +162,34 @@ pub struct ConformanceChecker {
             }
         }
         nil
+    }
+    // Numbers and Bool satisfy operator requirements such as `__lt__(other: Self) -> Bool`
+    // with their built-in operators.
+    def builtin_operator(concrete: TypeId, requirement: FuncRequirement) -> WitnessEntry? {
+        guard let info = self.type_table.get_type(concrete) else { return nil; }
+        var numeric = false; var integer = false; var boolean = false;
+        switch info.data {
+            case .primitive(let primitive):
+                integer = primitive.integer_width() > 0; numeric = integer || primitive.is_float();
+                switch primitive { case .bool_type: boolean = true; default: {} }
+            default: return nil;
+        }
+        if requirement.params.len() != 1 || requirement.is_async || requirement.generic_params.len() > 0 { return nil; }
+        if !self.matches(concrete, requirement.params.get(0)) { return nil; }
+        let name = requirement.name;
+        var comparison = false; var supported = false;
+        switch name {
+            case "__eq__", "__ne__": comparison = true; supported = numeric || boolean;
+            case "__lt__", "__le__", "__gt__", "__ge__": comparison = true; supported = numeric;
+            case "__add__", "__sub__", "__mul__", "__truediv__", "__mod__": supported = numeric;
+            case "__and__", "__or__", "__xor__", "__lshift__", "__rshift__": supported = integer;
+            default: {}
+        }
+        if !supported { return nil; }
+        var result = concrete;
+        if comparison { result = self.type_table.get_builtin("Bool") ?? self.type_table.error_type; }
+        if !self.matches(result, requirement.return_type) { return nil; }
+        WitnessEntry { requirement_name: name, implementation_symbol: nil, implementation_name: name, is_method: true }
     }
     def find_prop_witness(concrete: TypeId, requirement: PropRequirement, errors: Vec<String>) -> WitnessEntry? {
         guard let members = self.type_members(concrete) else { return nil; }
@@ -267,7 +297,7 @@ pub struct ConformanceChecker {
         self.type_table.types_equal(actual, expected)
     }
     // Generic parameter names of a concrete struct/enum mapped to its type arguments.
-    def type_arguments(concrete: TypeId) -> Dict<String, TypeId> {
+    pub def type_arguments(concrete: TypeId) -> Dict<String, TypeId> {
         let scope = Dict<String, TypeId>.with_capacity(4, 1);
         guard let info = self.type_table.get_type(concrete) else { return scope; }
         var symbol_id: SymbolId? = nil; var args = FrozenVec<TypeId>.empty();

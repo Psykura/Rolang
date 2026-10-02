@@ -164,7 +164,62 @@ pub struct ExprChecker {
             }
         }
         if let type = self.state.try_operator_overload(id, left, data.op, right) { return type; }
+        if let type = self.derived_comparison(id, data, left, right) { return type; }
+        if let type = self.bounded_operator(left, data.op, right) { return type; }
+        // Comparing values of an unbounded type parameter needs a protocol bound.
+        if let info = self.state.type_table.get_type(left) { switch info.data { case .type_variable(let variable):
+            if self.state.types_equal(left, right) && (is_order_comparison_op(data.op) || is_equality_op(data.op)) {
+                var protocol = "Comparable"; if is_equality_op(data.op) { protocol = "Equatable"; }
+                self.state.error(TypeErrorKind.invalid_operation(), f"Cannot compare {variable.name} and {variable.name}; add the bound {variable.name}: {protocol}", id);
+                return self.state.builtin("Bool");
+            }
+            default: {}
+        } }
         self.state.binary_types(left, data.op, right)
+    }
+    // On a type with __lt__ but no __gt__/__le__/__ge__, `a > b` is `b.__lt__(a)`,
+    // `a <= b` is `!b.__lt__(a)` and `a >= b` is `!a.__lt__(b)`; without __ne__,
+    // `a != b` is `!a.__eq__(b)`. The swapped forms evaluate b before a.
+    def derived_comparison(id: NodeId, data: BinaryOpAst, left: TypeId, right: TypeId) -> TypeId? {
+        guard let info = self.state.type_table.get_type(left) else { return nil; }
+        switch info.data { case .struct_type | .enum_type: {} default: return nil; }
+        var receiver = data.left; var argument = data.right; var method = "__lt__"; var negate = false;
+        switch data.op {
+            case ">": receiver = data.right; argument = data.left;
+            case "<=": receiver = data.right; argument = data.left; negate = true;
+            case ">=": negate = true;
+            case "!=": method = "__eq__"; negate = true;
+            default: return nil;
+        }
+        guard let found = self.state.member_resolver.get_method(left, method) else { return nil; }
+        guard let func = self.state.type_table.get_function_data(found.signature) else { return nil; }
+        if func.params.len() != 1 || !self.state.types_equal(func.params.get(0), right) || !self.state.types_equal(left, right) { return nil; }
+        let span = self.state.arena.get(id)?.span;
+        let callee = self.state.arena.add(NodeForm.member_access(MemberAccessAst { object: receiver, member: method }), span);
+        let arg = self.state.arena.add(NodeForm.argument(ArgumentAst { label: nil, value: argument }), span);
+        var lowered = self.state.arena.add(NodeForm.call(CallAst { callee, arguments: [arg], is_interpolation: false }), span);
+        if negate { lowered = self.state.arena.add(NodeForm.unary_op(UnaryOpAst { op: "!", operand: lowered }), span); }
+        self.state.lowered_expressions[id.id] = lowered;
+        self.infer_expr(lowered)
+    }
+    // `a < b` on a type parameter bounded by a protocol with the operator's method,
+    // such as Comparable's __lt__. >, <= and >= follow from __lt__, != from __eq__.
+    def bounded_operator(left: TypeId, op: String, right: TypeId) -> TypeId? {
+        guard let info = self.state.type_table.get_type(left) else { return nil; }
+        var bounds = Vec<TypeId>.new(); var name = "";
+        switch info.data { case .type_variable(let variable): bounds = self.state.variable_bounds(variable); name = variable.name; default: return nil; }
+        if !self.state.types_equal(left, right) { return nil; }
+        let method = to_method_name(op);
+        if method.len() == 0 { return nil; }
+        for bound in bounds { if let member = self.protocol_member(bound, method, false) {
+            if let func = self.state.type_table.get_function_data(self.project_member(member, name, bound, left)) { return func.return_type; }
+        } }
+        var base = "";
+        if op.equals(">") || op.equals("<=") || op.equals(">=") { base = "__lt__"; }
+        if op.equals("!=") { base = "__eq__"; }
+        if base.len() == 0 { return nil; }
+        for bound in bounds { if let member = self.protocol_member(bound, base, false) { return self.state.builtin("Bool"); } }
+        nil
     }
     // "int" or "float" for a numeric literal, possibly negated; "" otherwise.
     def literal_kind(id: NodeId?) -> String {
@@ -342,7 +397,7 @@ pub struct ExprChecker {
                         var got = "none"; if let actual = arg.label { got = f"'{actual}'"; }
                         self.state.error(TypeErrorKind.wrong_arg_type(), f"argument {index + 1} label mismatch: expected {wanted}, got {got}", data.arguments[index]); }
                 } } } }
-                if let sid = symbol { self.check_call_constraints(sid, mapping, id); }
+                if let sid = symbol { self.check_call_constraints(sid, mapping, id); self.check_owner_constraints(sid, callee, id); }
                 if let names = self.requirement_generics(callee) {
                     // Generic protocol requirement called through a constrained type parameter:
                     // infer the method's own type parameters from the arguments.
@@ -430,6 +485,66 @@ pub struct ExprChecker {
             }
         }
     }
+    // A method's `where T: P` on its type's parameter must hold for the receiver's type argument.
+    def check_owner_constraints(sid: SymbolId, callee: NodeId, id: NodeId) -> Void {
+        guard let symbol = self.state.symbol_table.get_symbol(sid) else { return; }
+        guard let decl = symbol.decl_node else { return; }
+        guard let node = self.state.arena.get(decl) else { return; }
+        var func: FuncDeclAst? = nil; switch node.form { case .func_decl(let data): func = data; default: {} }
+        guard let data = func else { return; }
+        if data.constraints.len() == 0 { return; }
+        guard let access = self.state.arena.get(callee) else { return; }
+        var object: NodeId? = nil; switch access.form { case .member_access(let member): object = member.object; default: return; }
+        guard let receiver_node = object else { return; }
+        guard let receiver = self.state.result.expr_types[receiver_node.id] else { return; }
+        let arguments = self.state.conformance_checker.type_arguments(receiver);
+        for constraint_id in data.constraints { if let constraint_node = self.state.arena.get(constraint_id) { switch constraint_node.form { case .constraint(let constraint):
+            if !constraint.kind.equals("conforms") { continue; }
+            guard let subject = constraint.subject else { continue; }
+            var name = "";
+            switch subject { case .type_ref(let ref): if let child = self.state.arena.get(ref) { switch child.form { case .named_type(let named): name = named.name; default: {} } } case .name(let value): name = value; }
+            guard let concrete = arguments[name] else { continue; }
+            for bound in constraint.bounds {
+                let protocol = self.state.resolve_type(bound);
+                if !self.state.type_table.is_protocol(protocol) { continue; }
+                if self.satisfies(concrete, protocol) { continue; }
+                var detail = "";
+                let missing = self.state.conformance_checker.check_conformance(concrete, protocol).missing_requirements;
+                if missing.len() > 0 { detail = ": missing " + join_strings(missing, ", "); }
+                self.state.error(TypeErrorKind.type_mismatch(), f"'{data.name}' requires {name}: {self.state.type_table.format_type(protocol)}, but {self.state.type_table.format_type(concrete)} does not conform{detail}", id);
+            }
+            default: {}
+        } } }
+    }
+    // Whether `concrete` meets the protocol bound, as a conforming type or a type parameter bounded by it.
+    def satisfies(concrete: TypeId, protocol: TypeId) -> Bool {
+        if let info = self.state.type_table.get_type(concrete) { switch info.data {
+            case .type_variable(let variable):
+                // A bound satisfies its own protocol and the protocols it inherits.
+                guard let wanted = self.protocol_requirement_names(protocol) else { return false; }
+                for bound in self.state.variable_bounds(variable) {
+                    if bound == protocol { return true; }
+                    guard let have = self.protocol_requirement_names(bound) else { continue; }
+                    var covered = true;
+                    for name in wanted.keys() { if !have.contains(name) { covered = false; } }
+                    if covered { return true; }
+                }
+                return false;
+            default: {}
+        } }
+        self.state.conformance_checker.check_conformance(concrete, protocol).conforms
+    }
+    def protocol_requirement_names(protocol: TypeId) -> Dict<String, Bool>? {
+        guard let info = self.state.type_table.get_type(protocol) else { return nil; }
+        switch info.data {
+            case .protocol(let data):
+                let names = Dict<String, Bool>.new();
+                for func in data.func_requirements { names[func.name] = true; }
+                for prop in data.prop_requirements { names[prop.name] = true; }
+                return names;
+            default: return nil;
+        }
+    }
     // Generic parameter names of the protocol requirement named by `callee` when its receiver
     // is a protocol-constrained type parameter.
     def requirement_generics(callee: NodeId) -> Dict<String, Bool>? {
@@ -440,7 +555,7 @@ pub struct ExprChecker {
         guard let receiver = self.state.result.expr_types[object.id] else { return nil; }
         guard let info = self.state.type_table.get_type(receiver) else { return nil; }
         switch info.data { case .type_variable(let variable):
-            for bound in variable.bounds { if let protocol = self.state.type_table.get_type(bound) { switch protocol.data { case .protocol(let data):
+            for bound in self.state.variable_bounds(variable) { if let protocol = self.state.type_table.get_type(bound) { switch protocol.data { case .protocol(let data):
                 for func in data.func_requirements { if func.name.equals(member.member) && func.generic_params.len() > 0 {
                     let names = Dict<String, Bool>.with_capacity(4, 1); for name in func.generic_params { names[name] = true; } return names;
                 } }
@@ -452,13 +567,14 @@ pub struct ExprChecker {
     }
     // A requirement seen through the type parameter `C` refers to C's associated types:
     // `Item` becomes the projection `C.Item` (or its `where` equality).
-    def project_member(member: TypeId, receiver: String, protocol: TypeId) -> TypeId {
+    def project_member(member: TypeId, receiver: String, protocol: TypeId, receiver_type: TypeId? = nil) -> TypeId {
         guard let info = self.state.type_table.get_type(protocol) else { return member; }
         var symbol: SymbolId? = nil; switch info.data { case .protocol(let data): symbol = data.symbol_id; default: {} }
         guard let sid = symbol else { return member; }
         let names = self.state.conformance_checker.associated_names(sid);
-        if names.len() == 0 { return member; }
         let mapping = Dict<String, TypeId>.with_capacity(4, 1);
+        // `Self` in a requirement is the receiver.
+        mapping["Self"] = receiver_type ?? self.state.type_table.make_type_variable(receiver);
         for name in names { mapping[name] = self.state.type_table.make_type_variable(receiver + "." + name); }
         self.state.with_equalities(self.state.generic_inference.substitute_type(member, mapping))
     }
@@ -485,12 +601,15 @@ pub struct ExprChecker {
                 // unfixed associated types (fix them with `any P<...>`) or on its own generics.
                 if self.state.type_table.has_type_variables(member) {
                     let protocol = self.state.type_table.format_type(value.protocol_id);
-                    self.state.error(TypeErrorKind.invalid_operation(), f"'{data.member}' cannot be used through any {protocol}: its signature {self.state.type_table.format_type(member)} depends on associated or generic types; fix the associated types with any {protocol}<...>", id);
+                    let signature = self.state.type_table.format_type(member);
+                    var reason = f"its signature {signature} depends on associated or generic types; fix the associated types with any {protocol}<...>";
+                    if signature.contains("Self") { reason = f"its signature {signature} uses Self, the unknown concrete type behind the value; use a generic parameter bounded by {protocol} instead"; }
+                    self.state.error(TypeErrorKind.invalid_operation(), f"'{data.member}' cannot be used through any {protocol}: {reason}", id);
                     return self.state.type_table.error_type;
                 }
                 return member;
             }
-            case .type_variable(let value): for bound in value.bounds { if let member = self.protocol_member(bound, data.member, false) { return self.project_member(member, value.name, bound); } }
+            case .type_variable(let value): for bound in self.state.variable_bounds(value) { if let member = self.protocol_member(bound, data.member, false) { return self.project_member(member, value.name, bound, type); } }
             default: {}
         } }
         if !object_is_type { if let field = self.state.member_resolver.get_field(type, data.member) { self.field_visibility(field, id); self.state.record_call(id, CalleeKind.indirect()); return field.type_id; } }

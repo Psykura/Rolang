@@ -1,8 +1,8 @@
 # Rolang standard library
 
 The bundled std provides the foundations used by the compiler and applications.
-Vec, Dict, String and the range foundation are implicit imports in ordinary
-source files. Other modules use explicit imports such as `import std.io`.
+Vec, Dict, String, compare and the range foundation are implicit imports in
+ordinary source files. Other modules use explicit imports such as `import std.io`.
 
 Modules with platform or storage primitives have a matching .c implementation
 and .h interface beside their .rl API: string, vec, dict, char, io, fs, path,
@@ -19,6 +19,7 @@ The [runtime core](../runtime/README.md) provides allocation, ARC/GC and schedul
 | [vec](vec.rl) | Vec<T>, owned elements, indexed access, iteration, stable sort_by, binary search and reversal |
 | [dict](dict.rl) | Ordered Dict<K,V>, optional lookup/removal and snapshots |
 | [string](string.rl) | String operations, conversions and literals; byte-oriented, with Unicode scalar and grapheme views |
+| [compare](compare.rl) | Equatable and Comparable, and the Vec operations needing them: sort, min, max, binary_search, contains, index_of |
 | [range](range.rl) | Half-open/inclusive language range support |
 | [cell](cell.rl) | Compiler support: shared storage for variables captured and reassigned by closures |
 | [array](array.rl) | Numeric Vec<i32> helpers: sum, product, search and extrema |
