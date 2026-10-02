@@ -5,6 +5,7 @@
 #include "memory.c"
 #include "panic.c"
 #include "../std/string.c"
+#include "../std/unicode.c"
 #include "../std/vec.c"
 #include "../std/dict.c"
 #include "../std/char.c"

@@ -54,6 +54,7 @@ pub def unescape_literal(source: String) -> String {
         let byte = source.byte_at(index);
         if byte == 92 && index + 1 < source.len() {
             let next = source.byte_at(index + 1);
+            if next == 117 { if let after = append_unicode_escape(source, index, result) { index = after; continue; } }
             switch next {
                 case 110: result.append_byte(10 as u8);
                 case 116: result.append_byte(9 as u8);
@@ -68,6 +69,26 @@ pub def unescape_literal(source: String) -> String {
         }
     }
     result.to_string()
+}
+
+// `\u{1F600}` at `index`: appends the scalar's UTF-8 bytes and returns the index after
+// `}`, or nil when the escape is malformed (it is then kept as written).
+def append_unicode_escape(source: String, index: i32, result: StringBuilder) -> i32? {
+    let length = source.len() as i32;
+    if index + 2 >= length || source.byte_at(index + 2) != 123 { return nil; }
+    var at = index + 3; var value = 0; var digits = 0;
+    while at < length && source.byte_at(at) != 125 {
+        let c = source.byte_at(at); var digit = -1;
+        if c >= 48 && c <= 57 { digit = c - 48; } else if c >= 97 && c <= 102 { digit = c - 87; } else if c >= 65 && c <= 70 { digit = c - 55; }
+        if digit < 0 || digits >= 6 { return nil; }
+        value = value * 16 + digit; digits += 1; at += 1;
+    }
+    if at >= length || digits == 0 || value > 1114111 || (value >= 55296 && value <= 57343) { return nil; }
+    if value < 128 { result.append_byte(value as u8); }
+    else if value < 2048 { result.append_byte((192 | (value >> 6)) as u8); result.append_byte((128 | (value & 63)) as u8); }
+    else if value < 65536 { result.append_byte((224 | (value >> 12)) as u8); result.append_byte((128 | ((value >> 6) & 63)) as u8); result.append_byte((128 | (value & 63)) as u8); }
+    else { result.append_byte((240 | (value >> 18)) as u8); result.append_byte((128 | ((value >> 12) & 63)) as u8); result.append_byte((128 | ((value >> 6) & 63)) as u8); result.append_byte((128 | (value & 63)) as u8); }
+    at + 1
 }
 
 def first_codepoint(value: String) -> i32 {

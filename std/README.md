@@ -6,8 +6,10 @@ source files. Other modules use explicit imports such as `import std.io`.
 
 Modules with platform or storage primitives have a matching .c implementation
 and .h interface beside their .rl API: string, vec, dict, char, io, fs, path,
-process, panic, sha256, string_builder, task and async_io. Other modules use
-Rolang implementations, shared std operations or system math functions.
+process, panic, sha256, string_builder, task and async_io. String's Unicode views
+use unicode.c with unicode_tables.h, generated from the Unicode Character
+Database by scripts/gen-unicode-tables.py. Other modules use Rolang
+implementations, shared std operations or system math functions.
 The [runtime core](../runtime/README.md) provides allocation, ARC/GC and scheduling.
 
 ## Modules
@@ -16,7 +18,7 @@ The [runtime core](../runtime/README.md) provides allocation, ARC/GC and schedul
 | --- | --- |
 | [vec](vec.rl) | Vec<T>, owned elements, indexed access and vector iteration |
 | [dict](dict.rl) | Ordered Dict<K,V>, optional lookup/removal and snapshots |
-| [string](string.rl) | Byte-oriented String operations, conversions and literals |
+| [string](string.rl) | String operations, conversions and literals; byte-oriented, with Unicode scalar and grapheme views |
 | [range](range.rl) | Half-open/inclusive language range support |
 | [cell](cell.rl) | Compiler support: shared storage for variables captured and reassigned by closures |
 | [array](array.rl) | Numeric Vec<i32> helpers: sum, product, search and extrema |

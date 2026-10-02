@@ -61,6 +61,14 @@ pub def continues_condition_expression(word: String) -> Bool {
     }
 }
 
+// Bytes in the escape starting with the backslash at `index`; `\u{...}` spans its braces.
+def escape_length(raw: String, index: i32, limit: i32) -> i32 {
+    if index + 2 < limit && raw.byte_at(index + 1) == 117 && raw.byte_at(index + 2) == 123 {
+        var end = index + 3; while end < limit && raw.byte_at(end) != 125 { end += 1; }
+        if end < limit { return end + 1 - index; }
+    }
+    2
+}
 // `(` at `index` starts a closure when its matching `)` is followed by `->`.
 def arrow_lambda_ahead(tokens: Vec<LexToken>, index: i32) -> Bool {
     var depth = 0; var look = index;
@@ -174,7 +182,7 @@ def template_expression_end(raw: String, start: i32, limit: i32) -> i32 {
             if triple { index += 3; } else { index += 1; }
             while index < limit {
                 let current = raw.byte_at(index);
-                if current == 92 { index += 2; continue; }
+                if current == 92 { index += escape_length(raw, index, limit); continue; }
                 if current == quote {
                     if !triple { index += 1; break; }
                     if index + 2 < limit && raw.byte_at(index + 1) == quote &&
@@ -657,7 +665,7 @@ struct ExpressionCursor {
         var text_start = opening;
         while index < limit {
             let byte = raw.byte_at(index);
-            if byte == 92 { index += 2; continue; }
+            if byte == 92 { index += escape_length(raw, index, limit); continue; }
             if (byte == 123 || byte == 125) && index + 1 < limit &&
                raw.byte_at(index + 1) == byte { index += 2; continue; }
             if byte == 123 {

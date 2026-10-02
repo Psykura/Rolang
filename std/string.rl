@@ -31,6 +31,12 @@ pub extern "C" def rt_string_to_i64(s: String) -> i64;
 pub extern "C" def rt_string_to_i32(s: String) -> i32;
 pub extern "C" def rt_string_to_f64(s: String) -> f64;
 
+pub extern "C" def rt_string_scalar_at(s: String, offset: i32) -> i32;
+pub extern "C" def rt_string_scalar_width(s: String, offset: i32) -> i32;
+pub extern "C" def rt_string_grapheme_end(s: String, offset: i32) -> i32;
+pub extern "C" def rt_string_is_valid_utf8(s: String) -> i32;
+pub extern "C" def rt_string_from_scalar_handle(scalar: i32) -> RawPtr;
+
 pub struct String {
     var data: RawPtr;
     var length: i64;
@@ -99,6 +105,43 @@ pub struct String {
     pub def __le__(other: String) -> Bool { self.compare_to(other) <= 0 }
     pub def __gt__(other: String) -> Bool { self.compare_to(other) > 0 }
     pub def __ge__(other: String) -> Bool { self.compare_to(other) >= 0 }
+
+    // ---- Unicode views; the byte-oriented APIs above are unchanged ----
+
+    // Unicode scalar values (code points). Each invalid UTF-8 byte reads as U+FFFD.
+    pub def scalars() -> Vec<i32> {
+        let out = Vec<i32>.new(); var at = 0; let length = self.len() as i32;
+        unsafe { while at < length { out.push(rt_string_scalar_at(self, at)); at += rt_string_scalar_width(self, at); } }
+        out
+    }
+
+    pub def scalar_count() -> i32 {
+        var count = 0; var at = 0; let length = self.len() as i32;
+        unsafe { while at < length { count += 1; at += rt_string_scalar_width(self, at); } }
+        count
+    }
+
+    // Extended grapheme clusters (user-perceived characters, Unicode UAX #29).
+    pub def graphemes() -> Vec<String> {
+        let out = Vec<String>.new(); var at = 0; let length = self.len() as i32;
+        unsafe { while at < length { let end = rt_string_grapheme_end(self, at); out.push(self.substring(at, end - at)); at = end; } }
+        out
+    }
+
+    pub def grapheme_count() -> i32 {
+        var count = 0; var at = 0; let length = self.len() as i32;
+        unsafe { while at < length { count += 1; at = rt_string_grapheme_end(self, at); } }
+        count
+    }
+
+    pub def is_valid_utf8() -> Bool {
+        unsafe { return rt_string_is_valid_utf8(self) != 0; }
+    }
+
+    // UTF-8 encoding of one scalar value; invalid values (surrogates, out of range) give U+FFFD.
+    pub static def from_scalar(scalar: i32) -> String {
+        unsafe { return String.from_handle(rt_string_from_scalar_handle(scalar)); }
+    }
 
     pub def repeat(count: i32) -> String {
         unsafe { return String.from_handle(rt_string_repeat_handle(self, count)); }

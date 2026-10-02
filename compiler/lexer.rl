@@ -107,6 +107,8 @@ struct Scanner {
             }
             if !raw && self.peek() == 92 {
                 self.advance();
+                // `\u{...}` is one escape, so its braces are not interpolation.
+                if self.peek() == 117 && self.peek(1) == 123 { while self.peek() >= 0 && self.peek() != 125 && self.peek() != quote { self.advance(); } }
                 if self.peek() >= 0 { self.advance(); }
                 continue;
             }
@@ -189,6 +191,9 @@ struct Scanner {
             if self.peek() == 92 {
                 self.advance();
                 if self.peek() < 0 { break; }
+                // `\u{...}` is a single escaped character.
+                if self.peek() == 117 && self.peek(1) == 123 { while self.peek() >= 0 && self.peek() != 125 && self.peek() != 39 { self.advance(); } }
+                if self.peek() < 0 || self.peek() == 39 { break; }
                 self.advance();
                 count += 1;
             } else {

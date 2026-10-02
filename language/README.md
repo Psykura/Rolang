@@ -463,11 +463,15 @@ end marker.
 ## Text, interpolation and compiler-writing utilities
 
 String literals contain UTF-8 bytes, including embedded NUL. `==`, `!=`, `<`,
-`<=`, `>` and `>=` compare strings byte-wise. Current len, char_at,
-byte_at, substring and slice APIs count bytes; char classification is ASCII.
-They do not provide Unicode scalar/grapheme indexing.
+`<=`, `>` and `>=` compare strings byte-wise. len, char_at, byte_at, substring
+and slice count bytes; char classification is ASCII. Unicode views decode the
+bytes: `scalars()`/`scalar_count()` give code points (each invalid byte reads as
+U+FFFD), `graphemes()`/`grapheme_count()` give extended grapheme clusters
+(user-perceived characters, Unicode 16 UAX #29), `is_valid_utf8()` checks the
+encoding and `String.from_scalar(cp)` encodes one code point.
 
-Ordinary quoted literals process escapes. Raw literals preserve backslashes;
+Ordinary quoted literals process escapes, including `\u{1F600}` for any Unicode
+scalar (also in character literals). Raw literals preserve backslashes;
 triple-quoted literals preserve newlines and indentation. Explicit `f"..."`
 interpolation evaluates fields once from left to right through to_string.
 `{{` and `}}` emit literal braces. Precision/alignment format specifiers are
