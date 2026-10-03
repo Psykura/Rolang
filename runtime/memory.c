@@ -202,6 +202,11 @@ int32_t RT_TYPE_DESCRIPTOR_COUNT = 0;
  * gives the starting index into this array; field_count gives the count.
  */
 __attribute__((weak))
+TypeHashFunctions RT_TYPE_HASH_FUNCTIONS[1] = {{NULL, NULL}};
+__attribute__((weak))
+int32_t RT_TYPE_HASH_FUNCTION_COUNT = 0;
+
+__attribute__((weak))
 FieldDescriptor RT_TYPE_FIELD_DESCRIPTORS[1] = {{0, 0, -1, 0}};
 __attribute__((weak))
 int32_t RT_TYPE_FIELD_DESCRIPTOR_COUNT = 0;
@@ -253,6 +258,7 @@ int64_t gc_trigger_at = GC_MIN_GAP;    /* non-static: inline alloc fast path */
 typedef struct ModuleTypeEntry {
     TypeDescriptor descriptor_copy;
     TypeDescriptor* descriptor;
+    TypeHashFunctions hash_functions;
     FieldDescriptor* fields;
     const char* key;
     struct ModuleTypeEntry* next;
@@ -311,10 +317,31 @@ void rt_register_module_types(TypeDescriptor* descriptors, int32_t count,
         if (!e) rt_panic("module type registry allocation failed");
         size_t slot = d->type_id % module_type_capacity;
         e->descriptor_copy = *d; e->descriptor = &e->descriptor_copy;
+        e->hash_functions.hash_fn = NULL; e->hash_functions.equals_fn = NULL;
         e->fields = d->field_count ? fields + d->fields_start : NULL;
         e->key = keys[i]; e->next = module_type_buckets[slot];
         module_type_buckets[slot] = e; module_type_count++;
     }
+}
+
+/* Hashable functions of separately compiled modules' types, registered after
+ * their descriptors. */
+void rt_register_module_hash_functions(TypeDescriptor* descriptors, TypeHashFunctions* functions, int32_t count) {
+    for (int32_t i = 0; i < count; i++) {
+        ModuleTypeEntry* entry = module_type_find(descriptors[i].type_id);
+        if (entry && functions[i].hash_fn && functions[i].equals_fn) entry->hash_functions = functions[i];
+    }
+}
+
+/* A type's Hashable functions, or NULL when it has none. */
+static inline TypeHashFunctions* rt_get_type_hash_functions(uint64_t type_id) {
+    TypeHashFunctions* functions = NULL;
+    if (type_id < (uint64_t)RT_TYPE_HASH_FUNCTION_COUNT) functions = &RT_TYPE_HASH_FUNCTIONS[type_id];
+    else if (type_id >= (uint64_t)RT_TYPE_DESCRIPTOR_COUNT) {
+        ModuleTypeEntry* entry = module_type_find(type_id);
+        if (entry) functions = &entry->hash_functions;
+    }
+    return functions && functions->hash_fn && functions->equals_fn ? functions : NULL;
 }
 
 static inline TypeDescriptor* rt_get_type_descriptor(uint64_t type_id) {

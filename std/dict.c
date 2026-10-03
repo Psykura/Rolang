@@ -12,7 +12,9 @@
 
 enum {
     RT_DICT_KEY_BYTES = 0,
-    RT_DICT_KEY_STRING = 1
+    RT_DICT_KEY_STRING = 1,
+    /* Keys whose type descriptor has Hashable hash/equals functions. */
+    RT_DICT_KEY_CUSTOM = 2
 };
 
 /*
@@ -112,8 +114,20 @@ static inline int _dict_bytes_equal(const unsigned char* a,
     return 1;
 }
 
+static inline TypeHashFunctions* _dict_object_hash_functions(void* object) {
+    return rt_get_type_hash_functions(OBJ_HEADER(object)->type_id);
+}
+
 __attribute__((always_inline))
 static inline int rt_dict_keys_equal(RolangDict* dict, const void* lhs, const void* rhs) {
+    if (dict->key_kind == RT_DICT_KEY_CUSTOM) {
+        void* a = *(void* const*)lhs; void* b = *(void* const*)rhs;
+        if (a == b) return 1;
+        if (!a || !b) return 0;
+        TypeHashFunctions* functions = _dict_object_hash_functions(a);
+        if (functions) return functions->equals_fn(a, b) & 1;
+        return 0;
+    }
     if (dict->key_kind == RT_DICT_KEY_STRING) {
         StringVal a_val;
         StringVal b_val;
@@ -194,6 +208,17 @@ static inline uint64_t _dict_hash_bytes(const unsigned char* p, size_t n) {
 
 __attribute__((always_inline))
 static inline uint64_t _dict_hash_key(RolangDict* dict, const void* key) {
+    if (dict->key_kind == RT_DICT_KEY_CUSTOM) {
+        void* object = *(void* const*)key;
+        if (!object) return 0;
+        TypeHashFunctions* functions = _dict_object_hash_functions(object);
+        /* Objects without Hashable functions hash by identity. */
+        if (!functions) return _dict_hash_bytes((const unsigned char*)key, sizeof(void*));
+        /* Mix the user's hash so weak hashes still spread over buckets and tags. */
+        uint64_t h = functions->hash_fn(object);
+        h ^= h >> 33; h *= 0xff51afd7ed558ccdULL; h ^= h >> 33; h *= 0xc4ceb9fe1a85ec53ULL; h ^= h >> 33;
+        return h;
+    }
     if (dict->key_kind == RT_DICT_KEY_STRING) {
         if (dict->key_type_id != 0) {
             /* Heap String object: memoize the hash in the object itself.
@@ -312,6 +337,9 @@ void* rt_dict_new(int64_t capacity, int64_t key_size, int64_t value_size,
     dict->key_size = key_size;
     dict->value_size = value_size;
     dict->key_kind = key_kind;
+    /* Heap keys (structs, enums with payloads) use their type's Hashable
+     * functions when it has them, read from each key object's header. */
+    if (key_kind == RT_DICT_KEY_BYTES && key_type_id != 0 && key_size == (int64_t)sizeof(void*)) dict->key_kind = RT_DICT_KEY_CUSTOM;
     dict->key_type_id = key_type_id;
     dict->value_type_id = value_type_id;
     dict->bucket_count = (int32_t)bucket_count;
@@ -689,4 +717,22 @@ void rt_dict_gc_trace(void* payload, GCTraceCb cb, void* ctx) {
             if (value_obj != NULL) cb(value_obj, ctx);
         }
     }
+}
+
+/* The content hash of a String, cached in the object as for dictionary keys. */
+uint64_t rt_string_hash(void* string) {
+    StringPayload* sp = rt_string_payload(string);
+    if (sp == NULL || sp->data == NULL || sp->len <= 0) return _dict_hash_bytes(NULL, 0);
+    if (sp->hash != 0) return (uint64_t)sp->hash;
+    uint64_t h = _dict_hash_bytes((const unsigned char*)sp->data, (size_t)sp->len);
+    if (h == 0) h = 0x9e3779b97f4a7c15ULL;
+    sp->hash = (int64_t)h;
+    return h;
+}
+
+/* The IEEE 754 bit pattern of a double. */
+uint64_t rt_f64_bits(double value) {
+    uint64_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
 }

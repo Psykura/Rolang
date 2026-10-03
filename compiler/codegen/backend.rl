@@ -370,7 +370,7 @@ struct LlvmModuleEmitter {
             if let name = self.type_method(type_id, "__gc_trace__") { conservative[i] = true; }
         }
         let cyclic = cyclic_capable_ids(self.cache.descriptor_types.len(), edges, conservative);
-        let field_type = "{ i32, i64, i32, i32 }"; let desc_type = "{ i64, i64, i32, i32, ptr, ptr, i32, ptr }";
+        let field_type = "{ i32, i64, i32, i32 }"; let desc_type = "{ i64, i64, i32, i32, ptr, ptr, i32, ptr }"; let hash_rows = Vec<String>.new();
         let field_text = StringBuilder.new(); var field_count = 0;
         for i in 0..<self.cache.descriptor_types.len() {
             let type_id = self.cache.descriptor_types[i]; let fields = field_lists[i]; let start = field_count;
@@ -385,12 +385,25 @@ struct LlvmModuleEmitter {
             let descriptor = self.cache.descriptor(type_id);
             var acyclic = 1; if cyclic.contains(i) { acyclic = 0; }
             let release_fields = self.emit_release_fields(descriptor, fields);
+            // Hashable keys: hash() -> u64 and __eq__(Self) -> Bool.
+            var hash = "null"; var equals = "null";
+            if let hash_name = self.type_method(type_id, "hash") { if let equals_name = self.type_method(type_id, "__eq__") {
+                if let h = self.signatures[hash_name] { if let e = self.signatures[equals_name] {
+                    if h.result.equals("i64") && h.params.len() == 1 && e.result.equals("i1") && e.params.len() == 2 {
+                        hash = llvm_global(hash_name); equals = llvm_global(equals_name);
+                    }
+                } }
+            } }
             descriptors.push(desc_type + f" {{ i64 {descriptor}, i64 {size}, i32 {fields.len()}, i32 {start}, ptr " + release + ", ptr " + trace + f", i32 {acyclic}, ptr " + release_fields + " }");
+            hash_rows.push("{ ptr, ptr } { ptr " + hash + ", ptr " + equals + " }");
         }
         let desc_text = StringBuilder.new(); for i in 0..<descriptors.len() { if i > 0 { desc_text.append(", "); } desc_text.append(descriptors[i]); }
         var linkage = ""; if self.owner.len() > 0 { linkage = "internal "; }
         self.globals.append_line("@RT_TYPE_DESCRIPTORS = " + linkage + f"constant [{descriptors.len()} x " + desc_type + "] [" + desc_text.to_string() + "]");
         self.globals.append_line("@RT_TYPE_DESCRIPTOR_COUNT = " + linkage + f"constant i32 {descriptors.len()}");
+        let hash_text = StringBuilder.new(); for i in 0..<hash_rows.len() { if i > 0 { hash_text.append(", "); } hash_text.append(hash_rows[i]); }
+        self.globals.append_line("@RT_TYPE_HASH_FUNCTIONS = " + linkage + f"constant [{hash_rows.len()} x {{ ptr, ptr }}] [" + hash_text.to_string() + "]");
+        self.globals.append_line("@RT_TYPE_HASH_FUNCTION_COUNT = " + linkage + f"constant i32 {hash_rows.len()}");
         self.globals.append_line("@RT_TYPE_FIELD_DESCRIPTORS = " + linkage + f"constant [{field_count} x " + field_type + "] [" + field_text.to_string() + "]");
         self.globals.append_line("@RT_TYPE_FIELD_DESCRIPTOR_COUNT = " + linkage + f"constant i32 {field_count}");
         if self.owner.len() > 0 { self.emit_type_registration(field_count); }
@@ -413,6 +426,8 @@ struct LlvmModuleEmitter {
         self.signature(LlvmSignature { name: "rt_register_module_types", result: "void", params: ["ptr", "i32", "ptr", "i32", "ptr"], defined: false });
         self.bodies.append_line("define internal void @__rl_register_types() {"); self.bodies.append_line("entry:");
         self.bodies.append_line(f"  call void @rt_register_module_types(ptr @RT_TYPE_DESCRIPTORS, i32 {count}, ptr @RT_TYPE_FIELD_DESCRIPTORS, i32 {field_count}, ptr @.rl.type.keys)");
+        self.signature(LlvmSignature { name: "rt_register_module_hash_functions", result: "void", params: ["ptr", "ptr", "i32"], defined: false });
+        self.bodies.append_line(f"  call void @rt_register_module_hash_functions(ptr @RT_TYPE_DESCRIPTORS, ptr @RT_TYPE_HASH_FUNCTIONS, i32 {count})");
         self.bodies.append_line("  ret void"); self.bodies.append_line("}");
     }
     def emit(arena: AstArena) -> LlvmResult {

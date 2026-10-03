@@ -19,7 +19,7 @@ The [runtime core](../runtime/README.md) provides allocation, ARC/GC and schedul
 | [vec](vec.rl) | Vec<T>, owned elements, indexed access, iteration, stable sort_by, binary search and reversal |
 | [dict](dict.rl) | Ordered Dict<K,V>, optional lookup/removal and snapshots |
 | [string](string.rl) | String operations, conversions and literals; byte-oriented, with Unicode scalar and grapheme views |
-| [compare](compare.rl) | Equatable and Comparable, and the Vec operations needing them: sort, min, max, binary_search, contains, index_of |
+| [compare](compare.rl) | Equatable, Comparable and Hashable; Vec sort, min, max, binary_search, contains, index_of, ==, hash; hash_combine |
 | [range](range.rl) | Half-open/inclusive language range support |
 | [cell](cell.rl) | Compiler support: shared storage for variables captured and reassigned by closures |
 | [array](array.rl) | Numeric Vec<i32> helpers: sum, product, search and extrema |
@@ -59,6 +59,12 @@ String length/indexing/slicing count bytes; char helpers classify ASCII. String
 literals can contain UTF-8 and NUL, but these APIs do not imply Unicode scalar
 or grapheme indexing. ByteString and text APIs will be given clearer distinct
 contracts as the library evolves.
+
+Dict keys and Set elements of struct or payload-enum types compare by content
+when the type is Hashable, defining `hash() -> u64` and `__eq__` (equal values
+must hash alike; `hash_combine` mixes field hashes). Without them such keys
+compare by identity. Numbers, Bool, String and Vec of Hashable elements are
+Hashable. A generic type's hash method must be used somewhere to be emitted.
 
 Collections own their managed elements. Assignment shares the container.
 Snapshots copy bindings while retaining referenced objects; they are shallow.

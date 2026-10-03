@@ -174,9 +174,13 @@ pub struct ConformanceChecker {
                 switch primitive { case .bool_type: boolean = true; default: {} }
             default: return nil;
         }
-        if requirement.params.len() != 1 || requirement.is_async || requirement.generic_params.len() > 0 { return nil; }
-        if !self.matches(concrete, requirement.params.get(0)) { return nil; }
+        if requirement.is_async || requirement.generic_params.len() > 0 { return nil; }
         let name = requirement.name;
+        if name.equals("hash") && requirement.params.len() == 0 && (numeric || boolean) {
+            if !self.matches(self.type_table.get_builtin("u64") ?? self.type_table.error_type, requirement.return_type) { return nil; }
+            return WitnessEntry { requirement_name: name, implementation_symbol: nil, implementation_name: name, is_method: true };
+        }
+        if requirement.params.len() != 1 || !self.matches(concrete, requirement.params.get(0)) { return nil; }
         var comparison = false; var supported = false;
         switch name {
             case "__eq__", "__ne__": comparison = true; supported = numeric || boolean;

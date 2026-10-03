@@ -319,7 +319,9 @@ bounded parameter: the implicitly imported `Equatable` (`__eq__`) and `Comparabl
 is Equatable, and String conforms through its methods; a struct conforms by
 defining `__eq__` and `__lt__`, after which all six operators also work on it
 directly. Vec uses them for `sort()`, `sorted()`, `min()`, `max()`,
-`binary_search()`, `contains()` and `index_of()`.
+`binary_search()`, `contains()` and `index_of()`. `Hashable` (`hash() -> u64` plus
+Equatable) makes struct values usable as Dict keys and Set elements by
+content.
 
 A method of a generic type may bound the type's parameters with `where`
 (`def total_area() -> i32 where T: Shape`); the body may use T as a Shape and each

@@ -19,6 +19,8 @@ void rt_dict_clear(void* ptr);
 int64_t rt_dict_len(void* dict_ptr);
 void* rt_dict_key_ptr(void* dict_ptr, int64_t index);
 void rt_dict_key_copy(void* dict_ptr, int64_t index, void* out);
+uint64_t rt_string_hash(void* string);
+uint64_t rt_f64_bits(double value);
 void* rt_dict_value_ptr(void* dict_ptr, int64_t index);
 void rt_dict_free(void* dict_ptr);
 void rt_dict_gc_trace(void* payload, GCTraceCb cb, void* ctx);

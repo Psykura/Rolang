@@ -106,6 +106,14 @@ typedef void (*GCTraceFn)(void* payload, GCTraceCb cb, void* ctx);
  */
 typedef void (*ReleaseFieldsFn)(void* payload);
 
+/*
+ * A type's `hash() -> u64` and `__eq__(other) -> Bool` methods (Hashable),
+ * or NULL. Dictionaries hash and compare keys of such types with them instead
+ * of by pointer identity. The Bool result is in the low bit.
+ */
+typedef uint64_t (*HashFn)(void* self);
+typedef uint8_t (*EqualsFn)(void* self, void* other);
+
 typedef struct {
     uint64_t        type_id;       /* Unique ID for this type */
     int64_t         payload_size;  /* Size of the data after the header */
@@ -119,6 +127,14 @@ typedef struct {
                                         * (deinit_fn@24, trace_fn@32, acyclic@40)
                                         * are unchanged. */
 } TypeDescriptor;
+
+/* Hashable functions per type, in a table parallel to RT_TYPE_DESCRIPTORS
+ * (RT_TYPE_HASH_FUNCTIONS, weak and empty by default) so programs from
+ * compilers that predate it keep the same descriptor layout. */
+typedef struct {
+    HashFn   hash_fn;
+    EqualsFn equals_fn;
+} TypeHashFunctions;
 
 /* The LLVM desc_type in compiler/codegen/backend.rl emits these fields in this exact
  * order, with `acyclic` appended LAST. Guard the one field this change added:

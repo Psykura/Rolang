@@ -331,15 +331,75 @@ pub struct CheckerState {
             if let info = self.type_table.get_type(method.signature) {
                 switch info.data {
                     case .function(let data):
-                        if data.params.len() > 0 && self.types_equal(right, data.params.get(0)) {
-                            if let ref = id { self.result.operator_targets[ref.id] = CalleeId { kind: CalleeKind.method(), symbol_id: method.symbol_id, case_name: nil }; }
-                            return data.return_type;
+                        if data.params.len() == 0 { return nil; }
+                        // A generic extension's parameters take the receiver's type arguments.
+                        let mapping = self.conformance_checker.type_arguments(left);
+                        let param = self.generic_inference.substitute_type(data.params.get(0), mapping);
+                        if self.types_equal(right, param) {
+                            if let ref = id {
+                                self.result.operator_targets[ref.id] = CalleeId { kind: CalleeKind.method(), symbol_id: method.symbol_id, case_name: nil };
+                                self.check_method_where(method.symbol_id, mapping, op, ref);
+                            }
+                            return self.generic_inference.substitute_type(data.return_type, mapping);
                         }
                     default: {}
                 }
             }
         }
         nil
+    }
+    // A method's `where T: P` on its type's parameters holds for `mapping`'s arguments.
+    pub def check_method_where(method: SymbolId, mapping: Dict<String, TypeId>, name: String, id: NodeId) -> Void {
+        guard let symbol = self.symbol_table.get_symbol(method) else { return; }
+        guard let decl = symbol.decl_node else { return; }
+        guard let node = self.arena.get(decl) else { return; }
+        var constraints = Vec<NodeId>.new();
+        switch node.form { case .func_decl(let data): constraints = data.constraints; default: return; }
+        for constraint_id in constraints { if let constraint_node = self.arena.get(constraint_id) { switch constraint_node.form { case .constraint(let constraint):
+            if !constraint.kind.equals("conforms") { continue; }
+            guard let subject = constraint.subject else { continue; }
+            var param = "";
+            switch subject { case .type_ref(let ref): if let child = self.arena.get(ref) { switch child.form { case .named_type(let named): param = named.name; default: {} } } case .name(let value): param = value; }
+            guard let concrete = mapping[param] else { continue; }
+            for bound in constraint.bounds {
+                let protocol = self.resolve_type(bound);
+                if !self.type_table.is_protocol(protocol) || self.satisfies_bound(concrete, protocol) { continue; }
+                var detail = "";
+                let missing = self.conformance_checker.check_conformance(concrete, protocol).missing_requirements;
+                if missing.len() > 0 { detail = ": missing " + join_strings(missing, ", "); }
+                self.error(TypeErrorKind.type_mismatch(), f"'{name}' requires {param}: {self.type_table.format_type(protocol)}, but {self.type_table.format_type(concrete)} does not conform{detail}", id);
+            }
+            default: {}
+        } } }
+    }
+    // Whether `concrete` meets a protocol bound, as a conforming type or a type
+    // parameter bounded by the protocol or one inheriting its requirements.
+    pub def satisfies_bound(concrete: TypeId, protocol: TypeId) -> Bool {
+        if let info = self.type_table.get_type(concrete) { switch info.data {
+            case .type_variable(let variable):
+                guard let wanted = self.requirement_names(protocol) else { return false; }
+                for bound in self.variable_bounds(variable) {
+                    if bound == protocol { return true; }
+                    guard let have = self.requirement_names(bound) else { continue; }
+                    var covered = true;
+                    for name in wanted.keys() { if !have.contains(name) { covered = false; } }
+                    if covered { return true; }
+                }
+                return false;
+            default: {}
+        } }
+        self.conformance_checker.check_conformance(concrete, protocol).conforms
+    }
+    def requirement_names(protocol: TypeId) -> Dict<String, Bool>? {
+        guard let info = self.type_table.get_type(protocol) else { return nil; }
+        switch info.data {
+            case .protocol(let data):
+                let names = Dict<String, Bool>.new();
+                for func in data.func_requirements { names[func.name] = true; }
+                for prop in data.prop_requirements { names[prop.name] = true; }
+                return names;
+            default: return nil;
+        }
     }
     // `indices` must match the leading parameters of a __get__/__set__ method; `extra` counts trailing value parameters.
     pub def check_subscript_indices(func: FunctionTypeData, indices: Vec<NodeId>, extra: i32, method: String, id: NodeId) -> Void {
