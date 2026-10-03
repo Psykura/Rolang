@@ -62,6 +62,21 @@ void rl_async_ready(TaskHandle* task) {
             rl_task_native_result(task, -errno);
         return;
     }
+    if (task->native_kind == 6) {
+        ssize_t sent = sendto(task->stream->fd, task->buffer, (size_t)task->length, 0,
+                              (struct sockaddr*)task->peer, (socklen_t)task->peer_size);
+        if (sent >= 0) rl_task_native_result(task, (int32_t)sent);
+        else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) rl_task_native_result(task, -errno);
+        return;
+    }
+    if (task->native_kind == 7) {
+        socklen_t size = sizeof(task->peer);
+        ssize_t got = recvfrom(task->stream->fd, task->buffer, (size_t)task->length, 0,
+                               (struct sockaddr*)task->peer, &size);
+        if (got >= 0) { task->peer_size = (int32_t)size; task->offset = (int32_t)got; rl_task_native_result(task, (int32_t)got); }
+        else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) rl_task_native_result(task, -errno);
+        return;
+    }
     ssize_t n;
     if (task->native_kind == 2) {
         n = recv(task->stream->fd, task->buffer, (size_t)task->length, 0);
@@ -244,3 +259,172 @@ void* rt_async_read_data(TaskHandle* task) {
     copy[task->offset] = 0;
     return rl_string_handle_from_value((StringVal){copy, task->offset});
 }
+
+/* ---- Name resolution, datagrams and error text ---- */
+
+#if defined(__unix__) || defined(__APPLE__)
+static int rl_socket_nonblocking(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) return -1;
+    (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
+    return 0;
+}
+
+static void* rl_address_text(struct sockaddr* addr, int32_t* port) {
+    char text[INET6_ADDRSTRLEN] = "";
+    if (addr->sa_family == AF_INET) {
+        struct sockaddr_in* v4 = (struct sockaddr_in*)addr;
+        inet_ntop(AF_INET, &v4->sin_addr, text, sizeof(text));
+        if (port) *port = ntohs(v4->sin_port);
+    } else if (addr->sa_family == AF_INET6) {
+        struct sockaddr_in6* v6 = (struct sockaddr_in6*)addr;
+        inet_ntop(AF_INET6, &v6->sin6_addr, text, sizeof(text));
+        if (port) *port = ntohs(v6->sin6_port);
+    }
+    size_t size = strlen(text);
+    char* copy = malloc(size + 1);
+    if (!copy) rt_panic("address allocation failed");
+    memcpy(copy, text, size + 1);
+    return rl_string_handle_from_value((StringVal){copy, (int64_t)size});
+}
+#endif
+
+/* Numeric addresses for `host`, one per line, IPv4 first; on failure the
+ * resolver's message and *error set to a nonzero getaddrinfo code. Blocks the
+ * calling thread while the resolver runs. */
+void* rt_net_resolve(void* host_string, int32_t* error) {
+    *error = 0;
+#if defined(__unix__) || defined(__APPLE__)
+    StringVal host = rt_string_obj_value(host_string);
+    char name[256];
+    if (host.len <= 0 || host.len >= (int64_t)sizeof(name) || memchr(host.data, 0, (size_t)host.len)) {
+        *error = EAI_NONAME;
+        const char* message = "invalid host name";
+        char* copy = malloc(strlen(message) + 1); strcpy(copy, message);
+        return rl_string_handle_from_value((StringVal){copy, (int64_t)strlen(message)});
+    }
+    memcpy(name, host.data, (size_t)host.len); name[host.len] = 0;
+    struct addrinfo hints; memset(&hints, 0, sizeof(hints));
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo* list = NULL;
+    int status = getaddrinfo(name, NULL, &hints, &list);
+    if (status != 0) {
+        *error = status;
+        const char* message = gai_strerror(status);
+        size_t size = strlen(message);
+        char* copy = malloc(size + 1); memcpy(copy, message, size + 1);
+        return rl_string_handle_from_value((StringVal){copy, (int64_t)size});
+    }
+    size_t capacity = 64, used = 0;
+    char* out = malloc(capacity);
+    if (!out) rt_panic("resolver allocation failed");
+    for (int family = 0; family < 2; family++) {
+        for (struct addrinfo* item = list; item; item = item->ai_next) {
+            int wanted = family == 0 ? AF_INET : AF_INET6;
+            if (item->ai_family != wanted) continue;
+            char text[INET6_ADDRSTRLEN] = "";
+            if (wanted == AF_INET) inet_ntop(AF_INET, &((struct sockaddr_in*)item->ai_addr)->sin_addr, text, sizeof(text));
+            else inet_ntop(AF_INET6, &((struct sockaddr_in6*)item->ai_addr)->sin6_addr, text, sizeof(text));
+            size_t size = strlen(text);
+            if (!size) continue;
+            /* getaddrinfo may list an address once per protocol. */
+            int seen = 0;
+            for (size_t at = 0; at < used;) {
+                size_t end = at; while (end < used && out[end] != '\n') end++;
+                if (end - at == size && memcmp(out + at, text, size) == 0) { seen = 1; break; }
+                at = end + 1;
+            }
+            if (seen) continue;
+            while (used + size + 2 > capacity) { capacity *= 2; out = realloc(out, capacity); if (!out) rt_panic("resolver allocation failed"); }
+            if (used) out[used++] = '\n';
+            memcpy(out + used, text, size); used += size;
+        }
+    }
+    freeaddrinfo(list);
+    out[used] = 0;
+    return rl_string_handle_from_value((StringVal){out, (int64_t)used});
+#else
+    (void)host_string; *error = -1; return rl_string_handle_from_value((StringVal){NULL, 0});
+#endif
+}
+
+/* A nonblocking datagram socket bound to address:port (port 0: any port). */
+int32_t rt_udp_bind(void* address, int32_t port, void** out) {
+    *out = NULL;
+#if defined(__unix__) || defined(__APPLE__)
+    struct sockaddr_storage addr; socklen_t size;
+    int error = tcp_address(address, port, &addr, &size);
+    if (error) return -error;
+    int fd = socket(addr.ss_family, SOCK_DGRAM, 0);
+    if (fd < 0) return -errno;
+    if (rl_socket_nonblocking(fd) < 0 || bind(fd, (struct sockaddr*)&addr, size) < 0) { error = errno; close(fd); return -error; }
+    AsyncStream* stream = malloc(sizeof(*stream));
+    if (!stream) { close(fd); rt_panic("socket allocation failed"); }
+    stream->fd = fd; stream->refs = 1;
+    *out = stream; return 0;
+#else
+    (void)address; (void)port; return -ENOSYS;
+#endif
+}
+
+TaskHandle* rt_udp_send_start(void* ptr, void* data, void* address, int32_t port) {
+    TaskHandle* task = rl_task_new(); task->native_kind = 6; task->stream = ptr;
+    if (ptr) task->stream->refs++;
+#if defined(__unix__) || defined(__APPLE__)
+    StringVal value = rt_string_obj_value(data);
+    struct sockaddr_storage addr; socklen_t size;
+    int error = tcp_address(address, port, &addr, &size);
+    if (!ptr || error || value.len > 65507) { rl_task_native_result(task, -(error ? error : (ptr ? EMSGSIZE : EBADF))); return task; }
+    memcpy(task->peer, &addr, size); task->peer_size = (int32_t)size;
+    task->length = (int32_t)value.len;
+    task->buffer = malloc((size_t)task->length + 1);
+    if (!task->buffer) { rl_task_native_result(task, -ENOMEM); return task; }
+    if (value.len) memcpy(task->buffer, value.data, (size_t)value.len);
+#else
+    (void)data; (void)address; (void)port; rl_task_native_result(task, -ENOSYS);
+#endif
+    return task;
+}
+
+TaskHandle* rt_udp_receive_start(void* ptr, int32_t limit) {
+    TaskHandle* task = rl_task_new(); task->native_kind = 7; task->stream = ptr;
+    if (ptr) task->stream->refs++;
+    if (!ptr || limit <= 0) { rl_task_native_result(task, -EINVAL); return task; }
+    task->length = limit;
+    task->buffer = malloc((size_t)limit + 1);
+    if (!task->buffer) rl_task_native_result(task, -ENOMEM);
+    return task;
+}
+
+void* rt_udp_received_data(TaskHandle* task) {
+    rt_task_borrow_result(task);
+    if (task->native_kind != 7) rt_panic("datagram data requires a receive operation");
+    char* copy = malloc((size_t)task->offset + 1);
+    if (!copy) rt_panic("datagram allocation failed");
+    if (task->offset) memcpy(copy, task->buffer, (size_t)task->offset);
+    copy[task->offset] = 0;
+    return rl_string_handle_from_value((StringVal){copy, task->offset});
+}
+
+void* rt_udp_received_address(TaskHandle* task, int32_t* port) {
+#if defined(__unix__) || defined(__APPLE__)
+    return rl_address_text((struct sockaddr*)task->peer, port);
+#else
+    (void)task; *port = 0; return rl_string_handle_from_value((StringVal){NULL, 0});
+#endif
+}
+
+/* The local port of a bound socket. */
+int32_t rt_socket_port(void* ptr) { return rt_async_listener_port(ptr); }
+
+/* The operating system's text for an errno value. */
+void* rt_os_error_message(int32_t code) {
+    const char* message = strerror(code);
+    size_t size = strlen(message);
+    char* copy = malloc(size + 1);
+    if (!copy) rt_panic("message allocation failed");
+    memcpy(copy, message, size + 1);
+    return rl_string_handle_from_value((StringVal){copy, (int64_t)size});
+}
+
+int32_t rt_errno_host_unreachable(void) { return EHOSTUNREACH; }

@@ -21,6 +21,8 @@ pub extern "C" def rt_string_ends_with(s: String, suffix: String) -> i32;
 pub extern "C" def rt_string_concat_handle(a: String, b: String) -> RawPtr;
 pub extern "C" def rt_int_to_string_handle(value: i64) -> RawPtr;
 pub extern "C" def rt_f64_to_string_handle(value: f64) -> RawPtr;
+pub extern "C" def rt_string_find_from(haystack: String, needle: String, start: i32) -> i32;
+pub extern "C" def rt_string_rfind(haystack: String, needle: String) -> i32;
 pub extern "C" def rt_string_repeat_handle(s: String, count: i32) -> RawPtr;
 pub extern "C" def rt_string_char_at(s: String, index: i32) -> i32;
 pub extern "C" def rt_string_find_char(s: String, ch: i32, start: i32) -> i32;
@@ -191,17 +193,36 @@ pub struct String {
         unsafe { return rt_string_to_f64(self); }
     }
 
-    pub def find(needle: String) -> i32 {
-        let n = needle.len() as i32;
-        if n == 0 { return 0; }
-        let max_idx = (self.len() as i32) - n;
-        var i: i32 = 0;
-        while i <= max_idx {
-            let sub = self.substring(i, n);
-            if sub.compare_to(needle) == 0 { return i; }
-            i = i + 1;
+    // The byte index of the last occurrence of `needle`, or -1.
+    pub def rfind(needle: String) -> i32 {
+        unsafe { return rt_string_rfind(self, needle); }
+    }
+    // The byte index of `needle` at or after `start`, or -1.
+    pub def find_from(needle: String, start: i32) -> i32 {
+        unsafe { return rt_string_find_from(self, needle, start); }
+    }
+    // ASCII letters converted; other bytes unchanged.
+    pub def lowercased() -> String { self.map_ascii_letters(65, 90, 32) }
+    pub def uppercased() -> String { self.map_ascii_letters(97, 122, -32) }
+    def map_ascii_letters(low: i32, high: i32, shift: i32) -> String {
+        var out = "";
+        var start = 0;
+        let length = self.len() as i32;
+        for index in 0..<length {
+            let byte = self.byte_at(index);
+            if byte >= low && byte <= high {
+                if index > start { out = out + self.substring(start, index - start); }
+                out = out + String.from_scalar(byte + shift);
+                start = index + 1;
+            }
         }
-        return -1;
+        if start == 0 { return self; }
+        if length > start { out = out + self.substring(start, length - start); }
+        out
+    }
+    // The byte index of the first occurrence of `needle`, or -1.
+    pub def find(needle: String) -> i32 {
+        unsafe { return rt_string_find_from(self, needle, 0); }
     }
 
     pub def count(needle: String) -> i32 {

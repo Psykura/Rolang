@@ -966,7 +966,9 @@ pub struct ExprChecker {
             let holder = self.state.arena.add(NodeForm.identifier(IdentifierAst { name: "__opt_chain" }), span);
             let binding = self.state.symbol_table.create_symbol("__opt_chain", SymbolKind.variable(), Namespace.value()).id;
             self.state.node_symbols[holder.id] = binding; self.state.type_env[binding.id] = base;
-            let member = self.state.arena.add(NodeForm.member_access(MemberAccessAst { object: holder, member: data.member }), span);
+            // `object?[index]` has no member: the suffix applies to the value itself.
+            var member = holder;
+            if data.member.len() > 0 { member = self.state.arena.add(NodeForm.member_access(MemberAccessAst { object: holder, member: data.member }), span); }
             var content = member;
             if let suffix = data.suffix { switch suffix {
                 case .call(let args): content = self.state.arena.add(NodeForm.call(CallAst { callee: member, arguments: args, is_interpolation: false }), span);

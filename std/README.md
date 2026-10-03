@@ -46,7 +46,8 @@ The [runtime core](../runtime/README.md) provides allocation, ARC/GC and schedul
 | [toml](toml.rl) | TOML 1.0 documents to and from Json values; passes the toml-test suite |
 | [cli](cli.rl) | Command-line parsing: flags, options with values/choices, positionals, help and suggestions |
 | [task](task.rl) | Task ownership, cancellation, waits, sleep and yield |
-| [async_io](async_io.rl) | Async socket streams, pipes, TCP connections and listeners |
+| [async_io](async_io.rl) | Async TCP streams and listeners (host names resolved), UDP sockets, pipes, DNS resolution, errno messages |
+| [http](http.rl) | HTTP/1.1 client (redirects, timeouts, chunked bodies) and server (a task per connection, keep-alive); URLs and query strings |
 | [math](math.rl) | Mathematical functions and numeric extension methods |
 | [sha256](sha256.rl) | Binary-safe string/file SHA-256 |
 | [panic](panic.rl) | Fatal panic/unreachable helpers |
@@ -121,10 +122,27 @@ object back, with nested objects as `[tables]` and arrays of objects as
 `[[tables]]`; TOML has no null, so encoding one is an error. The parser passes
 all 208 valid and rejects all 501 invalid documents of the toml-test 1.0 suite.
 
+## Networking
+
+`resolve(host)` returns numeric addresses, IPv4 first, using the system
+resolver; it blocks the scheduler thread while the resolver runs.
+`AsyncStream.connect(host, port)` resolves names and tries each address.
+`UdpSocket` sends and receives datagrams with their sender. Errors are errno
+values; `os_error_message(code)` gives the system's text.
+
+std.http speaks HTTP/1.1 over these streams. `http_get`/`http_post` and
+`HttpClient` (timeout, redirects, default headers) return `HttpResponse` or an
+`HttpError` with a message. `HttpServer.serve(handler)` runs an async handler
+for every request, each connection in its own task, with keep-alive. Bodies
+are binary-safe strings framed by Content-Length or chunked encoding; headers
+are limited to 64 KiB and bodies to a configurable size. https needs TLS,
+which is not available yet. `with_timeout(task, duration)` in std.time bounds
+any task.
+
 ## Library development
 
 The next work is explicit errors, typed handles, ownership/mutability guarantees,
 byte/UTF-8 separation, common collection interfaces and platform contracts.
-HTTP and serialization of user types are planned.
+TLS and serialization of user types are planned.
 Document new contracts, including edge, failure and ownership behavior.
 See [the roadmap](../docs/roadmap.md) and [language semantics](../language/README.md).

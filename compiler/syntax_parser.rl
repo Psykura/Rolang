@@ -578,6 +578,13 @@ struct ExpressionCursor {
             } else if self.spelling().equals("[") {
                 guard let indices = self.parse_indices() else { return nil; }
                 result = self.arena.add(NodeForm.subscript(SubscriptAst { object: result, indices }));
+            } else if self.spelling().equals("?") && self.adjacent_bracket() {
+                // `value?[index]` subscripts an optional's value.
+                self.take();
+                guard let indices = self.parse_indices() else { return nil; }
+                result = self.arena.add(NodeForm.optional_chain(OptionalChainAst {
+                    object: result, member: "", suffix: AstOptionalSuffix.index(indices)
+                }));
             } else if self.spelling().equals("?") && !self.ternary_question() {
                 self.take();
                 result = self.arena.add(NodeForm.try_expr(TryExprAst { value: result }));
@@ -586,6 +593,12 @@ struct ExpressionCursor {
         }
         if combined { return self.finish(result, start); }
         result
+    }
+    // A `[` written directly after the current `?`, as in `value?[0]`.
+    def adjacent_bracket() -> Bool {
+        if self.index + 1 >= self.tokens.len() { return false; }
+        let question = self.tokens[self.index].span; let next = self.tokens[self.index + 1];
+        next.text.equals("[") && next.span.line == question.end_line && next.span.column == question.end_column
     }
     def parse_intrinsic(name: String, start: Span) -> NodeId? {
         self.take();

@@ -21,6 +21,15 @@ int32_t rt_async_stream_shutdown(void* ptr);
 TaskHandle* rt_async_read_start(void* ptr, int32_t limit);
 TaskHandle* rt_async_write_start(void* ptr, void* string);
 void* rt_async_read_data(TaskHandle* task);
+void* rt_net_resolve(void* host, int32_t* error);
+int32_t rt_udp_bind(void* address, int32_t port, void** out);
+TaskHandle* rt_udp_send_start(void* socket, void* data, void* address, int32_t port);
+TaskHandle* rt_udp_receive_start(void* socket, int32_t limit);
+void* rt_udp_received_data(TaskHandle* task);
+void* rt_udp_received_address(TaskHandle* task, int32_t* port);
+int32_t rt_socket_port(void* socket);
+void* rt_os_error_message(int32_t code);
+int32_t rt_errno_host_unreachable(void);
 ROLANG_INTERNAL void* rl_string_handle_from_value(StringVal s);
 
 #endif /* ROLANG_STD_ASYNC_IO_H */

@@ -1,0 +1,5 @@
+localhost true
+unknown host fails
+sent 9
+got 9 bytes from 127.0.0.1 true
+Connection refused

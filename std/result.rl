@@ -7,6 +7,14 @@
 pub enum Result<T, E> {
     case ok(value: T);
     case err(error: E);
+
+    pub def is_ok() -> Bool { switch self { case .ok(let value): return true; default: return false; } }
+    pub def is_err() -> Bool { !self.is_ok() }
+    // The success value, or nil.
+    pub def ok_value() -> T? { switch self { case .ok(let value): return value; default: return nil; } }
+    // The error, or nil.
+    pub def err_value() -> E? { switch self { case .err(let error): return error; default: return nil; } }
+    pub def unwrap_or(fallback: T) -> T { switch self { case .ok(let value): return value; default: return fallback; } }
 }
 
 // Check variant ------------------------------------------------------------

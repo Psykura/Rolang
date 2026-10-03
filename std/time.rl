@@ -118,6 +118,20 @@ pub def sleep_for(duration: Duration) async -> Void {
     await sleep(millis);
 }
 
+// The task's result, or nil after cancelling it when it takes longer than `limit`.
+pub def with_timeout<T>(task: Task<T>, limit: Duration) async -> T? {
+    let watchdog = spawn cancel_after(task, limit);
+    let finished = await task.wait();
+    watchdog.cancel();
+    if !finished { return nil; }
+    await task
+}
+
+def cancel_after<T>(task: Task<T>, limit: Duration) async -> Void {
+    await sleep_for(limit);
+    task.cancel();
+}
+
 // A calendar date and time at a fixed offset from UTC.
 pub struct DateTime {
     pub let year: i32;

@@ -98,8 +98,14 @@ struct MirAsyncBuilder {
             i = 0; for point in list { posts[point.global_index] = ids[i+1]; i += 1; }
         }
         let fallback = self.block(); let dispatch = MirBlockId { id: 0 };
-        let blocks = Dict<i32, MirBlock>.with_capacity(16, 0); let order = [dispatch, fallback];
-        let cases = Vec<(String, MirBlockId)>.new(); cases.push(("0", rewriter.block(self.original.entry_block)));
+        // Locals live in the resume function between suspensions; they are copied
+        // from the frame when the task starts or resumes and back before it suspends
+        // or completes, so the frame holds every value whenever the task is not running.
+        let start_block = self.block();
+        let blocks = Dict<i32, MirBlock>.with_capacity(16, 0); let order = [dispatch, fallback, start_block];
+        let start_ops = Vec<MirOp>.new(); self.load_locals(start_ops);
+        blocks[start_block.id] = MirBlock { id: start_block, ops: start_ops, terminator: MirTerm.branch(MirBranchData { target: rewriter.block(self.original.entry_block) }) };
+        let cases = Vec<(String, MirBlockId)>.new(); cases.push(("0", start_block));
         for point in points { if let target = posts[point.global_index] { cases.push((f"{point.global_index+1}", target)); } }
         blocks[0] = MirBlock { id: dispatch, ops: [MirOp.assign(MirAssignData { place: mir_bare_place(state, self.int_type()), value: MirOperand.copy(self.field("$state", self.int_type())) })],
             terminator: MirTerm.switch_int(MirSwitchIntData { value: mir_copy(state, self.int_type()), cases, default: fallback }) };
@@ -107,8 +113,8 @@ struct MirAsyncBuilder {
         for id in sorted { guard let original = self.original.get_block(id) else { continue; }
             guard let ids = segments[id.id] else { continue; }
             let list = grouped[id.id] ?? Vec<MirAwaitPoint>.new(); var seg = 0;
-            while seg < ids.len() { let ops = Vec<MirOp>.new(); self.load_locals(ops);
-                var start = 0; if seg > 0 { self.fixup(list[seg-1], ops); start = list[seg-1].index+1; }
+            while seg < ids.len() { let ops = Vec<MirOp>.new();
+                var start = 0; if seg > 0 { self.load_locals(ops); self.fixup(list[seg-1], ops); start = list[seg-1].index+1; }
                 var end = original.ops.len(); if seg < list.len() { end = list[seg].index; }
                 while start < end { let op = original.ops[start]; switch op { case .task_yield: {} default: ops.push(op); } start += 1; }
                 var term = MirTerm.return_stmt(MirReturnData { value: nil });
@@ -116,9 +122,10 @@ struct MirAsyncBuilder {
                     ops.push(MirOp.store(MirStoreData { place: self.field("$state", self.int_type()), value: mir_constant(MirConstantKind.int(), MirScalar.integer(f"{point.global_index+1}"), self.int_type()) }));
                     self.store_locals(ops); ops.push(MirOp.task_yield());
                 } else {
-                    self.store_locals(ops);
                     if let original_term = original.terminator { switch original_term {
-                        case .return_stmt(let d): ops.push(MirOp.task_complete(MirTaskCompleteData { task_handle: MirOperand.copy(self.field("$handle", self.ptr_type())), result: d.value }));
+                        case .return_stmt(let d):
+                            self.store_locals(ops);
+                            ops.push(MirOp.task_complete(MirTaskCompleteData { task_handle: MirOperand.copy(self.field("$handle", self.ptr_type())), result: d.value }));
                         default: term = rewriter.term(original_term);
                     } }
                 }

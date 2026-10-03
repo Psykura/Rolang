@@ -556,3 +556,22 @@ void* rt_string_replace_handle(void* s, void* old, void* new_val) {
 int64_t rt_string_to_i64(void* s) { return rt_str_to_i64(rt_string_obj_value(s)); }
 int32_t rt_string_to_i32(void* s) { return rt_str_to_i32(rt_string_obj_value(s)); }
 double rt_string_to_f64(void* s) { return rt_str_to_f64(rt_string_obj_value(s)); }
+
+/* Byte index of `needle` in `haystack` at or after `start`, or -1. */
+int32_t rt_string_find_from(void* haystack, void* needle, int32_t start) {
+    StringVal h = rt_string_obj_value(haystack), n = rt_string_obj_value(needle);
+    if (start < 0) start = 0;
+    if (n.len == 0) return start <= h.len ? start : -1;
+    if (start >= h.len || n.len > h.len - start) return -1;
+    const char* found = memmem(h.data + start, (size_t)(h.len - start), n.data, (size_t)n.len);
+    return found ? (int32_t)(found - h.data) : -1;
+}
+
+/* Byte index of the last `needle` in `haystack`, or -1. */
+int32_t rt_string_rfind(void* haystack, void* needle) {
+    StringVal h = rt_string_obj_value(haystack), n = rt_string_obj_value(needle);
+    if (n.len > h.len) return -1;
+    for (int64_t at = h.len - n.len; at >= 0; at--)
+        if (memcmp(h.data + at, n.data, (size_t)n.len) == 0) return (int32_t)at;
+    return -1;
+}

@@ -514,7 +514,12 @@ pub struct HirBuilder {
         guard let node = self.ast.get(content) else { return nil; }
         var member: NodeId? = nil;
         switch node.form { case .member_access: member = content; case .call(let data): member = data.callee; case .subscript(let data): member = data.object; default: {} }
-        if let ref = member { if let child = self.ast.get(ref) { switch child.form { case .member_access(let access): return access.object; default: {} } } }
+        if let ref = member { if let child = self.ast.get(ref) { switch child.form {
+            case .member_access(let access): return access.object;
+            // `object?[index]`: the subscript's object is the binding itself.
+            case .identifier: return ref;
+            default: {}
+        } } }
         nil
     }
     def optional_chain(id: NodeId, data: OptionalChainAst, type: TypeId) -> HirId {

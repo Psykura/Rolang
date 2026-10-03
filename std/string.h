@@ -86,6 +86,8 @@ void* rt_int_to_string_handle(int64_t value);
 void* rt_u64_to_string_handle(uint64_t value);
 void* rt_f64_to_string_handle(double value);
 void* rt_f64_format_handle(double value, int32_t precision, int32_t style);
+int32_t rt_string_find_from(void* haystack, void* needle, int32_t start);
+int32_t rt_string_rfind(void* haystack, void* needle);
 void* rt_string_repeat_handle(void* s, int32_t count);
 int32_t rt_string_char_at(void* s, int32_t index);
 int32_t rt_string_find_char(void* s, int32_t ch, int32_t start);
