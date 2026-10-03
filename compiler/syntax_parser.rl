@@ -54,7 +54,7 @@ def scalar_prefix(op: String) -> Bool {
 
 def type_argument_punctuation(word: String) -> Bool {
     switch word {
-        case ",", "?", "(", ")", "[", "]", "->", ".", ":": true;
+        case ",", "?", "??", "(", ")", "[", "]", "->", ".", ":": true;
         default: false;
     }
 }
@@ -956,7 +956,7 @@ struct ExpressionCursor {
                     default: if !type_argument_punctuation(word) { return false; }
                 }
             } else if depth == 0 {
-                if word.equals(".") {
+                if word.equals(".") || word.equals("?.") {
                     if saw_generic { return true; }
                 } else if word.equals("(") && saw_generic && self.tokens[look - 1].text.ends_with(">") {
                     // `name<T>(...)` calls a generic function with explicit type arguments.
@@ -1010,10 +1010,13 @@ struct ExpressionCursor {
             }
             return self.make(NodeForm.struct_literal(StructLiteralAst { type_name, arguments }), start);
         }
-        if !self.expect(".") { return nil; }
+        var target = type_name;
+        // `Vec<T>?.member` is a member of the optional type.
+        if self.match_text("?.") { target = self.make(NodeForm.optional_type(OptionalTypeAst { inner: type_name }), start); }
+        else if !self.expect(".") { return nil; }
         if !self.at_identifier() { self.fail("type member"); return nil; }
         let member = self.take();
-        let reference = self.arena.add(NodeForm.type_reference(TypeReferenceAst { type_name }));
+        let reference = self.arena.add(NodeForm.type_reference(TypeReferenceAst { type_name: target }));
         self.make(NodeForm.member_access(MemberAccessAst { object: reference, member }), start)
     }
     def parse_primary() -> NodeId? {

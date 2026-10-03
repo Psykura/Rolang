@@ -940,6 +940,31 @@ pub struct ExprChecker {
         self.state.builtin("i32")
     }
     def optional_chain(id: NodeId, data: OptionalChainAst) -> TypeId {
+        // `Type?.member` names a static member of the optional type.
+        if data.member.len() > 0 && self.is_type_reference(data.object) { if let object = data.object { if let node = self.state.arena.get(object) {
+            var span: Span? = node.span; var inner: NodeId? = nil;
+            switch node.form {
+                case .identifier(let name): if name.type_args.len() == 0 {
+                    let named = self.state.arena.add(NodeForm.named_type(NamedTypeAst { name: name.name, module_path: Vec<String>.new(), generic_args: Vec<NodeId>.new() }), span);
+                    if let sid = self.state.node_symbols[object.id] { self.state.node_symbols[named.id] = sid; }
+                    inner = named;
+                }
+                case .type_reference(let reference): inner = reference.type_name;
+                default: {}
+            }
+            if let value = inner {
+                if let whole = self.state.arena.get(id) { span = whole.span; }
+                let optional = self.state.arena.add(NodeForm.optional_type(OptionalTypeAst { inner: value }), span);
+                let reference = self.state.arena.add(NodeForm.type_reference(TypeReferenceAst { type_name: optional }), span);
+                var content = self.state.arena.add(NodeForm.member_access(MemberAccessAst { object: reference, member: data.member }), span);
+                if let suffix = data.suffix { switch suffix {
+                    case .call(let args): content = self.state.arena.add(NodeForm.call(CallAst { callee: content, arguments: args, is_interpolation: false }), span);
+                    case .index(let indices): content = self.state.arena.add(NodeForm.subscript(SubscriptAst { object: content, indices }), span);
+                } }
+                self.state.lowered_expressions[id.id] = content;
+                return self.infer_expr(content);
+            }
+        } } }
         let type = self.state.infer_expr(data.object); let base = self.state.type_table.get_optional_inner(type) ?? type;
         var has_member = false; if let field = self.state.member_resolver.get_field(base, data.member) { has_member = true; }
         if let method = self.state.member_resolver.get_method(base, data.member) { has_member = true; }

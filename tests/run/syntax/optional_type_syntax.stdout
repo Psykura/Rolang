@@ -1,0 +1,4 @@
+-1 hi true 2
+true true 1
+hi
+nil value expected an integer, found a string

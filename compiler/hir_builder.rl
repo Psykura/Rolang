@@ -532,6 +532,11 @@ pub struct HirBuilder {
         nil
     }
     def optional_chain(id: NodeId, data: OptionalChainAst, type: TypeId) -> HirId {
+        // `Type?.member` was lowered to a static member access.
+        if let lowered = self.result.lowered_expressions[id.id] { if let holder = self.chain_binding(lowered) { if let node = self.ast.get(holder) { switch node.form {
+            case .type_reference: return self.expr(lowered);
+            default: {}
+        } } } }
         let scrutinee = self.expr(data.object); let inner = self.type_table.get_optional_inner(self.hir_type(scrutinee)) ?? self.hir_type(scrutinee);
         if let lowered = self.result.lowered_expressions[id.id] { if let holder = self.chain_binding(lowered) { if let sid = self.node_symbols[holder.id] {
             let content = self.expr(lowered); let content_type = self.hir_type(content);

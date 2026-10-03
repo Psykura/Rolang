@@ -83,11 +83,25 @@ struct TypeCursor {
     def parse_type() -> NodeId? {
         let start = self.current().span;
         guard let base = self.parse_primary() else { return nil; }
-        if self.match_text("?") {
-            return self.make(NodeForm.optional_type(OptionalTypeAst { inner: base }),
-                             start.line, start.column);
+        var result = base;
+        while true {
+            var depth = 0;
+            if self.match_text("?") { depth = 1; }
+            else if self.spelling().equals("??") && self.closes_type(self.next_spelling()) { self.take(); depth = 2; }
+            if depth == 0 { break; }
+            for level in 0..<depth {
+                result = self.make(NodeForm.optional_type(OptionalTypeAst { inner: result }), start.line, start.column);
+            }
         }
-        base
+        result
+    }
+    // The lexer reads `T??` as the coalescing operator; it is a nested optional
+    // only where the type ends, so `value as T ?? fallback` still coalesces.
+    def closes_type(next: String) -> Bool {
+        switch next {
+            case "", "=", ",", ")", "]", ">", ">>", "{", "}", ";", ":", "?", "??", "where", "->": true;
+            default: false;
+        }
     }
 
     def parse_primary() -> NodeId? {
