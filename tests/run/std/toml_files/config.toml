@@ -1,0 +1,27 @@
+# Server configuration
+title = "Rolang \"demo\""
+version = 0x2A
+ratio = 6.5e-1
+enabled = true
+started = 1979-05-27T07:32:00-08:00
+day = 1979-05-27
+lines = """
+first \
+  second"""
+path = 'C:\Users\rolang'
+
+[server]
+host = "127.0.0.1"
+ports = [8000, 8_001, 8002]
+limits = { connections = 100, timeout = 30.0 }
+
+[server.tls]
+enabled = false
+
+[[users]]
+name = "ada"
+roles = ["admin", "dev"]
+
+[[users]]
+name = "linus"
+site.name = "kernel"

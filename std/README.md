@@ -43,6 +43,7 @@ The [runtime core](../runtime/README.md) provides allocation, ARC/GC and schedul
 | [time](time.rl) | Duration, monotonic Instant, DateTime (RFC 3339, strftime-style format, local offset) and sleeping |
 | [random](random.rl) | Seedable xoshiro256** generator: ranges, floats, choice, shuffle, sampling; OS entropy |
 | [json](json.rl) | Json values, RFC 8259 parsing with positions, compact/pretty output |
+| [toml](toml.rl) | TOML 1.0 documents to and from Json values; passes the toml-test suite |
 | [cli](cli.rl) | Command-line parsing: flags, options with values/choices, positionals, help and suggestions |
 | [task](task.rl) | Task ownership, cancellation, waits, sleep and yield |
 | [async_io](async_io.rl) | Async socket streams, pipes, TCP connections and listeners |
@@ -114,10 +115,16 @@ keep key order. `json["a"]["b"]` yields null for missing members; `get`/`at`
 return optionals. Parse errors carry a line and column. Output escapes control
 characters and writes NaN or infinity as null.
 
+`Toml.parse` reads TOML 1.0 into the same Json values: tables are objects in
+document order, dates and times stay RFC 3339 strings. `Toml.encode` writes an
+object back, with nested objects as `[tables]` and arrays of objects as
+`[[tables]]`; TOML has no null, so encoding one is an error. The parser passes
+all 208 valid and rejects all 501 invalid documents of the toml-test 1.0 suite.
+
 ## Library development
 
 The next work is explicit errors, typed handles, ownership/mutability guarantees,
 byte/UTF-8 separation, common collection interfaces and platform contracts.
-TOML, HTTP and serialization of user types are planned.
+HTTP and serialization of user types are planned.
 Document new contracts, including edge, failure and ownership behavior.
 See [the roadmap](../docs/roadmap.md) and [language semantics](../language/README.md).

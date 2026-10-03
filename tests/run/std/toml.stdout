@@ -1,0 +1,41 @@
+{"title":"Rolang \"demo\"","version":42,"ratio":0.65,"enabled":true,"started":"1979-05-27T07:32:00-08:00","day":"1979-05-27","lines":"first second","path":"C:\\Users\\rolang","server":{"host":"127.0.0.1","ports":[8000,8001,8002],"limits":{"connections":100,"timeout":30.0},"tls":{"enabled":false}},"users":[{"name":"ada","roles":["admin","dev"]},{"name":"linus","site":{"name":"kernel"}}]}
+8001 kernel 30
+title = "Rolang \"demo\""
+version = 42
+ratio = 0.65
+enabled = true
+started = 1979-05-27T07:32:00-08:00
+day = 1979-05-27
+lines = "first second"
+path = "C:\\Users\\rolang"
+
+[server]
+host = "127.0.0.1"
+ports = [8000, 8001, 8002]
+
+[server.limits]
+connections = 100
+timeout = 30.0
+
+[server.tls]
+enabled = false
+
+[[users]]
+name = "ada"
+roles = ["admin", "dev"]
+
+[[users]]
+name = "linus"
+
+[users.site]
+name = "kernel"
+round trip true
+key 'a' is already defined at line 2, column 5
+table 't' is already defined at line 2, column 4
+unterminated array at line 1, column 8
+leading zeros are not allowed at line 1, column 7
+invalid escape in string at line 1, column 7
+invalid date at line 1, column 15
+table 'a' is already defined at line 2, column 4
+inline table 't' cannot be extended at line 2, column 7
+TOML has no null value (key 'x')
