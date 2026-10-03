@@ -42,12 +42,23 @@ struct MirAsyncBuilder {
     def int_type() -> TypeId { self.types.get_builtin("i32") ?? self.types.void_type }
     def field(name: String, type_id: TypeId) -> MirPlace { mir_field_place(self.frame.id, name, type_id) }
     // Only locals live across a suspension move between the frame and the resume
-    // function. A frame field keeps its own reference to its last stored value,
-    // released with the frame, so fields of dead locals need no update.
+    // function. The frame holds references only while the task is suspended: a
+    // loaded field is cleared, so a value is released after its last use rather
+    // than when the field is next overwritten or the frame is destroyed.
     def load_locals(ops: Vec<MirOp>, live: MirLocalSet) -> Void {
-        for local in self.original.locals { if live.contains(local.id) { ops.push(MirOp.assign(MirAssignData {
-            place: mir_bare_place(local.id, local.type_id), value: MirOperand.copy(self.field(f"$fLocalId(id={local.id.id})", local.type_id))
-        })); } }
+        for local in self.original.locals { if live.contains(local.id) {
+            let field = self.field(f"$fLocalId(id={local.id.id})", local.type_id);
+            ops.push(MirOp.assign(MirAssignData { place: mir_bare_place(local.id, local.type_id), value: MirOperand.copy(field) }));
+            if self.reference(local.type_id) {
+                ops.push(MirOp.store(MirStoreData { place: field, value: mir_constant(MirConstantKind.nil(), MirScalar.none(), local.type_id) }));
+            }
+        } }
+    }
+    // Types stored as one nullable object pointer.
+    def reference(type_id: TypeId) -> Bool {
+        if self.types.is_heap_type(type_id) { return true; }
+        if let inner = self.types.get_optional_inner(type_id) { return self.types.is_heap_type(inner); }
+        false
     }
     def store_locals(ops: Vec<MirOp>, live: MirLocalSet) -> Void {
         for local in self.original.locals { if live.contains(local.id) { ops.push(MirOp.store(MirStoreData {
@@ -126,12 +137,9 @@ struct MirAsyncBuilder {
         let blocks = Dict<i32, MirBlock>.with_capacity(16, 0); let order = [dispatch, fallback, start_block];
         let tracked = MirLocalSet.new(); for local in self.original.locals { tracked.add(local.id); }
         let liveness = mir_liveness(self.original, tracked);
-        // Named variables live until their scope ends, which matters for values
-        // with release hooks (a Task cancels its work), so they cross every
-        // suspension; compiler temporaries cross only while live.
-        let named = MirLocalSet.new();
-        for local in self.original.locals { if !local.name.starts_with("__") { named.add(local.id); } }
-        let entry_live = MirLocalSet.new(); entry_live.extend(named);
+        // Locals cross a suspension only while live, as values are released after
+        // their last use; an awaited Task is used again after its await resumes.
+        let entry_live = MirLocalSet.new();
         if let analysis = liveness[self.original.entry_block.id] { entry_live.extend(analysis.live_in); }
         let start_ops = Vec<MirOp>.new(); self.load_locals(start_ops, entry_live);
         blocks[start_block.id] = MirBlock { id: start_block, ops: start_ops, terminator: MirTerm.branch(MirBranchData { target: rewriter.block(self.original.entry_block) }) };
@@ -147,7 +155,7 @@ struct MirAsyncBuilder {
                 var start = 0;
                 if seg > 0 {
                     let point = list[seg-1];
-                    let live = self.live_after(original, point.index, liveness, tracked); live.extend(named);
+                    let live = self.live_after(original, point.index, liveness, tracked);
                     if let result = point.call.result { live.remove(result); }
                     self.load_locals(ops, live); self.fixup(point, ops); start = point.index+1;
                 }
@@ -156,8 +164,8 @@ struct MirAsyncBuilder {
                 var term = MirTerm.return_stmt(MirReturnData { value: nil });
                 if seg < list.len() { let point = list[seg]; self.await_call(point, ops);
                     ops.push(MirOp.store(MirStoreData { place: self.field("$state", self.int_type()), value: mir_constant(MirConstantKind.int(), MirScalar.integer(f"{point.global_index+1}"), self.int_type()) }));
-                    let live = self.live_after(original, point.index, liveness, tracked); live.extend(named);
-                    if let result = point.call.result { if !named.contains(result) { live.remove(result); } }
+                    let live = self.live_after(original, point.index, liveness, tracked);
+                    if let result = point.call.result { live.remove(result); }
                     self.store_locals(ops, live); ops.push(MirOp.task_yield());
                 } else {
                     if let original_term = original.terminator { switch original_term {

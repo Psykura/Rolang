@@ -1019,6 +1019,10 @@ pub struct MirFunctionBuilder {
                 self.emit(MirOp.extract_field(MirExtractFieldData { result: handle, aggregate: operand, field_name: "handle", field_index: 0, result_type: ptr_type }));
                 var result: MirLocalId? = nil; if data.type_id != self.void_type() { result = self.temp(data.type_id); }
                 self.static_call(result, "__rolang_await_task", [self.copy(handle, ptr_type)], data.type_id);
+                // Releasing a Task cancels it, so the awaited value stays alive until the
+                // await resumes: this later read makes it cross the suspension.
+                let alive = self.temp(ptr_type);
+                self.emit(MirOp.extract_field(MirExtractFieldData { result: alive, aggregate: operand, field_name: "handle", field_index: 0, result_type: ptr_type }));
                 if let local = result { return self.copy(local, data.type_id); } return mir_unit(data.type_id);
             }
             let value = self.coerce(operand, data.type_id); self.emit(MirOp.task_yield()); return value;
