@@ -64,7 +64,7 @@ Dict keys and Set elements of struct or payload-enum types compare by content
 when the type is Hashable, defining `hash() -> u64` and `__eq__` (equal values
 must hash alike; `hash_combine` mixes field hashes). Without them such keys
 compare by identity. Numbers, Bool, String and Vec of Hashable elements are
-Hashable. A generic type's hash method must be used somewhere to be emitted.
+Hashable, as are optionals of Hashable types.
 
 Collections own their managed elements. Assignment shares the container.
 Snapshots copy bindings while retaining referenced objects; they are shallow.
@@ -141,8 +141,8 @@ all 208 valid and rejects all 501 invalid documents of the toml-test 1.0 suite.
 
 ## Networking
 
-`resolve(host)` returns numeric addresses, IPv4 first, using the system
-resolver; it blocks the scheduler thread while the resolver runs.
+`await resolve(host)` returns numeric addresses, IPv4 first. The system
+resolver runs on a helper thread, so other tasks continue meanwhile.
 `AsyncStream.connect(host, port)` resolves names and tries each address.
 `UdpSocket` sends and receives datagrams with their sender. Errors are errno
 values; `os_error_message(code)` gives the system's text.
@@ -152,7 +152,8 @@ std.http speaks HTTP/1.1 over these streams. `http_get`/`http_post` and
 `HttpError` with a message. `HttpServer.serve(handler)` runs an async handler
 for every request, each connection in its own task, with keep-alive. Bodies
 are binary-safe strings framed by Content-Length or chunked encoding; headers
-are limited to 64 KiB and bodies to a configurable size. https needs TLS,
+are limited to 64 KiB and bodies to a configurable size. A server closes connections whose request does not
+arrive within `idle_timeout` (60 seconds). https needs TLS,
 which is not available yet. `with_timeout(task, duration)` in std.time bounds
 any task.
 

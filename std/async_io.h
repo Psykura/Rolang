@@ -8,6 +8,9 @@
 
 ROLANG_INTERNAL void rl_stream_release(AsyncStream* stream);
 ROLANG_INTERNAL void rl_async_ready(TaskHandle* task);
+ROLANG_INTERNAL void rl_resolve_release(TaskHandle* task);
+TaskHandle* rt_net_resolve_start(void* host);
+void* rt_net_resolve_result(TaskHandle* task, int32_t* error);
 ROLANG_INTERNAL AsyncStream* rl_stream_adopt(int fd);
 TaskHandle* rt_async_connect_start(void* address, int32_t port);
 int32_t rt_async_listener_bind(void* address, int32_t port, int32_t backlog, void** out);
@@ -21,7 +24,6 @@ int32_t rt_async_stream_shutdown(void* ptr);
 TaskHandle* rt_async_read_start(void* ptr, int32_t limit);
 TaskHandle* rt_async_write_start(void* ptr, void* string);
 void* rt_async_read_data(TaskHandle* task);
-void* rt_net_resolve(void* host, int32_t* error);
 int32_t rt_udp_bind(void* address, int32_t port, void** out);
 TaskHandle* rt_udp_send_start(void* socket, void* data, void* address, int32_t port);
 TaskHandle* rt_udp_receive_start(void* socket, int32_t limit);

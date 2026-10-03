@@ -193,7 +193,9 @@ pub struct Monomorphizer {
         } } }
     }
     pub def run() -> MonomorphizationResult {
-        self.seed(); var fi = 0; var si = 0; var ei = 0; var count = 0; var over_budget = false;
+        self.seed();
+        for required in self.arena.required_methods { self.require_method(required.0, required.1); }
+        var fi = 0; var si = 0; var ei = 0; var count = 0; var over_budget = false;
         while fi < self.function_queue.len() || si < self.struct_queue.len() || ei < self.enum_queue.len() {
             while fi < self.function_queue.len() { let key = self.function_queue[fi]; fi += 1; if !self.functions.contains(key.key()) { count += 1; if count > self.max_instantiations { over_budget = true; break; } self.instantiate(0, key); } }
             if over_budget { break; }
@@ -325,7 +327,7 @@ pub struct Monomorphizer {
                     default: {}
                 }
                 return self.arena.add(HirForm.literal(HirLiteralData { type_id: new_type, value: data.value, kind: data.kind }));
-            case .call(let data): return self.specialize_call(data, subst, new_type);
+            case .call(let data): return self.specialize_call(id, data, subst, new_type);
             case .method_call(let data): return self.specialize_method_call(id, data, subst, new_type);
             case .param, .field, .var_decl: self.discover(new_type);
             case .enum_case(let data):
@@ -378,8 +380,15 @@ pub struct Monomorphizer {
     def operator_method(data: HirBinaryOpData, subst: TypeSubstitution, new_type: TypeId) -> HirId? {
         let original = self.arena.type_of(data.left, self.types.error_type);
         if !self.types.has_type_variables(original) { return nil; }
-        guard let info = self.types.get_type(subst.apply(original, self.types)) else { return nil; }
-        switch info.data { case .struct_type | .enum_type: {} default: return nil; }
+        let concrete = subst.apply(original, self.types);
+        guard let info = self.types.get_type(concrete) else { return nil; }
+        switch info.data {
+            case .struct_type | .enum_type: {}
+            case .optional(let inner):
+                if data.op.equals("==") || data.op.equals("!=") { return self.optional_equality(self.clone_node(data.left, subst), self.clone_node(data.right, subst), data.op, inner, new_type); }
+                return nil;
+            default: return nil;
+        }
         let method = to_method_name(data.op);
         if method.len() == 0 { return nil; }
         var receiver = data.left; var argument = data.right; var name = method; var negate = false;
@@ -401,10 +410,53 @@ pub struct Monomorphizer {
         let params = Vec<TypeId>.new(); for param in func.params { params.push(self.specialized_type(self.arena.type_of(param, self.types.error_type), subst)); }
         self.types.make_function(params, result ?? self.specialized_type(func.return_type, subst), func.is_async)
     }
-    def specialize_call(data: HirCallData, subst: TypeSubstitution, new_type: TypeId) -> HirId {
+    // `a == b` on optionals of `inner`: both nil, or both present with equal values.
+    def optional_equality(left: HirId, right: HirId, op: String, inner: TypeId, bool_type: TypeId) -> HirId {
+        let x = self.symbols.create_symbol("__lhs", SymbolKind.variable(), Namespace.value());
+        let y = self.symbols.create_symbol("__rhs", SymbolKind.variable(), Namespace.value());
+        let unused = self.symbols.create_symbol("__rhs", SymbolKind.variable(), Namespace.value());
+        let x_ref = self.arena.add(HirForm.var_ref(HirVarData { type_id: inner, name: x.name, symbol_id: x.id }));
+        let y_ref = self.arena.add(HirForm.var_ref(HirVarData { type_id: inner, name: y.name, symbol_id: y.id }));
+        var values = self.arena.add(HirForm.binary_op(HirBinaryOpData { type_id: bool_type, left: x_ref, op: "==", right: y_ref }));
+        if let info = self.types.get_type(inner) { switch info.data {
+            case .struct_type | .enum_type:
+                let label: String? = nil;
+                values = self.specialize_method_call(x_ref, HirMethodCallData { type_id: bool_type, receiver: x_ref, method_name: "__eq__",
+                    arguments: [(label, y_ref)], method_symbol: nil, is_static: false }, TypeSubstitution.new(), bool_type);
+            case .optional(let nested): values = self.optional_equality(x_ref, y_ref, "==", nested, bool_type);
+            default: {}
+        } }
+        let equal = self.arena.add(HirForm.literal(HirLiteralData { type_id: bool_type, value: HirValue.boolean(true), kind: "bool" }));
+        let unequal = self.arena.add(HirForm.literal(HirLiteralData { type_id: bool_type, value: HirValue.boolean(false), kind: "bool" }));
+        // The right operand appears in both branches of the left match; exactly one runs.
+        let when_left = self.arena.add(HirForm.optional_match(HirOptionalMatchData { type_id: bool_type, scrutinee: right, inner_type: inner, some_binding: y.id, some_expr: values, none_expr: unequal }));
+        let when_nil = self.arena.add(HirForm.optional_match(HirOptionalMatchData { type_id: bool_type, scrutinee: right, inner_type: inner, some_binding: unused.id, some_expr: unequal, none_expr: equal }));
+        let result = self.arena.add(HirForm.optional_match(HirOptionalMatchData { type_id: bool_type, scrutinee: left, inner_type: inner, some_binding: x.id, some_expr: when_left, none_expr: when_nil }));
+        if op.equals("!=") { return self.arena.add(HirForm.unary_op(HirUnaryOpData { type_id: bool_type, op: "!", operand: result })); }
+        result
+    }
+    // Instantiates the generic extension method `sid` for `type`, as a call on it would.
+    def require_method(type: TypeId, sid: SymbolId) -> Void {
+        guard let original_id = self.originals[sid.id] else { return; }
+        guard let original = self.func(original_id) else { return; }
+        guard let info = self.types.get_type(type) else { return; }
+        var arguments = Vec<TypeId>.new();
+        switch info.data { case .struct_type(let d): arguments = d.type_args.to_vec(); case .enum_type(let d): arguments = d.type_args.to_vec(); default: return; }
+        self.discover(type);
+        let key = InstanceKey.new(sid, arguments); self.enqueue(0, key);
+        self.special_symbol(key, mangle_name(original.name, key.type_args, self.types));
+    }
+    def specialize_call(id: HirId, data: HirCallData, subst: TypeSubstitution, new_type: TypeId) -> HirId {
         var callee = self.clone_node(data.callee, subst); let args = self.arguments(data.arguments, subst); var sid = data.callee_symbol;
         if let original_sid = sid {
-            var type_args = self.infer_call(original_sid, self.inference_arguments(data.arguments, subst), subst.apply(data.type_id, self.types));
+            // Explicit type arguments seed the inference.
+            var initial: Dict<String, TypeId>? = nil;
+            if let explicit = self.arena.type_arguments[id.id] {
+                let seeded = Dict<String, TypeId>.new();
+                for pair in explicit.entries() { seeded[pair.key] = subst.apply(pair.value, self.types); }
+                initial = seeded;
+            }
+            var type_args = self.infer_call(original_sid, self.inference_arguments(data.arguments, subst), subst.apply(data.type_id, self.types), initial);
             var invalid = false; for type in type_args { if self.types.is_error(type) { invalid = true; } }
             if type_args.len() > 0 && invalid {
                 var name = "<generic call>"; if let id = self.originals[original_sid.id] { if let func = self.func(id) { name = func.name; } }
@@ -429,7 +481,18 @@ pub struct Monomorphizer {
         nil
     }
     def specialize_method_call(id: HirId, data: HirMethodCallData, subst: TypeSubstitution, new_type: TypeId) -> HirId {
-        let receiver = self.clone_node(data.receiver, subst); let args = self.arguments(data.arguments, subst); var method_symbol = data.method_symbol;
+        let receiver = self.clone_node(data.receiver, subst);
+        // `value.hash()` on an optional, from generic code: the value's hash, or 0 for nil.
+        if data.method_name.equals("hash") && !data.is_static && data.arguments.len() == 0 {
+            if let inner = self.types.get_optional_inner(self.arena.type_of(receiver, self.types.error_type)) {
+                let bound = self.symbols.create_symbol("__value", SymbolKind.variable(), Namespace.value());
+                let value_ref = self.arena.add(HirForm.var_ref(HirVarData { type_id: inner, name: bound.name, symbol_id: bound.id }));
+                let some = self.specialize_method_call(value_ref, HirMethodCallData { type_id: new_type, receiver: value_ref, method_name: "hash",
+                    arguments: Vec<(String?, HirId)>.new(), method_symbol: nil, is_static: false }, TypeSubstitution.new(), new_type);
+                let none = self.arena.add(HirForm.literal(HirLiteralData { type_id: new_type, value: HirValue.integer("0"), kind: "int" }));
+                return self.arena.add(HirForm.optional_match(HirOptionalMatchData { type_id: new_type, scrutinee: receiver, inner_type: inner, some_binding: bound.id, some_expr: some, none_expr: none }));
+            }
+        } let args = self.arguments(data.arguments, subst); var method_symbol = data.method_symbol;
         var generic_symbol = data.method_symbol;
         if let known = data.method_symbol {} else {
             // A protocol requirement called on a type parameter now has a concrete receiver.

@@ -79,6 +79,7 @@ pub struct TypeTable {
         f"{fallback_prefix}#{id.id}"
     }
     pub def get_builtin(name: String) -> TypeId? { self.builtins[name] }
+    pub def type_count() -> i32 { self.types.len() }
     pub def is_error(type_id: TypeId) -> Bool { type_id == self.error_type }
     pub def is_never(type_id: TypeId) -> Bool { type_id == self.never_type }
 

@@ -53,6 +53,11 @@ pub struct TypeCheckResult {
     pub let optional_comparisons: Dict<i32, Bool>;
     // Member accesses calling a static protocol requirement through a type parameter, `T.make()`.
     pub let static_requirement_calls: Dict<i32, Bool>;
+    // Explicit type arguments of calls, `f<i32>(x)`, by call node.
+    pub let explicit_type_args: Dict<i32, Dict<String, TypeId>>;
+    // Generic extension methods to instantiate for types that are not otherwise
+    // calling them: Hashable functions of possible Dict keys.
+    pub let required_methods: Vec<(TypeId, SymbolId)>;
 
     pub static def new(type_table: TypeTable) -> TypeCheckResult {
         TypeCheckResult {
@@ -67,7 +72,7 @@ pub struct TypeCheckResult {
             intrinsic_values: Dict<i32, i64>.with_capacity(16, 0),
             propagation_error_types: Dict<i32, TypeId>.with_capacity(16, 0),
             loop_element_types: Dict<i32, TypeId>.with_capacity(16, 0),
-            optional_comparisons: Dict<i32, Bool>.with_capacity(16, 0), static_requirement_calls: Dict<i32, Bool>.new()
+            optional_comparisons: Dict<i32, Bool>.with_capacity(16, 0), static_requirement_calls: Dict<i32, Bool>.new(), explicit_type_args: Dict<i32, Dict<String, TypeId>>.new(), required_methods: Vec<(TypeId, SymbolId)>.new()
         }
     }
 

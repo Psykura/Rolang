@@ -958,6 +958,9 @@ struct ExpressionCursor {
             } else if depth == 0 {
                 if word.equals(".") {
                     if saw_generic { return true; }
+                } else if word.equals("(") && saw_generic && self.tokens[look - 1].text.ends_with(">") {
+                    // `name<T>(...)` calls a generic function with explicit type arguments.
+                    return true;
                 } else {
                     switch token.kind {
                         case .identifier: {}
@@ -985,6 +988,15 @@ struct ExpressionCursor {
     }
     def parse_typed_primary(start: Span) -> NodeId? {
         guard let type_name = self.parse_named_type() else { return nil; }
+        if self.spelling().equals("(") {
+            guard let node = self.arena.get(type_name) else { return nil; }
+            switch node.form {
+                case .named_type(let named):
+                    if named.module_path.len() > 0 { self.fail("unqualified function name before type arguments"); return nil; }
+                    return self.make(NodeForm.identifier(IdentifierAst { name: named.name, type_args: named.generic_args }), start);
+                default: self.fail("function name"); return nil;
+            }
+        }
         if self.match_text("{") {
             let arguments = Vec<NodeId>.new();
             if !self.match_text("}") {

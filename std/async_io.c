@@ -39,8 +39,11 @@ void rl_stream_release(AsyncStream* stream) {
     }
 }
 
+static void rl_resolve_ready(TaskHandle* task);
+
 void rl_async_ready(TaskHandle* task) {
 #if defined(__unix__) || defined(__APPLE__)
+    if (task->native_kind == 8) { rl_resolve_ready(task); return; }
     if (task->native_kind == 4) {
         int error = 0;
         socklen_t size = sizeof(error);
@@ -289,65 +292,6 @@ static void* rl_address_text(struct sockaddr* addr, int32_t* port) {
 }
 #endif
 
-/* Numeric addresses for `host`, one per line, IPv4 first; on failure the
- * resolver's message and *error set to a nonzero getaddrinfo code. Blocks the
- * calling thread while the resolver runs. */
-void* rt_net_resolve(void* host_string, int32_t* error) {
-    *error = 0;
-#if defined(__unix__) || defined(__APPLE__)
-    StringVal host = rt_string_obj_value(host_string);
-    char name[256];
-    if (host.len <= 0 || host.len >= (int64_t)sizeof(name) || memchr(host.data, 0, (size_t)host.len)) {
-        *error = EAI_NONAME;
-        const char* message = "invalid host name";
-        char* copy = malloc(strlen(message) + 1); strcpy(copy, message);
-        return rl_string_handle_from_value((StringVal){copy, (int64_t)strlen(message)});
-    }
-    memcpy(name, host.data, (size_t)host.len); name[host.len] = 0;
-    struct addrinfo hints; memset(&hints, 0, sizeof(hints));
-    hints.ai_socktype = SOCK_STREAM;
-    struct addrinfo* list = NULL;
-    int status = getaddrinfo(name, NULL, &hints, &list);
-    if (status != 0) {
-        *error = status;
-        const char* message = gai_strerror(status);
-        size_t size = strlen(message);
-        char* copy = malloc(size + 1); memcpy(copy, message, size + 1);
-        return rl_string_handle_from_value((StringVal){copy, (int64_t)size});
-    }
-    size_t capacity = 64, used = 0;
-    char* out = malloc(capacity);
-    if (!out) rt_panic("resolver allocation failed");
-    for (int family = 0; family < 2; family++) {
-        for (struct addrinfo* item = list; item; item = item->ai_next) {
-            int wanted = family == 0 ? AF_INET : AF_INET6;
-            if (item->ai_family != wanted) continue;
-            char text[INET6_ADDRSTRLEN] = "";
-            if (wanted == AF_INET) inet_ntop(AF_INET, &((struct sockaddr_in*)item->ai_addr)->sin_addr, text, sizeof(text));
-            else inet_ntop(AF_INET6, &((struct sockaddr_in6*)item->ai_addr)->sin6_addr, text, sizeof(text));
-            size_t size = strlen(text);
-            if (!size) continue;
-            /* getaddrinfo may list an address once per protocol. */
-            int seen = 0;
-            for (size_t at = 0; at < used;) {
-                size_t end = at; while (end < used && out[end] != '\n') end++;
-                if (end - at == size && memcmp(out + at, text, size) == 0) { seen = 1; break; }
-                at = end + 1;
-            }
-            if (seen) continue;
-            while (used + size + 2 > capacity) { capacity *= 2; out = realloc(out, capacity); if (!out) rt_panic("resolver allocation failed"); }
-            if (used) out[used++] = '\n';
-            memcpy(out + used, text, size); used += size;
-        }
-    }
-    freeaddrinfo(list);
-    out[used] = 0;
-    return rl_string_handle_from_value((StringVal){out, (int64_t)used});
-#else
-    (void)host_string; *error = -1; return rl_string_handle_from_value((StringVal){NULL, 0});
-#endif
-}
-
 /* A nonblocking datagram socket bound to address:port (port 0: any port). */
 int32_t rt_udp_bind(void* address, int32_t port, void** out) {
     *out = NULL;
@@ -428,3 +372,165 @@ void* rt_os_error_message(int32_t code) {
 }
 
 int32_t rt_errno_host_unreachable(void) { return EHOSTUNREACH; }
+
+/* ---- Name resolution on a helper thread ----
+ *
+ * getaddrinfo blocks, so it runs on a detached thread that writes its result
+ * into a job and then a byte into a pipe; the scheduler polls the pipe's read
+ * end like any socket. The job is shared: whichever of the task and the thread
+ * finishes with it last frees it, so a cancelled lookup cannot touch freed
+ * memory. The thread uses no Rolang objects. */
+#if defined(__unix__) || defined(__APPLE__)
+#include <pthread.h>
+typedef struct ResolveJob {
+    pthread_mutex_t lock;
+    int owners;                /* task and thread */
+    char host[256];
+    int error;                 /* getaddrinfo status, 0 on success */
+    char* text;                /* addresses, one per line, or the error message */
+    size_t text_len;
+    int notify;                /* pipe write end, owned by the thread */
+} ResolveJob;
+
+static void resolve_job_release(ResolveJob* job) {
+    pthread_mutex_lock(&job->lock);
+    int left = --job->owners;
+    pthread_mutex_unlock(&job->lock);
+    if (left) return;
+    pthread_mutex_destroy(&job->lock);
+    free(job->text);
+    free(job);
+}
+
+static ResolveJob* resolve_job_of(TaskHandle* task) {
+    ResolveJob* job; memcpy(&job, task->peer, sizeof(job)); return job;
+}
+
+static char* resolve_copy(const char* text, size_t* size) {
+    *size = strlen(text);
+    char* copy = malloc(*size + 1);
+    if (copy) memcpy(copy, text, *size + 1);
+    return copy;
+}
+
+static void* resolve_thread(void* argument) {
+    ResolveJob* job = argument;
+    struct addrinfo hints; memset(&hints, 0, sizeof(hints));
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo* list = NULL;
+    int status = getaddrinfo(job->host, NULL, &hints, &list);
+    if (status != 0) {
+        job->error = status;
+        job->text = resolve_copy(gai_strerror(status), &job->text_len);
+    } else {
+        size_t capacity = 64, used = 0;
+        char* out = malloc(capacity);
+        for (int family = 0; out && family < 2; family++) {
+            for (struct addrinfo* item = list; item; item = item->ai_next) {
+                int wanted = family == 0 ? AF_INET : AF_INET6;
+                if (item->ai_family != wanted) continue;
+                char text[INET6_ADDRSTRLEN] = "";
+                if (wanted == AF_INET) inet_ntop(AF_INET, &((struct sockaddr_in*)item->ai_addr)->sin_addr, text, sizeof(text));
+                else inet_ntop(AF_INET6, &((struct sockaddr_in6*)item->ai_addr)->sin6_addr, text, sizeof(text));
+                size_t size = strlen(text);
+                if (!size) continue;
+                int seen = 0;
+                for (size_t at = 0; at < used;) {
+                    size_t end = at; while (end < used && out[end] != '\n') end++;
+                    if (end - at == size && memcmp(out + at, text, size) == 0) { seen = 1; break; }
+                    at = end + 1;
+                }
+                if (seen) continue;
+                while (used + size + 2 > capacity) { capacity *= 2; char* grown = realloc(out, capacity); if (!grown) { free(out); out = NULL; break; } out = grown; }
+                if (!out) break;
+                if (used) out[used++] = '\n';
+                memcpy(out + used, text, size); used += size;
+            }
+        }
+        freeaddrinfo(list);
+        if (out) { out[used] = 0; job->text = out; job->text_len = used; }
+        else { job->error = EAI_MEMORY; job->text = resolve_copy("out of memory", &job->text_len); }
+    }
+    char byte = 1;
+    ssize_t written = write(job->notify, &byte, 1);
+    (void)written;
+    close(job->notify);
+    resolve_job_release(job);
+    return NULL;
+}
+#endif
+
+/* Starts resolving `host`; numeric addresses complete at once. The task's
+ * result is 0, or -1 when the resolver failed (see rt_net_resolve_result). */
+TaskHandle* rt_net_resolve_start(void* host_string) {
+    TaskHandle* task = rl_task_new(); task->native_kind = 8;
+#if defined(__unix__) || defined(__APPLE__)
+    StringVal host = rt_string_obj_value(host_string);
+    ResolveJob* job = calloc(1, sizeof(*job));
+    if (!job) rt_panic("resolver allocation failed");
+    pthread_mutex_init(&job->lock, NULL);
+    job->owners = 1;
+    memcpy(task->peer, &job, sizeof(job));
+    if (host.len <= 0 || host.len >= (int64_t)sizeof(job->host) || memchr(host.data, 0, (size_t)host.len)) {
+        job->error = EAI_NONAME; job->text = resolve_copy("invalid host name", &job->text_len);
+        rl_task_native_result(task, -1); return task;
+    }
+    memcpy(job->host, host.data, (size_t)host.len);
+    unsigned char numeric[sizeof(struct in6_addr)];
+    if (inet_pton(AF_INET, job->host, numeric) == 1 || inet_pton(AF_INET6, job->host, numeric) == 1) {
+        job->text = resolve_copy(job->host, &job->text_len);
+        rl_task_native_result(task, 0); return task;
+    }
+    int fds[2];
+    if (pipe(fds) < 0) { job->error = EAI_SYSTEM; job->text = resolve_copy(strerror(errno), &job->text_len); rl_task_native_result(task, -1); return task; }
+    (void)fcntl(fds[0], F_SETFD, FD_CLOEXEC); (void)fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+    AsyncStream* stream = malloc(sizeof(*stream));
+    if (!stream) rt_panic("resolver allocation failed");
+    stream->fd = fds[0]; stream->refs = 1; task->stream = stream;
+    job->notify = fds[1];
+    job->owners = 2;
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, resolve_thread, job) != 0) {
+        job->owners = 1; close(fds[1]);
+        job->error = EAI_SYSTEM; job->text = resolve_copy("cannot start the resolver thread", &job->text_len);
+        rl_task_native_result(task, -1); return task;
+    }
+    pthread_detach(thread);
+#else
+    (void)host_string; rl_task_native_result(task, -1);
+#endif
+    return task;
+}
+
+static void rl_resolve_ready(TaskHandle* task) {
+#if defined(__unix__) || defined(__APPLE__)
+    char byte;
+    ssize_t got = read(task->stream->fd, &byte, 1);
+    (void)got;
+    rl_task_native_result(task, resolve_job_of(task)->error ? -1 : 0);
+#else
+    (void)task;
+#endif
+}
+
+void* rt_net_resolve_result(TaskHandle* task, int32_t* error) {
+    rt_task_borrow_result(task);
+#if defined(__unix__) || defined(__APPLE__)
+    ResolveJob* job = resolve_job_of(task);
+    *error = job->error;
+    char* copy = malloc(job->text_len + 1);
+    if (!copy) rt_panic("resolver allocation failed");
+    memcpy(copy, job->text ? job->text : "", job->text_len + 1);
+    return rl_string_handle_from_value((StringVal){copy, (int64_t)job->text_len});
+#else
+    *error = -1; return rl_string_handle_from_value((StringVal){NULL, 0});
+#endif
+}
+
+void rl_resolve_release(TaskHandle* task) {
+#if defined(__unix__) || defined(__APPLE__)
+    resolve_job_release(resolve_job_of(task));
+#else
+    (void)task;
+#endif
+}

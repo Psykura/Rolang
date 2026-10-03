@@ -69,6 +69,7 @@ pub struct CheckerState {
             current_function_return: nil, current_self_type: nil, expected_type: nil,
             in_async_function: false, in_unsafe: false, projection_equalities: Dict<String, TypeId>.with_capacity(4, 1), computing_constants: Dict<i32, Bool>.with_capacity(4, 0), rigid_generics: Dict<String, Bool>.with_capacity(4, 1), synthetic_lambda_types: Dict<i32, TypeId>.with_capacity(4, 0), infer_callback: nil, statement_callback: nil, current_node: nil, current_file: nil, default_arguments: Dict<i32, Bool>.new(), reported: Dict<String, Bool>.new(), where_bounds: Dict<String, Vec<TypeId>>.new() };
         // Inference errors are located at the expression being checked.
+        state.conformance_checker.node_symbols = resolution.node_symbols;
         state.generic_inference.error_reporter = (kind: TypeErrorKind, message: String) -> { state.error(kind, message); };
         state.generic_inference.extra_bounds = (name: String) -> Vec<TypeId> { state.where_bounds[name] ?? Vec<TypeId>.new() };
         state
@@ -372,6 +373,24 @@ pub struct CheckerState {
             }
             default: {}
         } } }
+    }
+    // Whether a method's `where T: P` clauses hold for `mapping`'s arguments.
+    pub def method_where_holds(method: SymbolId, mapping: Dict<String, TypeId>) -> Bool {
+        guard let symbol = self.symbol_table.get_symbol(method) else { return false; }
+        guard let decl = self.function(symbol.decl_node) else { return false; }
+        for constraint_id in decl.constraints { if let node = self.arena.get(constraint_id) { switch node.form { case .constraint(let constraint):
+            if !constraint.kind.equals("conforms") { continue; }
+            guard let subject = constraint.subject else { continue; }
+            var param = "";
+            switch subject { case .type_ref(let ref): if let child = self.arena.get(ref) { switch child.form { case .named_type(let named): param = named.name; default: {} } } case .name(let value): param = value; }
+            guard let concrete = mapping[param] else { continue; }
+            for bound in constraint.bounds {
+                let protocol = self.resolve_type(bound);
+                if self.type_table.is_protocol(protocol) && !self.satisfies_bound(concrete, protocol) { return false; }
+            }
+            default: {}
+        } } }
+        true
     }
     // Whether `concrete` meets a protocol bound, as a conforming type or a type
     // parameter bounded by the protocol or one inheriting its requirements.

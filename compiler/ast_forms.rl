@@ -77,6 +77,8 @@ pub struct LiteralAst {
 }
 pub struct IdentifierAst {
     pub var name: String;
+    // Explicit type arguments of a generic function: `parse<i32>(text)`.
+    pub var type_args: Vec<NodeId> = Vec<NodeId>.new();
 }
 pub struct TypeReferenceAst {
     pub var type_name: NodeId?;

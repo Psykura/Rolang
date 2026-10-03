@@ -17,7 +17,8 @@ pub extern "C" def rt_async_take_stream(task: RawPtr) -> RawPtr;
 pub extern "C" def rt_async_listener_bind(address: String, port: i32, backlog: i32, out: RawPtr) -> i32;
 pub extern "C" def rt_async_listener_port(listener: RawPtr) -> i32;
 pub extern "C" def rt_async_accept_start(listener: RawPtr) -> RawPtr;
-pub extern "C" def rt_net_resolve(host: String, error: RawPtr) -> RawPtr;
+pub extern "C" def rt_net_resolve_start(host: String) -> RawPtr;
+pub extern "C" def rt_net_resolve_result(task: RawPtr, error: RawPtr) -> RawPtr;
 pub extern "C" def rt_udp_bind(address: String, port: i32, out: RawPtr) -> i32;
 pub extern "C" def rt_udp_send_start(socket: RawPtr, data: String, address: String, port: i32) -> RawPtr;
 pub extern "C" def rt_udp_receive_start(socket: RawPtr, limit: i32) -> RawPtr;
@@ -38,13 +39,16 @@ pub def os_error_message(code: i32) -> String {
     unsafe { return String.from_handle(rt_os_error_message(code)); }
 }
 
-// Numeric addresses for a host name or address text, IPv4 first. Blocks the
-// scheduler thread while the system resolver runs; the error is its message.
-pub def resolve(host: String) -> Result<Vec<String>, String> {
+// Numeric addresses for a host name or address text, IPv4 first. The system
+// resolver runs on a helper thread, so other tasks keep running; the error is
+// the resolver's message.
+pub def resolve(host: String) async -> Result<Vec<String>, String> {
     unsafe {
+        let lookup = Task<i32>.from_handle(rt_net_resolve_start(host));
+        let status = await lookup;
         var code: i32 = 0;
-        let text = String.from_handle(rt_net_resolve(host, code as RawPtr));
-        if code != 0 { return Result.err(error: text); }
+        let text = String.from_handle(rt_net_resolve_result(lookup.raw_handle(), code as RawPtr));
+        if code != 0 || status != 0 { return Result.err(error: text); }
         if text.len() == 0 { return Result.err(error: "no addresses"); }
         return Result.ok(value: text.split("\n"));
     }
@@ -57,7 +61,7 @@ pub struct AsyncStream {
     // EHOSTUNREACH; resolve() reports the resolver's reason.
     pub static def connect(host: String, port: i32) async -> Result<AsyncStream, i32> {
         var addresses = Vec<String>.new();
-        switch resolve(host) {
+        switch await resolve(host) {
             case .ok(let found): addresses = found;
             case .err(let message): return Result.err(error: host_unreachable());
         }

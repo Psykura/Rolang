@@ -240,7 +240,18 @@ struct LlvmModuleEmitter {
         if let type_name = name {
             let candidate = self.resolve(type_name + "_" + method);
             if self.signatures.contains(candidate) { return candidate; }
-        } nil
+        }
+        // Generic extension methods are instantiated under their own names; find
+        // the instance whose self is `type_id` and whose original is `method`.
+        for i in 0..<self.result.program.functions.len() {
+            let func = self.result.program.functions[i];
+            if func.args.len() == 0 || func.args[0].type_id != type_id || !func.args[0].name.equals("self") { continue; }
+            guard let symbol = func.symbol_id else { continue; }
+            var original = symbol;
+            while true { if let origin = self.result.symbol_table.specialization_origin[original.id] { original = origin.original_id; } else { break; } }
+            if let source = self.result.symbol_table.get_symbol(original) { if source.name.equals(method) { return self.function_names[i]; } }
+        }
+        nil
     }
     def emit_witnesses(arena: AstArena) -> Void {
         let checker = ConformanceChecker.new(arena, self.result.type_table, self.result.symbol_table);

@@ -36,11 +36,13 @@ pub struct ConformanceChecker {
     // requirement's own method generic names, which are not placeholders.
     var bindings: Dict<String, TypeId>;
     var method_generics: FrozenVec<String>;
+    // Resolved symbols of type annotations; names are looked up only without one.
+    pub var node_symbols: Dict<i32, SymbolId>;
     pub static def new(arena: AstArena, type_table: TypeTable, symbol_table: SymbolTable) -> ConformanceChecker {
         ConformanceChecker { arena, type_table, symbol_table,
             cache: Dict<String, ConformanceResult>.with_capacity(16, 1), extensions: Vec<ConformanceExtension>.new(),
             generic_scope: Dict<String, TypeId>.with_capacity(4, 1), type_scope: Dict<String, TypeId>.with_capacity(4, 1),
-            bindings: Dict<String, TypeId>.with_capacity(4, 1), method_generics: FrozenVec<String>.empty() }
+            bindings: Dict<String, TypeId>.with_capacity(4, 1), method_generics: FrozenVec<String>.empty(), node_symbols: Dict<i32, SymbolId>.new() }
     }
     pub def register_extension(concrete: TypeId, protocol: TypeId, symbol: SymbolId) -> Void {
         var found = false;
@@ -223,6 +225,16 @@ pub struct ConformanceChecker {
             case .primitive(let primitive):
                 integer = primitive.integer_width() > 0; numeric = integer || primitive.is_float();
                 switch primitive { case .bool_type: boolean = true; default: {} }
+            case .optional(let inner):
+                // T? compares and hashes like T, with nil equal only to nil.
+                if !requirement.name.equals("__eq__") && !requirement.name.equals("__ne__") && !requirement.name.equals("hash") { return nil; }
+                let saved = self.bindings["Self"];
+                self.bindings["Self"] = inner;
+                let scratch = Vec<String>.new();
+                let found = self.find_func_witness(inner, requirement, scratch);
+                if let previous = saved { self.bindings["Self"] = previous; }
+                if let witness = found { return WitnessEntry { requirement_name: requirement.name, implementation_symbol: nil, implementation_name: requirement.name, is_method: true }; }
+                return nil;
             default: return nil;
         }
         if requirement.is_async || requirement.generic_params.len() > 0 { return nil; }
@@ -407,7 +419,8 @@ pub struct ConformanceChecker {
                     if let scoped = self.generic_scope[data.name] { return scoped; }
                     if let scoped = self.type_scope[data.name] { return scoped; }
                 }
-                var symbol_id = self.symbol_table.get_builtin(data.name);
+                var symbol_id = self.node_symbols[type_node.id];
+                if let resolved = symbol_id {} else { symbol_id = self.symbol_table.get_builtin(data.name); }
                 if let builtin = symbol_id {} else { symbol_id = self.symbol_table.get_type_symbol(data.name); }
                 let args = Vec<TypeId>.new();
                 for arg in data.generic_args { args.push(self.resolve_ast_type(arg)); }

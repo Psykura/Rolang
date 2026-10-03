@@ -310,6 +310,9 @@ of generic parameters, and calls through a constrained type parameter infer them
 from the arguments.
 
 `Self` in a requirement is the conforming type (`def beats(other: Self) -> Bool;`).
+A generic function's type arguments may be written at the call, `parse<i32>(text)`
+or `decode_json<User>(text)`, which is needed when they appear only in the body.
+Optionals are Equatable and Hashable when their value type is.
 A requirement may be static (`static def make(n: i32) -> Self;`); generic code
 calls it on the type parameter, `T.make(1)`. Static methods of builtin types are
 called the same way: `i32.parse_or(text, 0)`.

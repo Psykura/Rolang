@@ -1,0 +1,5 @@
+localhost: true
+127.0.0.1: true
+::1: true
+no-such-host.invalid: error
+done

@@ -564,11 +564,14 @@ pub def http_post(url: String, body: String, content_type: String = "application
 pub struct HttpServer {
     let listener: AsyncListener;
     pub var max_body: i32;
+    // A connection is closed when a request's head or body takes longer,
+    // including the wait for the next request on a keep-alive connection.
+    pub var idle_timeout: Duration;
 
     // Listens on a numeric address; port zero picks a free port.
     pub static def bind(address: String, port: i32) -> Result<HttpServer, HttpError> {
         switch AsyncListener.bind(address, port, 128) {
-            case .ok(let listener): return Result<HttpServer, HttpError>.ok(value: HttpServer { listener, max_body: 16777216 });
+            case .ok(let listener): return Result<HttpServer, HttpError>.ok(value: HttpServer { listener, max_body: 16777216, idle_timeout: Duration.seconds(60) });
             case .err(let code): return http_error(f"cannot listen on {address}:{port}: {os_error_message(code)}");
         }
     }
@@ -584,7 +587,7 @@ pub struct HttpServer {
             switch await self.listener.accept() {
                 case .ok(let stream):
                     accepted += 1;
-                    running.push(spawn serve_connection(stream, handler, self.max_body));
+                    running.push(spawn serve_connection(stream, handler, self.max_body, self.idle_timeout));
                 case .err(let code): return http_error(f"accept failed: {os_error_message(code)}");
             }
         }
@@ -593,11 +596,12 @@ pub struct HttpServer {
     }
 }
 
-def serve_connection(stream: AsyncStream, handler: (HttpRequest) async -> HttpResponse, max_body: i32) async -> Void {
+def serve_connection(stream: AsyncStream, handler: (HttpRequest) async -> HttpResponse, max_body: i32, idle: Duration) async -> Void {
     let reader = HttpReader { stream, buffer: "", eof: false, max_body };
     while true {
         var head = "";
-        switch await reader.head() {
+        guard let received = await with_timeout(spawn reader.head(), idle) else { break; }
+        switch received {
             case .ok(let block): if let text = block { head = text; } else { break; }
             case .err(let error): await respond(stream, HttpResponse.text(error.message, 400), false); break;
         }
@@ -608,7 +612,10 @@ def serve_connection(stream: AsyncStream, handler: (HttpRequest) async -> HttpRe
         }
         guard let headers = parse_header_lines(lines, 1) else { await respond(stream, HttpResponse.text("malformed header", 400), false); break; }
         let request = HttpRequest { method: parts[0], target: parts[1], headers, body: "", version: parts[2] };
-        switch await reader.body(headers, false) {
+        guard let body_result = await with_timeout(spawn reader.body(headers, false), idle) else {
+            await respond(stream, HttpResponse.text("request body timed out", 408), false); break;
+        }
+        switch body_result {
             case .ok(let body): request.body = body;
             case .err(let error): await respond(stream, HttpResponse.text(error.message, 400), false); break;
         }

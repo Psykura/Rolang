@@ -33,6 +33,7 @@ pub struct HirBuilder {
             boxed: Dict<i32, Bool>.with_capacity(16, 0), cell_types: Dict<i32, TypeId>.with_capacity(16, 0), pending_cells: Vec<HirId>.new() }
     }
     pub def build(program: NodeId) -> HirBuildResult {
+        for required in self.result.required_methods { self.arena.required_methods.push(required); }
         self.find_boxed_variables(program);
         let items = Vec<HirId>.new();
         if let node = self.ast.get(program) { switch node.form { case .program(let data): for item in data.items { if let built = self.item(item) { items.push(built); } } default: {} } }
@@ -333,7 +334,10 @@ pub struct HirBuilder {
                 if data.op.equals("try") { return self.arena.add(HirForm.try_expr(HirTryExprData { type_id, expr: operand, result_type: type_id, error_type: self.result.propagation_error_types[ref.id] })); }
                 return self.arena.add(HirForm.unary_op(HirUnaryOpData { type_id, op: data.op, operand }));
             case .ternary_op(let data): return self.arena.add(HirForm.ternary(HirTernaryData { type_id, condition: self.expr(data.condition), then_expr: self.expr(data.then_expr), else_expr: self.expr(data.else_expr) }));
-            case .call(let data): return self.call(ref, data);
+            case .call(let data):
+                let call = self.call(ref, data);
+                if let explicit = self.result.explicit_type_args[ref.id] { self.arena.type_arguments[call.id] = explicit; }
+                return call;
             case .member_access(let data):
                 if let lowered = self.result.lowered_expressions[ref.id] { return self.expr(lowered); }
                 return self.member(ref, data);

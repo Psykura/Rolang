@@ -9,7 +9,11 @@ pub struct HirLocation { pub let file: String; pub let line: i32; pub let column
 pub struct HirArena {
     let nodes: Vec<HirNode>;
     let locations: Dict<i32, HirLocation>;
-    pub static def new() -> HirArena { HirArena { nodes: Vec<HirNode>.new(), locations: Dict<i32, HirLocation>.new() } }
+    // Explicit type arguments of generic calls (`f<i32>(x)`), by call node.
+    pub let type_arguments: Dict<i32, Dict<String, TypeId>>;
+    // Generic extension methods to instantiate per type (see require_hash_methods).
+    pub let required_methods: Vec<(TypeId, SymbolId)>;
+    pub static def new() -> HirArena { HirArena { nodes: Vec<HirNode>.new(), locations: Dict<i32, HirLocation>.new(), type_arguments: Dict<i32, Dict<String, TypeId>>.new(), required_methods: Vec<(TypeId, SymbolId)>.new() } }
     pub def location(id: HirId) -> HirLocation? { self.locations[id.id] }
     pub def set_location(id: HirId, location: HirLocation?) -> Void { if let known = location { self.locations[id.id] = known; } }
     // Gives `copy` the location of `original`, for nodes cloned by later passes.

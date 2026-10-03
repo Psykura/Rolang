@@ -310,6 +310,22 @@ pub struct ExprChecker {
     def decl_params(sid: SymbolId?) -> Vec<NodeId>? {
         if let ref = sid { if let sym = self.state.symbol_table.get_symbol(ref) { if let id = sym.decl_node { if let node = self.state.arena.get(id) { switch node.form { case .func_decl(let data): return data.params; case .extern_func_decl(let data): return data.params; default: {} } } } } } nil
     }
+    // `f<A, B>` names the generic function's type parameters in order.
+    def explicit_arguments(callee: NodeId, sid: SymbolId) -> Dict<String, TypeId>? {
+        guard let node = self.state.arena.get(callee) else { return nil; }
+        var arguments = Vec<NodeId>.new();
+        switch node.form { case .identifier(let data): arguments = data.type_args; default: return nil; }
+        if arguments.len() == 0 { return nil; }
+        guard let symbol = self.state.symbol_table.get_symbol(sid) else { return nil; }
+        guard let decl = self.state.function(symbol.decl_node) else { return nil; }
+        if decl.generic_params.len() != arguments.len() {
+            self.state.error(TypeErrorKind.generic_arg_count(), f"Function '{decl.name}' expects {decl.generic_params.len()} type argument(s), got {arguments.len()}", callee);
+            return nil;
+        }
+        let mapping = Dict<String, TypeId>.new();
+        for index in 0..<arguments.len() { mapping[self.state.generic_name(decl.generic_params[index])] = self.state.resolve_type(arguments[index]); }
+        mapping
+    }
     // A labeled argument may skip defaulted parameters: `f(a, help: "x")` passes
     // the defaults in between. The call's arguments are rewritten to one per
     // parameter in order, so later passes see an ordinary positional call.
@@ -384,6 +400,11 @@ pub struct ExprChecker {
                     default: {}
                 } } } }
                 for pair in self.state.generic_inference.infer_generic_call_args(sid, id, old).entries() { mapping[pair.key] = pair.value; }
+                // Explicit type arguments take precedence over inferred ones.
+                if let explicit = self.explicit_arguments(callee, sid) {
+                    for pair in explicit.entries() { mapping[pair.key] = pair.value; }
+                    self.state.result.explicit_type_args[id.id] = explicit;
+                }
                 if let node = self.state.arena.get(callee) { switch node.form { case .member_access(let member): if self.is_type_reference(member.object) {
                     for pair in self.owner_generics(sid, data, old).entries() { mapping[pair.key] = pair.value; }
                     if mapping.len() > 0 { self.update_receiver(member.object, mapping); }
