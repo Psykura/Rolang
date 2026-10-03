@@ -477,7 +477,7 @@ pub struct Monomorphizer {
         self.arena.add(HirForm.call(HirCallData { type_id: new_type, callee, arguments: args, callee_symbol: sid }))
     }
     def type_symbol(type: TypeId) -> SymbolId? {
-        if let info = self.types.get_type(type) { switch info.data { case .struct_type(let d): return d.symbol_id; case .enum_type(let d): return d.symbol_id; default: {} } }
+        if let info = self.types.get_type(type) { switch info.data { case .struct_type(let d): return d.symbol_id; case .enum_type(let d): return d.symbol_id; case .optional: return self.symbols.get_builtin("?"); default: {} } }
         nil
     }
     def specialize_method_call(id: HirId, data: HirMethodCallData, subst: TypeSubstitution, new_type: TypeId) -> HirId {
@@ -500,7 +500,7 @@ pub struct Monomorphizer {
         }
         if let sid = generic_symbol { if let owner = self.method_owners[sid.id] { if let original_id = self.originals[sid.id] { if let original = self.func(original_id) {
             let initial = Dict<String, TypeId>.with_capacity(16, 1); var owner_args = Vec<TypeId>.new();
-            if let info = self.types.get_type(subst.apply(self.arena.type_of(data.receiver, self.types.error_type), self.types)) { switch info.data { case .struct_type(let d): owner_args = d.type_args.to_vec(); case .enum_type(let d): owner_args = d.type_args.to_vec(); default: {} } }
+            if let info = self.types.get_type(subst.apply(self.arena.type_of(data.receiver, self.types.error_type), self.types)) { switch info.data { case .struct_type(let d): owner_args = d.type_args.to_vec(); case .enum_type(let d): owner_args = d.type_args.to_vec(); case .optional(let inner): owner_args = [inner]; default: {} } }
             let owner_names = self.generic_names(owner); for i in 0..<owner_names.len() { if i < owner_args.len() { initial[owner_names[i]] = owner_args[i]; } }
             let type_args = self.infer_call(sid, self.inference_arguments(data.arguments, subst), subst.apply(data.type_id, self.types), initial);
             for type in type_args { if self.types.is_error(type) || self.types.has_type_variables(type) { self.errors.push("could not infer type arguments for generic method '" + original.name + "'"); return id; } }

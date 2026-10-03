@@ -261,15 +261,26 @@ pub struct DeclChecker {
             self.state.type_table.set_type_members(sid, cache);
         }
     }
+    // The value type of `extension<T> T?`.
+    def optional_target(data: ExtensionDeclAst) -> TypeId? {
+        guard let ref = data.extended_type else { return nil; }
+        guard let node = self.state.arena.get(ref) else { return nil; }
+        switch node.form { case .optional_type: return self.state.type_table.get_optional_inner(self.state.resolve_type(ref)); default: return nil; }
+    }
     def named_name(id: NodeId?) -> String {
-        if let ref = id { if let node = self.state.arena.get(ref) { switch node.form { case .named_type(let data): return data.name; case .builtin_type(let data): return data.name; default: {} } } }
+        if let ref = id { if let node = self.state.arena.get(ref) { switch node.form { case .named_type(let data): return data.name; case .builtin_type(let data): return data.name; case .optional_type: return "?"; default: {} } } }
         "?"
     }
     def check_extension(id: NodeId, data: ExtensionDeclAst) -> Void {
         let type = self.state.resolve_type(data.extended_type);
+        if let optional = self.optional_target(data) {
+            var parameter = false;
+            if let inner = self.state.type_table.get_type(optional) { switch inner.data { case .type_variable: parameter = true; default: {} } }
+            if !parameter || data.generic_params.len() != 1 { self.state.error(TypeErrorKind.invalid_operation(), "an extension of optionals must have the form `extension<T> T?`", data.extended_type ?? id); return; }
+        }
         var symbol: SymbolId? = nil;
         if let ref = data.extended_type { symbol = self.state.node_symbols[ref.id]; }
-        if let sid = symbol {} else { if let info = self.state.type_table.get_type(type) { switch info.data { case .primitive: symbol = self.state.symbol_table.get_builtin(self.named_name(data.extended_type)); default: {} } } }
+        if let sid = symbol {} else { if let info = self.state.type_table.get_type(type) { switch info.data { case .primitive: symbol = self.state.symbol_table.get_builtin(self.named_name(data.extended_type)); case .optional: symbol = self.state.symbol_table.get_builtin("?"); default: {} } } }
         let old = self.state.current_self_type; self.state.current_self_type = type;
         let outer_generics = self.enter_generics(data.generic_params);
         defer { self.state.rigid_generics = outer_generics; }

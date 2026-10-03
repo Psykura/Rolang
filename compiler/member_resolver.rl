@@ -46,6 +46,7 @@ pub struct MemberResolver {
                 case .struct_type(let data): type_symbol = data.symbol_id;
                 case .enum_type(let data): type_symbol = data.symbol_id;
                 case .primitive(let primitive): type_symbol = self.symbol_table.get_builtin(primitive.spelling());
+                case .optional: type_symbol = self.symbol_table.get_builtin("?");
                 default: {}
             }
         }

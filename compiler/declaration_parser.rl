@@ -708,6 +708,12 @@ struct DeclarationCursor {
         if !self.expect("extension") { return nil; }
         guard let generic_params = self.parse_generic_params() else { return nil; }
         guard let extended_type = self.parse_named_bound() else { return nil; }
+        // `extension<T> T?` extends optionals.
+        var target = extended_type;
+        if self.spelling().equals("?") {
+            let span = self.current().span; self.index += 1;
+            target = self.make(NodeForm.optional_type(OptionalTypeAst { inner: extended_type }), span);
+        }
         let conformances = Vec<NodeId>.new();
         if self.match_text(":") {
             guard let first = self.parse_named_bound() else { return nil; }
@@ -739,7 +745,7 @@ struct DeclarationCursor {
         }
         if !self.expect("}") { return nil; }
         self.make(NodeForm.extension_decl(ExtensionDeclAst {
-            visibility, generic_params, extended_type, conformances, constraints, members
+            visibility, generic_params, extended_type: target, conformances, constraints, members
         }), start)
     }
     def parse_constant() -> NodeId? {

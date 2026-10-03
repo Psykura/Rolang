@@ -257,7 +257,7 @@ pub struct NameResolver {
         var name = "";
         if let ref = data.extended_type {
             if let node = self.arena.get(ref) {
-                switch node.form { case .named_type(let target): name = target.name; default: {} }
+                switch node.form { case .named_type(let target): name = target.name; case .optional_type: name = "?"; default: {} }
             }
         }
         var symbol_name = "<extension>";
@@ -269,7 +269,8 @@ pub struct NameResolver {
         var type_symbol: SymbolId? = nil;
         if let ref = data.extended_type { type_symbol = self.node_symbols[ref.id]; }
         if let found = type_symbol {} else {
-            if let scope = self.current_scope { type_symbol = scope.lookup_type(name); }
+            if name.equals("?") { type_symbol = self.symbol_table.get_builtin("?"); }
+            else if let scope = self.current_scope { type_symbol = scope.lookup_type(name); }
         }
         for ref in data.conformances { self.resolve_type(ref); }
         self.resolve_constraints(data.constraints, Vec<NodeId>.new());

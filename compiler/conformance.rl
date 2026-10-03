@@ -160,9 +160,18 @@ pub struct ConformanceChecker {
                         if let node = self.arena.get(id) {
                             switch node.form {
                                 case .extension_decl(let data):
-                                    if let witness = self.find_func_in(data.members, requirement, errors) {
+                                    // The extension's own type parameters name the type arguments in its signatures.
+                                    let saved_scope = self.type_scope;
+                                    let mapping = self.extension_arguments(data, concrete);
+                                    let scope = Dict<String, TypeId>.with_capacity(4, 1);
+                                    for scoped in saved_scope.entries() { scope[scoped.key] = scoped.value; }
+                                    for scoped in mapping.entries() { scope[scoped.key] = scoped.value; }
+                                    self.type_scope = scope;
+                                    let found = self.find_func_in(data.members, requirement, errors);
+                                    self.type_scope = saved_scope;
+                                    if let witness = found {
                                         // A generic extension's method may require `where T: P` of the type arguments.
-                                        if let problem = self.where_problem(data.members, requirement.name, concrete) { errors.push(f"Method '{requirement.name}' {problem}"); return nil; }
+                                        if let problem = self.where_problem(data.members, requirement.name, mapping) { errors.push(f"Method '{requirement.name}' {problem}"); return nil; }
                                         return witness;
                                     }
                                     if errors.len() != original_errors { return nil; }
@@ -183,14 +192,47 @@ pub struct ConformanceChecker {
         switch a.data {
             case .struct_type(let x): switch b.data { case .struct_type(let y): if let sx = x.symbol_id { if let sy = y.symbol_id { return sx == sy && x.type_args.len() > 0; } } default: {} }
             case .enum_type(let x): switch b.data { case .enum_type(let y): return x.symbol_id == y.symbol_id && x.type_args.len() > 0; default: {} }
+            // `extension<T> T?` covers every optional.
+            case .optional(let x): switch b.data { case .optional: return self.type_variable(x); default: {} }
             default: {}
         }
         false
     }
+    def type_variable(type: TypeId) -> Bool {
+        guard let info = self.type_table.get_type(type) else { return false; }
+        switch info.data { case .type_variable: return true; default: return false; }
+    }
+    // An extension's type parameters bound to the type arguments of `concrete`:
+    // `extension<U> Vec<U>` binds U, and `extension<T> T?` binds T to the value type.
+    pub def extension_arguments(data: ExtensionDeclAst, concrete: TypeId) -> Dict<String, TypeId> {
+        let scope = Dict<String, TypeId>.with_capacity(4, 1);
+        guard let ref = data.extended_type else { return scope; }
+        guard let node = self.arena.get(ref) else { return scope; }
+        guard let info = self.type_table.get_type(concrete) else { return scope; }
+        switch node.form {
+            case .optional_type(let optional): switch info.data {
+                case .optional(let inner): if let name = self.parameter_name(optional.inner) { scope[name] = inner; }
+                default: {}
+            }
+            case .named_type(let named):
+                var args = FrozenVec<TypeId>.empty();
+                switch info.data { case .struct_type(let value): args = value.type_args; case .enum_type(let value): args = value.type_args; default: {} }
+                for index in 0..<named.generic_args.len() { if index < args.len() {
+                    if let name = self.parameter_name(named.generic_args[index]) { scope[name] = args.get(index); }
+                } }
+            default: {}
+        }
+        scope
+    }
+    def parameter_name(id: NodeId?) -> String? {
+        guard let ref = id else { return nil; }
+        guard let node = self.arena.get(ref) else { return nil; }
+        switch node.form { case .named_type(let named): if named.generic_args.len() == 0 && named.module_path.len() == 0 { return named.name; } default: {} }
+        nil
+    }
     // Why the method `name` among `members` does not apply to `concrete`: a
     // `where T: P` its type argument T does not meet. Type parameters count as meeting it.
-    def where_problem(members: Vec<NodeId>, name: String, concrete: TypeId) -> String? {
-        let mapping = self.type_arguments(concrete);
+    def where_problem(members: Vec<NodeId>, name: String, mapping: Dict<String, TypeId>) -> String? {
         if mapping.len() == 0 { return nil; }
         for id in members { if let node = self.arena.get(id) { switch node.form {
             case .func_decl(let func):

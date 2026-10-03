@@ -103,6 +103,9 @@ pub struct SymbolTable {
             let symbol = table.create_symbol(name, SymbolKind.builtin_type(), Namespace.type());
             table.builtins[name] = symbol.id;
         }
+        // Extensions of optionals (`extension<T> T?`) attach to this symbol; no source names it.
+        let optional = table.create_symbol("?", SymbolKind.builtin_type(), Namespace.type());
+        table.builtins["?"] = optional.id;
         table
     }
 

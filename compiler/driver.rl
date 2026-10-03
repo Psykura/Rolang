@@ -356,7 +356,12 @@ pub struct CompilationDriver {
             var runtime_opt = 0; if self.options.opt_level >= 1 { runtime_opt = 3; }
             compile.push("-O" + runtime_opt.to_string()); compile.push("-DROLANG_SINGLE_THREADED");
             if self.options.debug_info { compile.push("-g"); }
-            if runtime_opt >= 1 { compile.push("-fno-semantic-interposition"); compile.push("-fvisibility=hidden"); }
+            if runtime_opt >= 1 {
+                // Mach-O has no symbol interposition to disable; clang warns about the flag there.
+                var target = self.options.target; if target.len() == 0 { target = host_target(); }
+                if !target.contains("apple") { compile.push("-fno-semantic-interposition"); }
+                compile.push("-fvisibility=hidden");
+            }
             if !self.options.lto.equals("none") { compile.push("-flto=" + self.options.lto); }
             // Runtime C flags use whitespace-separated arguments.
             for flag in env_get("ROLANG_RT_CFLAGS").replace("\t", " ").replace("\n", " ").replace("\r", " ").split(" ") {

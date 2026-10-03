@@ -1,0 +1,6 @@
+{"name":"ro","tags":["a",null],"scores":{"a":1,"b":null},"nick":null}
+true
+null
+-1 5
+[1]: expected an integer, found a string
+[1,null,3]

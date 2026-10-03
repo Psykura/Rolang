@@ -425,7 +425,8 @@ struct JsonParser {
 //     let back: Result<User, DecodeError> = decode_json(text);
 //
 // Optional fields decode a missing member or null as nil, and fields with a
-// default use it when the member is missing. Enum cases without payload
+// default use it when the member is missing. Elsewhere, as in Vec<String?>,
+// nil encodes as null. Enum cases without payload
 // encode as their name; a case with one payload as {"case": value}, with
 // several as {"case": [values]} or, when all are labeled, {"case": {...}}.
 
@@ -636,6 +637,21 @@ pub extension<T> Vec<T>: Encodable, Decodable {
             }
         }
         Result<Vec<T>, DecodeError>.ok(value: out)
+    }
+}
+
+// nil encodes as null, and null decodes as nil.
+pub extension<T> T?: Encodable, Decodable {
+    pub def to_json() -> Json where T: Encodable {
+        if let value = self { return value.to_json(); }
+        Json.null()
+    }
+    pub static def from_json(value: Json) -> Result<T?, DecodeError> where T: Decodable {
+        if value.is_null() { let none: T? = nil; return Result<T?, DecodeError>.ok(value: none); }
+        switch T.from_json(value) {
+            case .ok(let decoded): let some: T? = decoded; return Result<T?, DecodeError>.ok(value: some);
+            case .err(let error): return Result<T?, DecodeError>.err(error: error);
+        }
     }
 }
 

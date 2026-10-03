@@ -168,14 +168,21 @@ pub struct GenericInference {
         if let object = receiver {
             if let owner_id = self.find_method_owner(decl_id) {
                 if let owner = self.arena.get(owner_id) {
-                    let params = Vec<NodeId>.new();
+                    let params = Vec<NodeId>.new(); var target: NodeId? = nil;
                     switch owner.form {
                         case .struct_decl(let data): for id in data.generic_params { params.push(id); } nominal_owner = true;
                         case .enum_decl(let data): for id in data.generic_params { params.push(id); } nominal_owner = true;
-                        case .extension_decl(let data): for id in data.generic_params { params.push(id); }
+                        case .extension_decl(let data): for id in data.generic_params { params.push(id); } target = data.extended_type;
                         default: {}
                     }
-                    if let type = self.expr_types[object.id] {
+                    var optional_target = false;
+                    if let ref = target { if let node = self.arena.get(ref) { switch node.form { case .optional_type: optional_target = true; default: {} } } }
+                    if optional_target { if let type = self.expr_types[object.id] {
+                        // `extension<T> T?` binds T to the receiver's value type.
+                        let extension_names = Dict<String, Bool>.with_capacity(16, 1);
+                        for id in params { if let param = self.arena.get(id) { switch param.form { case .generic_param(let data): extension_names[data.name] = true; default: {} } } }
+                        self.infer_type_node_generics(target, type, extension_names, inferred);
+                    } } else if let type = self.expr_types[object.id] {
                         if let info = self.type_table.get_type(type) {
                             var args = FrozenVec<TypeId>.empty();
                             switch info.data { case .struct_type(let data): args = data.type_args; case .enum_type(let data): args = data.type_args; default: {} }
@@ -267,11 +274,16 @@ pub struct GenericInference {
                         for bound in bounds {
                             let protocol = self.type_resolver.resolve(bound);
                             if self.type_table.is_error(protocol) || !self.type_table.is_protocol(protocol) { continue; }
-                            if !self.bound_satisfies(concrete, protocol) && !checker.check_conformance(concrete, protocol).conforms {
+                            if self.bound_satisfies(concrete, protocol) { continue; }
+                            let result = checker.check_conformance(concrete, protocol);
+                            if !result.conforms {
                                 var name = "";
                                 if let annotation = self.arena.get(bound) { switch annotation.form { case .named_type(let data): name = data.name; default: {} } }
+                                // A conditional conformance says which type argument fell short.
+                                var reason = "";
+                                if result.errors.len() > 0 { reason = ": " + result.errors[0]; }
                                 if let report = self.error_reporter {
-                                    report(TypeErrorKind.type_mismatch(), f"Type '{self.type_table.format_type(concrete)}' does not conform to protocol '{self.type_table.format_type(protocol)}' (required by '{param.name}: {name}')");
+                                    report(TypeErrorKind.type_mismatch(), f"Type '{self.type_table.format_type(concrete)}' does not conform to protocol '{self.type_table.format_type(protocol)}' (required by '{param.name}: {name}'){reason}");
                                 }
                             }
                         }
