@@ -233,7 +233,7 @@ struct DeclarationCursor {
         let generic_names = Vec<String>.new();
         for id in generic_params { if let node = self.arena.get(id) { switch node.form { case .generic_param(let param): generic_names.push(param.name); default: {} } } }
         let defined = Vec<String>.new(); let fields = Vec<DeriveField>.new(); let cases = Vec<DeriveCase>.new();
-        let field_spans = Vec<Span>.new();
+        let field_spans = Vec<Span>.new(); let case_spans = Vec<Span>.new();
         for id in members { if let node = self.arena.get(id) { switch node.form {
             case .func_decl(let func): defined.push(func.name);
             case .property_decl(let property):
@@ -249,6 +249,7 @@ struct DeclarationCursor {
                         let labels = Vec<String?>.new(); let types = Vec<String>.new();
                         for pair in definition.payload { labels.push(pair.0); types.push(self.texts[pair.1.id] ?? ""); }
                         cases.push(DeriveCase { name: definition.name, labels, types });
+                        case_spans.push(case_node.span ?? node.span ?? start);
                     default: {}
                 } } }
             default: {}
@@ -260,10 +261,18 @@ struct DeclarationCursor {
         let first = self.arena.len();
         let result = parse_declaration_prefix(lexed.tokens, self.arena, 0);
         if let problem = result.error { self.error = SyntaxError { message: f"cannot derive {protocols[0]} for {name}: {problem.message}", span: start }; return; }
-        // Errors in derived code point at the field a generated line handles, else at the type.
+        // Errors in derived code point at the field or enum case a generated line handles, else at the type.
+        // Case handling spans the lines nested under the line that names the case.
         let line_spans = Vec<Span>.new();
+        var current: Span? = nil;
         for line in source.split("\n") {
-            var span = start;
+            var marked = false;
+            for index in 0..<cases.len() {
+                let name = cases[index].name;
+                if line.contains(f"case .{name}(") || line.contains(f"case .{name}:") || line.contains(f"equals(\"{name}\")") { current = case_spans[index]; marked = true; }
+            }
+            if !marked && !line.starts_with("            ") { current = nil; }
+            var span = current ?? start;
             for index in 0..<fields.len() {
                 let name = fields[index].name;
                 if line.contains(f"self.{name} ") || line.contains(f"self.{name}.") || line.contains(f"\"{name}\"") || line.contains(f"decoded{index}:") {

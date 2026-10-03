@@ -380,7 +380,7 @@ struct ExpressionCursor {
         while scalar_binary_at(level, self.spelling()) {
             let op = self.take();
             guard let right = self.parse_level(level + 1) else { return nil; }
-            result = self.arena.add(NodeForm.binary_op(BinaryOpAst { left: result, op, right }));
+            result = self.make(NodeForm.binary_op(BinaryOpAst { left: result, op, right }), start);
             combined = true;
         }
         if combined { return self.finish(result, start); }
@@ -401,11 +401,11 @@ struct ExpressionCursor {
                 var kind = "safe";
                 if op.equals("as?") { kind = "optional"; }
                 if op.equals("as!") { kind = "forced"; }
-                result = self.arena.add(NodeForm.cast(CastAst { expr: result, target_type, kind }));
+                result = self.make(NodeForm.cast(CastAst { expr: result, target_type, kind }), start);
             } else if op.equals("is") {
                 self.take();
                 guard let checked_type = self.parse_type() else { return nil; }
-                result = self.arena.add(NodeForm.type_check(TypeCheckAst { expr: result, checked_type }));
+                result = self.make(NodeForm.type_check(TypeCheckAst { expr: result, checked_type }), start);
             } else { break; }
             combined = true;
         }
@@ -422,7 +422,7 @@ struct ExpressionCursor {
             if scalar_comparison(op) {
                 self.take();
                 guard let right = self.parse_range() else { return nil; }
-                result = self.arena.add(NodeForm.binary_op(BinaryOpAst { left: result, op, right }));
+                result = self.make(NodeForm.binary_op(BinaryOpAst { left: result, op, right }), start);
             } else { break; }
             combined = true;
         }
@@ -551,16 +551,16 @@ struct ExpressionCursor {
         while true {
             if self.spelling().equals("(") {
                 guard let arguments = self.parse_arguments() else { return nil; }
-                result = self.arena.add(NodeForm.call(CallAst {
+                result = self.make(NodeForm.call(CallAst {
                     callee: result, arguments, is_interpolation: false
-                }));
+                }), start);
             } else if self.match_text(".") {
                 let token = self.current();
                 var valid = self.at_identifier();
                 switch token.kind { case .integer: valid = true; default: {} }
                 if !valid { self.fail("member name"); return nil; }
                 let member = self.take();
-                result = self.arena.add(NodeForm.member_access(MemberAccessAst { object: result, member }));
+                result = self.make(NodeForm.member_access(MemberAccessAst { object: result, member }), start);
             } else if self.match_text("?.") {
                 if !self.at_identifier() { self.fail("optional member name"); return nil; }
                 let member = self.take();
@@ -572,22 +572,22 @@ struct ExpressionCursor {
                     guard let indices = self.parse_indices() else { return nil; }
                     suffix = AstOptionalSuffix.index(indices);
                 }
-                result = self.arena.add(NodeForm.optional_chain(OptionalChainAst {
+                result = self.make(NodeForm.optional_chain(OptionalChainAst {
                     object: result, member, suffix
-                }));
+                }), start);
             } else if self.spelling().equals("[") {
                 guard let indices = self.parse_indices() else { return nil; }
-                result = self.arena.add(NodeForm.subscript(SubscriptAst { object: result, indices }));
+                result = self.make(NodeForm.subscript(SubscriptAst { object: result, indices }), start);
             } else if self.spelling().equals("?") && self.adjacent_bracket() {
                 // `value?[index]` subscripts an optional's value.
                 self.take();
                 guard let indices = self.parse_indices() else { return nil; }
-                result = self.arena.add(NodeForm.optional_chain(OptionalChainAst {
+                result = self.make(NodeForm.optional_chain(OptionalChainAst {
                     object: result, member: "", suffix: AstOptionalSuffix.index(indices)
-                }));
+                }), start);
             } else if self.spelling().equals("?") && !self.ternary_question() {
                 self.take();
-                result = self.arena.add(NodeForm.try_expr(TryExprAst { value: result }));
+                result = self.make(NodeForm.try_expr(TryExprAst { value: result }), start);
             } else { break; }
             combined = true;
         }
