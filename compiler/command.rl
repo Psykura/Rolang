@@ -46,7 +46,7 @@ def format_mir_kinds(program: MirProgram) -> String {
 def command_line() -> CommandLine {
     let cli = CommandLine.new("rolangc", "[options] input.rl");
     cli.about = "Compiles a Rolang program and its imports to an executable.";
-    cli.version = "rolangc 0.4.5";
+    cli.version = "rolangc 0.4.6";
     cli.positional("input.rl", "the program's main source file");
     cli.option("output", "FILE", "output path (default: the input without .rl)", short: "o");
     let emit = cli.option("emit", "KIND", "output kind", choices: ["exe", "obj", "module", "llvm", "llvm-opt", "asm", "mir", "mir-opt"]);
