@@ -151,14 +151,18 @@ pub struct ConformanceChecker {
             if errors.len() != original_errors { return nil; }
         }
         for entry in self.extensions {
-            if entry.concrete != concrete { continue; }
+            if !self.same_base(entry.concrete, concrete) { continue; }
             for symbol_id in entry.symbols {
                 if let symbol = self.symbol_table.get_symbol(symbol_id) {
                     if let id = symbol.decl_node {
                         if let node = self.arena.get(id) {
                             switch node.form {
                                 case .extension_decl(let data):
-                                    if let witness = self.find_func_in(data.members, requirement, errors) { return witness; }
+                                    if let witness = self.find_func_in(data.members, requirement, errors) {
+                                        // A generic extension's method may require `where T: P` of the type arguments.
+                                        if let problem = self.where_problem(data.members, requirement.name, concrete) { errors.push(f"Method '{requirement.name}' {problem}"); return nil; }
+                                        return witness;
+                                    }
                                     if errors.len() != original_errors { return nil; }
                                 default: {}
                             }
@@ -168,6 +172,47 @@ pub struct ConformanceChecker {
             }
         }
         self.builtin_operator(concrete, requirement)
+    }
+    // The same type, or both instances of one generic struct or enum.
+    def same_base(registered: TypeId, concrete: TypeId) -> Bool {
+        if registered == concrete { return true; }
+        guard let a = self.type_table.get_type(registered) else { return false; }
+        guard let b = self.type_table.get_type(concrete) else { return false; }
+        switch a.data {
+            case .struct_type(let x): switch b.data { case .struct_type(let y): if let sx = x.symbol_id { if let sy = y.symbol_id { return sx == sy && x.type_args.len() > 0; } } default: {} }
+            case .enum_type(let x): switch b.data { case .enum_type(let y): return x.symbol_id == y.symbol_id && x.type_args.len() > 0; default: {} }
+            default: {}
+        }
+        false
+    }
+    // Why the method `name` among `members` does not apply to `concrete`: a
+    // `where T: P` its type argument T does not meet. Type parameters count as meeting it.
+    def where_problem(members: Vec<NodeId>, name: String, concrete: TypeId) -> String? {
+        let mapping = self.type_arguments(concrete);
+        if mapping.len() == 0 { return nil; }
+        for id in members { if let node = self.arena.get(id) { switch node.form {
+            case .func_decl(let func):
+                if !func.name.equals(name) { continue; }
+                for constraint_id in func.constraints { if let constraint_node = self.arena.get(constraint_id) { switch constraint_node.form { case .constraint(let constraint):
+                    if !constraint.kind.equals("conforms") { continue; }
+                    guard let subject = constraint.subject else { continue; }
+                    var param = "";
+                    switch subject { case .type_ref(let ref): if let child = self.arena.get(ref) { switch child.form { case .named_type(let named): param = named.name; default: {} } } case .name(let value): param = value; }
+                    guard let argument = mapping[param] else { continue; }
+                    if self.type_table.has_type_variables(argument) { continue; }
+                    for bound in constraint.bounds {
+                        let protocol = self.resolve_ast_type(bound);
+                        if !self.type_table.is_protocol(protocol) { continue; }
+                        let saved = self.bindings; let saved_scope = self.type_scope;
+                        let conforms = self.check_conformance(argument, protocol).conforms;
+                        self.bindings = saved; self.type_scope = saved_scope;
+                        if !conforms { return f"requires {param}: {self.type_table.format_type(protocol)}, but {self.type_table.format_type(argument)} does not conform"; }
+                    }
+                    default: {}
+                } } }
+            default: {}
+        } } }
+        nil
     }
     // Numbers and Bool satisfy operator requirements such as `__lt__(other: Self) -> Bool`
     // with their built-in operators.

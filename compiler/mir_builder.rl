@@ -863,6 +863,7 @@ pub struct MirFunctionBuilder {
         let value = self.lower_expr(data.iterable); let header = self.create_block(); let body = self.create_block(); let done = self.create_block();
         let prefix = self.type_prefix(value.type_id());
         if prefix.equals("Dict") || prefix.starts_with("Dict_") { self.lower_dict_for(data, value, header, body, done); self.switch_to(done); return; }
+        if prefix.equals("Vec") || prefix.starts_with("Vec_") { self.lower_vec_for(data, value, header, body, done); self.switch_to(done); return; }
         var iterator_type = value.type_id();
         if let method = self.members.get_method(value.type_id(), "__iter__") { if let signature = self.types.get_function_data(method.signature) { iterator_type = signature.return_type; } }
         let iterator = self.temp(iterator_type, "__iter");
@@ -884,6 +885,31 @@ pub struct MirFunctionBuilder {
             result: element, enum_val: self.copy(next, next_type), case_name: "Some", payload_index: 0, result_type: element_type }));
         self.bind_pattern(data.pattern, self.copy(element, element_type)); self.lower_block(data.body); self.loops.pop();
         if !self.is_terminated() { self.branch(header); } self.switch_to(done);
+    }
+    // `for x in vec` walks indices, so elements that are themselves optional
+    // (Vec<String?>) cannot end the loop early.
+    def lower_vec_for(data: HirForData, value: MirOperand, header: MirBlockId, body: MirBlockId, done: MirBlockId) -> Void {
+        var element_type = self.hir_type(data.pattern);
+        if let info = self.types.get_type(value.type_id()) { switch info.data { case .struct_type(let type_data):
+            if type_data.type_args.len() > 0 { element_type = type_data.type_args.get(0); } default: {}
+        } }
+        let i32_type = self.i32_type(); let prefix = self.type_prefix(value.type_id());
+        let vector = self.temp(value.type_id(), "__vec"); self.assign(self.place(vector, value.type_id()), value);
+        let index = self.temp(i32_type, "__idx"); let place = self.place(index, i32_type); self.assign(place, self.int_operand("0", i32_type));
+        self.branch(header); self.switch_to(header);
+        let length = self.temp(i32_type, "__len"); self.static_call(length, prefix + "_len", [self.copy(vector, value.type_id())], i32_type);
+        let condition = self.temp(self.bool_type());
+        self.emit(MirOp.cmp_op(MirCmpOpData { result: condition, op: CmpOpKind.lt(), left: self.copy(index, i32_type), right: self.copy(length, i32_type) }));
+        self.cond_branch(self.copy(condition, self.bool_type()), body, done); self.switch_to(body);
+        self.loops.push(MirLoopScope { header, exit: done, defer_depth: self.defer_scopes.len() });
+        let element = self.temp(element_type, "__elem");
+        self.static_call(element, prefix + "_get", [self.copy(vector, value.type_id()), self.copy(index, i32_type)], element_type);
+        // The index advances before the body so `continue` moves on.
+        let increment = self.temp(i32_type);
+        self.emit(MirOp.bin_op(MirBinOpData { result: increment, op: BinOpKind.add(), left: self.copy(index, i32_type), right: self.int_operand("1", i32_type), result_type: i32_type }));
+        self.assign(place, self.copy(increment, i32_type));
+        self.bind_pattern(data.pattern, self.copy(element, element_type)); self.lower_block(data.body); self.loops.pop();
+        if !self.is_terminated() { self.branch(header); }
     }
     def lower_dict_for(data: HirForData, value: MirOperand, header: MirBlockId, body: MirBlockId, done: MirBlockId) -> Void {
         var key_type = self.hir_type(data.pattern);

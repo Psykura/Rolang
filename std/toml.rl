@@ -661,3 +661,14 @@ struct TomlParser {
         text
     }
 }
+
+// Parses TOML text and decodes it: `let config: Result<Config, DecodeError> = decode_toml(text);`
+pub def decode_toml<T: Decodable>(text: String) -> Result<T, DecodeError> {
+    switch Toml.parse(text) {
+        case .ok(let value): return T.from_json(value);
+        case .err(let error): return Result<T, DecodeError>.err(error: DecodeError.new(error.to_string()));
+    }
+}
+
+// TOML text for an encodable value, which must encode as an object.
+pub def encode_toml<T: Encodable>(value: T) -> Result<String, TomlError> { Toml.encode(value.to_json()) }

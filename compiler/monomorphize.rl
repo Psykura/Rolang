@@ -152,6 +152,17 @@ pub struct Monomorphizer {
                 }
             } }
         } } }
+        // Methods of generic extensions are generic through their extension: calls
+        // through a type parameter find them by receiver type and name.
+        for id in self.items() { if let node = self.arena.get(id) { switch node.form {
+            case .extension(let data):
+                guard let tsid = self.type_symbol(data.extended_type) else { continue; }
+                for method in data.methods { if let func = self.func(method) {
+                    let key = f"{tsid.id}:{func.name}";
+                    if self.method_owners.contains(func.symbol_id.id) && !self.generic_methods.contains(key) { self.generic_methods[key] = func.symbol_id; }
+                } }
+            default: {}
+        } } }
         // Add explicit self parameters to standalone generic instance methods.
         for method_id in self.method_order { if let owner = self.method_owners[method_id] {
             if let id = self.originals[method_id] { if let method = self.func(id) { if !method.is_static {

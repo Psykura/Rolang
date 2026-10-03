@@ -70,6 +70,7 @@ pub struct CheckerState {
             in_async_function: false, in_unsafe: false, projection_equalities: Dict<String, TypeId>.with_capacity(4, 1), computing_constants: Dict<i32, Bool>.with_capacity(4, 0), rigid_generics: Dict<String, Bool>.with_capacity(4, 1), synthetic_lambda_types: Dict<i32, TypeId>.with_capacity(4, 0), infer_callback: nil, statement_callback: nil, current_node: nil, current_file: nil, default_arguments: Dict<i32, Bool>.new(), reported: Dict<String, Bool>.new(), where_bounds: Dict<String, Vec<TypeId>>.new() };
         // Inference errors are located at the expression being checked.
         state.generic_inference.error_reporter = (kind: TypeErrorKind, message: String) -> { state.error(kind, message); };
+        state.generic_inference.extra_bounds = (name: String) -> Vec<TypeId> { state.where_bounds[name] ?? Vec<TypeId>.new() };
         state
     }
     pub def error(kind: TypeErrorKind, message: String, id: NodeId? = nil) -> Void {

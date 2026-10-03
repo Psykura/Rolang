@@ -2,6 +2,7 @@
 // function bodies and parameter defaults.
 pub import "statement_parser.rl"
 import std.collections
+import "derive.rl"
 
 pub struct DeclarationParseResult {
     pub let declaration: NodeId?;
@@ -22,6 +23,8 @@ struct DeclarationCursor {
     var end_column: i32;
     var error: SyntaxError?;
     let extra: Vec<NodeId>;
+    // Source text of field types and defaults, by node, for derived conformances.
+    let texts: Dict<i32, String>;
 
     def current() -> LexToken {
         if self.index < self.tokens.len() { return self.tokens[self.index]; }
@@ -86,6 +89,22 @@ struct DeclarationCursor {
     def parse_type() -> NodeId? {
         if self.fragment.len() > 0 { self.fail("type"); return nil; }
         self.accept_type_result(parse_type_prefix(self.tokens, self.arena, self.index))
+    }
+    // The source text of tokens from `start` to the cursor, without a split token's unread part.
+    def text_from(start: i32) -> String {
+        var text = "";
+        var index = start;
+        while index < self.index {
+            if index > start { text += " "; }
+            text += self.tokens[index].text;
+            index += 1;
+        }
+        if self.fragment.len() > 0 && self.index < self.tokens.len() {
+            let token = self.tokens[self.index].text;
+            if index > start { text += " "; }
+            text += token.substring(0, (token.len() as i32) - (self.fragment.len() as i32));
+        }
+        text
     }
     def accept_type_result(result: TypeParseResult) -> NodeId? {
         if let problem = result.error { self.error = problem; return nil; }
@@ -202,7 +221,73 @@ struct DeclarationCursor {
         bounds
     }
     // `struct S<T>: P, Q` declares its conformances through `extension<T> S<T>: P, Q {}`.
-    def conformance_extension(visibility: String, name: String, generic_params: Vec<NodeId>, conformances: Vec<NodeId>, start: Span) -> Void {
+    // Generates the methods of derivable conformances (see derive.rl) as an
+    // extension declaration located at the type's declaration.
+    def derive(name: String, generic_params: Vec<NodeId>, conformances: Vec<NodeId>, members: Vec<NodeId>, is_enum: Bool, start: Span) -> Void {
+        let protocols = Vec<String>.new();
+        for id in conformances { if let node = self.arena.get(id) { switch node.form {
+            case .named_type(let named): if derivable_protocol(named.name) { protocols.push(named.name); }
+            default: {}
+        } } }
+        if protocols.len() == 0 { return; }
+        let generic_names = Vec<String>.new();
+        for id in generic_params { if let node = self.arena.get(id) { switch node.form { case .generic_param(let param): generic_names.push(param.name); default: {} } } }
+        let defined = Vec<String>.new(); let fields = Vec<DeriveField>.new(); let cases = Vec<DeriveCase>.new();
+        let field_spans = Vec<Span>.new();
+        for id in members { if let node = self.arena.get(id) { switch node.form {
+            case .func_decl(let func): defined.push(func.name);
+            case .property_decl(let property):
+                if property.accessors != nil { continue; }
+                guard let annotation = property.type_annotation else { continue; }
+                var fallback: String? = nil;
+                if let value = property.initializer { fallback = self.texts[value.id]; }
+                fields.push(DeriveField { name: property.name, type_text: self.texts[annotation.id] ?? "", default_text: fallback });
+                field_spans.push(node.span ?? start);
+            case .enum_case_decl(let declaration):
+                for case_id in declaration.cases { if let case_node = self.arena.get(case_id) { switch case_node.form {
+                    case .enum_case_def(let definition):
+                        let labels = Vec<String?>.new(); let types = Vec<String>.new();
+                        for pair in definition.payload { labels.push(pair.0); types.push(self.texts[pair.1.id] ?? ""); }
+                        cases.push(DeriveCase { name: definition.name, labels, types });
+                    default: {}
+                } } }
+            default: {}
+        } } }
+        let source = derive_source(DeriveRequest { name, generic_names, protocols, defined, fields, cases, is_enum });
+        if source.len() == 0 { return; }
+        let lexed = tokenize(source);
+        if let problem = lexed.error { self.error = SyntaxError { message: f"cannot derive {protocols[0]} for {name}: {problem.message}", span: start }; return; }
+        let first = self.arena.len();
+        let result = parse_declaration_prefix(lexed.tokens, self.arena, 0);
+        if let problem = result.error { self.error = SyntaxError { message: f"cannot derive {protocols[0]} for {name}: {problem.message}", span: start }; return; }
+        // Errors in derived code point at the field a generated line handles, else at the type.
+        let line_spans = Vec<Span>.new();
+        for line in source.split("\n") {
+            var span = start;
+            for index in 0..<fields.len() {
+                let name = fields[index].name;
+                if line.contains(f"self.{name} ") || line.contains(f"self.{name}.") || line.contains(f"\"{name}\"") || line.contains(f"decoded{index}:") {
+                    span = field_spans[index];
+                }
+            }
+            line_spans.push(span);
+        }
+        for index in first..<self.arena.len() { if let node = self.arena.get(NodeId { id: index }) {
+            var span = start;
+            if let generated = node.span { if generated.line >= 1 && generated.line <= line_spans.len() { span = line_spans[generated.line - 1]; } }
+            node.span = span;
+        } }
+        if let declaration = result.declaration { self.extra.push(declaration); }
+        for extra in result.extra { self.extra.push(extra); }
+    }
+    def conformance_extension(visibility: String, name: String, generic_params: Vec<NodeId>, declared: Vec<NodeId>, start: Span) -> Void {
+        // Derivable protocols are declared by the derived extension instead.
+        let conformances = Vec<NodeId>.new();
+        for id in declared {
+            var derivable = false;
+            if let node = self.arena.get(id) { switch node.form { case .named_type(let named): derivable = derivable_protocol(named.name); default: {} } }
+            if !derivable { conformances.push(id); }
+        }
         if conformances.len() == 0 { return; }
         let params = Vec<NodeId>.new(); let args = Vec<NodeId>.new();
         for id in generic_params { if let node = self.arena.get(id) { switch node.form {
@@ -385,10 +470,14 @@ struct DeclarationCursor {
         if !self.at_identifier() { self.fail("property name"); return nil; }
         let name = self.take();
         if !self.expect(":") { return nil; }
+        let type_start = self.index;
         guard let type_annotation = self.parse_type() else { return nil; }
+        self.texts[type_annotation.id] = self.text_from(type_start);
         var initializer: NodeId? = nil;
         if self.match_text("=") {
+            let value_start = self.index;
             guard let value = self.parse_expression() else { return nil; }
+            self.texts[value.id] = self.text_from(value_start);
             initializer = value;
         }
         self.match_text(";");
@@ -432,6 +521,7 @@ struct DeclarationCursor {
             visibility, name, generic_params, constraints, members
         }), start);
         self.conformance_extension(visibility, name, generic_params, conformances, start);
+        self.derive(name, generic_params, conformances, members, false, start);
         declaration
     }
     def parse_enum_case_def() -> NodeId? {
@@ -447,7 +537,9 @@ struct DeclarationCursor {
                         label = self.take();
                         self.take();
                     }
+                    let type_start = self.index;
                     guard let type_node = self.parse_type() else { return nil; }
+                    self.texts[type_node.id] = self.text_from(type_start);
                     payload.push((label, type_node));
                     if !self.match_text(",") { break; }
                 }
@@ -506,6 +598,7 @@ struct DeclarationCursor {
             visibility, name, generic_params, constraints, members
         }), start);
         self.conformance_extension(visibility, name, generic_params, conformances, start);
+        self.derive(name, generic_params, conformances, members, true, start);
         declaration
     }
     def parse_protocol_func() -> NodeId? {
@@ -681,7 +774,7 @@ pub def parse_declaration_prefix(tokens: Vec<LexToken>, arena: AstArena,
                                  start_index: i32 = 0) -> DeclarationParseResult {
     let cursor = DeclarationCursor {
         tokens, arena, index: start_index, fragment: "", fragment_offset: 0,
-        end_line: 0, end_column: 0, error: nil, extra: Vec<NodeId>.new()
+        end_line: 0, end_column: 0, error: nil, extra: Vec<NodeId>.new(), texts: Dict<i32, String>.new()
     };
     let declaration = cursor.parse_declaration();
     DeclarationParseResult {

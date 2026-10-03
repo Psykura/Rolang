@@ -67,13 +67,15 @@ pub struct GenericInference {
     pub let expr_types: Dict<i32, TypeId>;
     var infer_expression: ((NodeId, TypeId?) -> TypeId)?;
     pub var error_reporter: ((TypeErrorKind, String) -> Void)?;
+    // Bounds a type parameter gains from the enclosing method's where clause.
+    pub var extra_bounds: ((String) -> Vec<TypeId>)?;
     let members: MemberResolver;
     pub def set_infer_expression(callback: ((NodeId, TypeId?) -> TypeId)?) -> Void { self.infer_expression = callback; }
     pub static def new(arena: AstArena, types: TypeTable, symbols: SymbolTable, resolver: TypeResolver,
                        expr_types: Dict<i32, TypeId>, infer_expression: ((NodeId, TypeId?) -> TypeId)? = nil,
                        error_reporter: ((TypeErrorKind, String) -> Void)? = nil) -> GenericInference {
         GenericInference { arena, type_table: types, symbol_table: symbols, type_resolver: resolver,
-            expr_types, infer_expression, error_reporter, members: MemberResolver.new(arena, types, symbols) }
+            expr_types, infer_expression, error_reporter, extra_bounds: nil, members: MemberResolver.new(arena, types, symbols) }
     }
     pub def make_generic_param_type_args(params: Vec<NodeId>) -> Vec<TypeId> {
         let args = Vec<TypeId>.new();
@@ -230,7 +232,13 @@ pub struct GenericInference {
     // or one whose (inherited, flattened) requirements include all of the protocol's.
     pub def bound_satisfies(concrete: TypeId, protocol: TypeId) -> Bool {
         guard let info = self.type_table.get_type(concrete) else { return false; }
-        var bounds = FrozenVec<TypeId>.empty(); switch info.data { case .type_variable(let data): bounds = data.bounds; default: return false; }
+        let bounds = Vec<TypeId>.new();
+        switch info.data {
+            case .type_variable(let data):
+                for bound in data.bounds { bounds.push(bound); }
+                if let extra = self.extra_bounds { for bound in extra(data.name) { bounds.push(bound); } }
+            default: return false;
+        }
         guard let wanted = self.protocol_data(protocol) else { return false; }
         for bound in bounds {
             if bound == protocol { return true; }

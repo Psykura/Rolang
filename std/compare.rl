@@ -15,6 +15,7 @@
 // `a != b` from __eq__.
 import "vec.rl"
 import "string.rl"
+import "dict.rl"
 import "range.rl"
 
 pub protocol Equatable {
@@ -110,5 +111,17 @@ pub extension<T> Vec<T> {
         var seed = mix_hash(self.len() as u64);
         for item in self { seed = hash_combine(seed, item.hash()); }
         seed
+    }
+}
+
+// Equal when both have the same keys with equal values, in any order.
+pub extension<K, V> Dict<K, V> {
+    pub def __eq__(other: Dict<K, V>) -> Bool where V: Equatable {
+        if self.len() != other.len() { return false; }
+        for entry in self.entries() {
+            guard let value = other[entry.key] else { return false; }
+            if value != entry.value { return false; }
+        }
+        true
     }
 }

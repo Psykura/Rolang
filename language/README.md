@@ -326,6 +326,12 @@ directly. Vec uses them for `sort()`, `sorted()`, `min()`, `max()`,
 Equatable) makes struct values usable as Dict keys and Set elements by
 content.
 
+Declaring `Equatable`, `Hashable`, `Comparable`, `Encodable`, `Decodable` or
+`Codable` on a struct or enum without defining the methods derives them from
+the fields (or cases): equality and hashing of every field, field-by-field
+ordering, and JSON encoding through std.json. Methods the type defines itself
+are kept. Errors in derived code point at the field involved.
+
 A method of a generic type may bound the type's parameters with `where`
 (`def total_area() -> i32 where T: Shape`); the body may use T as a Shape and each
 call checks the receiver's type argument. Extensions of generic types name the

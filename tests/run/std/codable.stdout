@@ -1,0 +1,15 @@
+{"name":"ada","age":36,"tags":["math"],"address":{"city":"London","zip":null},"roles":["admin",{"member":7},{"pair":["x",2]},{"named":{"level":3,"title":"lead"}}],"scores":{"a":1.5}}
+round trip true
+bo 0 true
+missing member 'age'
+name: expected a string, found an integer
+roles[0]: unknown case 'boss'
+roles[0].member: expected an integer, found a string
+0.9 1.2
+1 2
+{"value":1,"items":[2,3]}
+v
+Paris 75001
+city = "Rome"
+zip = "00100"
+3 1
