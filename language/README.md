@@ -310,6 +310,9 @@ of generic parameters, and calls through a constrained type parameter infer them
 from the arguments.
 
 `Self` in a requirement is the conforming type (`def beats(other: Self) -> Bool;`).
+A requirement may be static (`static def make(n: i32) -> Self;`); generic code
+calls it on the type parameter, `T.make(1)`. Static methods of builtin types are
+called the same way: `i32.parse_or(text, 0)`.
 Such members are used through a bounded type parameter, not through `any P`.
 Requirements named after operator methods make the operators available on a
 bounded parameter: the implicitly imported `Equatable` (`__eq__`) and `Comparable`

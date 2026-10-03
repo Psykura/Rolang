@@ -305,6 +305,7 @@ pub struct ProtocolFuncReqAst {
     pub var params: Vec<NodeId>;
     pub var return_type: NodeId?;
     pub var is_async: Bool;
+    pub var is_static: Bool = false;
 }
 pub struct ProtocolPropReqAst {
     pub var visibility: String;

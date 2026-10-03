@@ -438,6 +438,11 @@ pub struct HirBuilder {
                     arguments = self.defaults(arguments, sid);
                     return self.arena.add(HirForm.call(HirCallData { type_id, callee, arguments, callee_symbol: sid }));
                 }
+                if self.result.static_requirement_calls.contains(ref.id) {
+                    // `T.make()`: the receiver is only a type, concrete after specialization.
+                    let receiver = self.arena.add(HirForm.literal(HirLiteralData { type_id: self.type_of(member.object), value: HirValue.integer("0"), kind: "type" }));
+                    return self.arena.add(HirForm.method_call(HirMethodCallData { type_id, receiver, method_name: member.member, arguments, method_symbol: nil, is_static: true }));
+                }
                 let receiver = self.expr(member.object);
                 if let inner = self.type_table.get_optional_inner(self.hir_type(receiver)) {
                     if member.member.equals("is_some") || member.member.equals("is_none") || member.member.equals("unwrap_or") {

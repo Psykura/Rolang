@@ -122,6 +122,15 @@ pub struct ExprChecker {
                     case .type_alias:
                         if let ref = symbol.decl_node { if let node = self.state.arena.get(ref) { switch node.form { case .type_alias_decl(let data): return self.state.resolve_type(data.aliased_type); default: {} } } }
                     case .enum_case: return self.state.enum_case_type(symbol);
+                    // A type parameter or builtin type as the receiver of a static call: `T.make()`, `i32.parse()`.
+                    case .generic_param:
+                        let bounds = Vec<TypeId>.new();
+                        if let ref = symbol.decl_node { if let node = self.state.arena.get(ref) { switch node.form {
+                            case .generic_param(let param): if let declared = param.bounds { for bound in declared { let resolved = self.state.resolve_type(bound); if !self.state.type_table.is_error(resolved) { bounds.push(resolved); } } }
+                            default: {}
+                        } } }
+                        return self.state.type_table.make_type_variable(symbol.name, bounds);
+                    case .builtin_type: if let builtin = self.state.type_table.get_builtin(symbol.name) { return builtin; }
                     default: {}
                 }
             }
@@ -458,7 +467,7 @@ pub struct ExprChecker {
     def is_type_reference(id: NodeId?) -> Bool {
         if let ref = id {
             if let node = self.state.arena.get(ref) { switch node.form { case .type_reference: return true; default: {} } }
-            if let sid = self.state.node_symbols[ref.id] { if let symbol = self.state.symbol_table.get_symbol(sid) { switch symbol.kind { case .struct_type | .enum_type | .builtin_type | .type_alias: return true; default: {} } } }
+            if let sid = self.state.node_symbols[ref.id] { if let symbol = self.state.symbol_table.get_symbol(sid) { switch symbol.kind { case .struct_type | .enum_type | .builtin_type | .type_alias | .generic_param: return true; default: {} } } }
         }
         false
     }
@@ -529,9 +538,10 @@ pub struct ExprChecker {
         for name in names { mapping[name] = self.state.type_table.make_type_variable(receiver + "." + name); }
         self.state.with_equalities(self.state.generic_inference.substitute_type(member, mapping))
     }
-    def protocol_member(protocol: TypeId, name: String, existential: Bool) -> TypeId? {
+    // A requirement's type; static requirements are found only on types, others only on values.
+    def protocol_member(protocol: TypeId, name: String, existential: Bool, on_type: Bool = false) -> TypeId? {
         if let info = self.state.type_table.get_type(protocol) { switch info.data { case .protocol(let data):
-            for func in data.func_requirements { if func.name.equals(name) { return self.state.type_table.make_function(func.params.to_vec(), func.return_type, !existential && func.is_async); } }
+            for func in data.func_requirements { if func.name.equals(name) && func.is_static == on_type { return self.state.type_table.make_function(func.params.to_vec(), func.return_type, !existential && func.is_async); } }
             for prop in data.prop_requirements { if prop.name.equals(name) { return prop.type_id; } }
             default: {}
         } } nil
@@ -560,7 +570,10 @@ pub struct ExprChecker {
                 }
                 return member;
             }
-            case .type_variable(let value): for bound in self.state.variable_bounds(value) { if let member = self.protocol_member(bound, data.member, false) { return self.project_member(member, value.name, bound, type); } }
+            case .type_variable(let value): for bound in self.state.variable_bounds(value) { if let member = self.protocol_member(bound, data.member, false, object_is_type) {
+                if object_is_type { self.state.result.static_requirement_calls[id.id] = true; }
+                return self.project_member(member, value.name, bound, type);
+            } }
             default: {}
         } }
         if !object_is_type { if let field = self.state.member_resolver.get_field(type, data.member) { self.field_visibility(field, id); self.state.record_call(id, CalleeKind.indirect()); return field.type_id; } }

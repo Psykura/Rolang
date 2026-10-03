@@ -128,6 +128,10 @@ pub struct ConformanceChecker {
                 switch node.form {
                     case .func_decl(let func):
                         if func.name.equals(requirement.name) {
+                            if func.is_static != requirement.is_static {
+                                var kind = "an instance method"; if requirement.is_static { kind = "a static method"; }
+                                errors.push(f"Method '{requirement.name}' must be {kind}"); return nil;
+                            }
                             if let mismatch = self.func_mismatch(func, requirement) {
                                 errors.push(f"Method '{requirement.name}' {mismatch}"); return nil;
                             }
@@ -140,10 +144,12 @@ pub struct ConformanceChecker {
         nil
     }
     def find_func_witness(concrete: TypeId, requirement: FuncRequirement, errors: Vec<String>) -> WitnessEntry? {
-        guard let members = self.type_members(concrete) else { return self.builtin_operator(concrete, requirement); }
         let original_errors = errors.len();
-        if let witness = self.find_func_in(members, requirement, errors) { return witness; }
-        if errors.len() != original_errors { return nil; }
+        // Members of the type itself (none for primitives), then extensions, then built-in operators.
+        if let members = self.type_members(concrete) {
+            if let witness = self.find_func_in(members, requirement, errors) { return witness; }
+            if errors.len() != original_errors { return nil; }
+        }
         for entry in self.extensions {
             if entry.concrete != concrete { continue; }
             for symbol_id in entry.symbols {
@@ -161,7 +167,7 @@ pub struct ConformanceChecker {
                 }
             }
         }
-        nil
+        self.builtin_operator(concrete, requirement)
     }
     // Numbers and Bool satisfy operator requirements such as `__lt__(other: Self) -> Bool`
     // with their built-in operators.

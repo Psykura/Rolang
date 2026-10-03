@@ -51,7 +51,7 @@ pub struct DeclChecker {
                                 let params = Vec<TypeId>.new();
                                 for p in req.params { if let param = self.state.param(p) { params.push(self.state.resolve_type(param.type_annotation)); } }
                                 let generics = Vec<String>.new(); for g in req.generic_params { generics.push(self.state.generic_name(g)); }
-                                funcs.push(FuncRequirement { name: req.name, params: FrozenVec<TypeId>.new(params), return_type: self.return_type(req.return_type), is_async: req.is_async, is_static: false, generic_params: FrozenVec<String>.new(generics) });
+                                funcs.push(FuncRequirement { name: req.name, params: FrozenVec<TypeId>.new(params), return_type: self.return_type(req.return_type), is_async: req.is_async, is_static: req.is_static, generic_params: FrozenVec<String>.new(generics) });
                             case .protocol_prop_req(let req): props.push(PropRequirement { name: req.name, type_id: self.state.resolve_type(req.type_annotation), has_getter: req.has_getter, has_setter: req.has_setter });
                             default: {}
                         }

@@ -510,6 +510,7 @@ struct DeclarationCursor {
     }
     def parse_protocol_func() -> NodeId? {
         let start = self.current().span;
+        let is_static = self.match_text("static");
         if !self.expect("def") { return nil; }
         if !self.at_identifier() { self.fail("requirement name"); return nil; }
         let name = self.take();
@@ -524,7 +525,7 @@ struct DeclarationCursor {
         if !self.expect(";") { return nil; }
         self.make(NodeForm.protocol_func_req(ProtocolFuncReqAst {
             visibility: "internal", name, generic_params, params, return_type,
-            is_async
+            is_async, is_static
         }), start)
     }
     def parse_protocol_property() -> NodeId? {
@@ -585,7 +586,7 @@ struct DeclarationCursor {
             }
             let word = self.spelling();
             var member: NodeId? = nil;
-            if word.equals("def") { member = self.parse_protocol_func(); }
+            if word.equals("def") || (word.equals("static") && self.next_spelling().equals("def")) { member = self.parse_protocol_func(); }
             else if word.equals("let") || word.equals("var") {
                 member = self.parse_protocol_property();
             } else if word.equals("associatedtype") {

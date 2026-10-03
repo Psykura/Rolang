@@ -51,6 +51,8 @@ pub struct TypeCheckResult {
     pub let loop_element_types: Dict<i32, TypeId>;
     // Equality operators with an optional operand (`x == 5`, `a != b`), keyed by node.
     pub let optional_comparisons: Dict<i32, Bool>;
+    // Member accesses calling a static protocol requirement through a type parameter, `T.make()`.
+    pub let static_requirement_calls: Dict<i32, Bool>;
 
     pub static def new(type_table: TypeTable) -> TypeCheckResult {
         TypeCheckResult {
@@ -65,7 +67,7 @@ pub struct TypeCheckResult {
             intrinsic_values: Dict<i32, i64>.with_capacity(16, 0),
             propagation_error_types: Dict<i32, TypeId>.with_capacity(16, 0),
             loop_element_types: Dict<i32, TypeId>.with_capacity(16, 0),
-            optional_comparisons: Dict<i32, Bool>.with_capacity(16, 0)
+            optional_comparisons: Dict<i32, Bool>.with_capacity(16, 0), static_requirement_calls: Dict<i32, Bool>.new()
         }
     }
 
