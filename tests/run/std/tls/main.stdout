@@ -6,6 +6,11 @@ certificate verification failed: unable to get local issuer certificate
 certificate verification failed: hostname mismatch
 LAX
 2 clients rejected the certificate
+verifying the server's certificate needs its host name
+partial
+true connection closed without TLS close_notify; the data may be truncated
+connection closed without TLS close_notify; the body may be truncated
+200 framed
 cannot load certificate missing.pem: No such file or directory
 cannot load private key ca.pem: unsupported
 200 hello over https

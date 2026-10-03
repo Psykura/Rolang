@@ -25,6 +25,17 @@ def echo_server(listener: AsyncListener, config: TlsConfig, connections: i32) as
     rejected
 }
 
+// Sends each reply in turn on its own connection, then drops the connection
+// without TLS close_notify.
+def abrupt_server(listener: AsyncListener, config: TlsConfig, replies: Vec<String>) async -> Void {
+    for reply in replies {
+        guard let socket = (await listener.accept()).ok_value() else { return; }
+        guard let tls = (await TlsStream.server(socket, config)).ok_value() else { continue; }
+        if reply.starts_with("HTTP") { await tls.read(); }
+        await tls.write(reply);
+    }
+}
+
 // Reads until `count` bytes arrived or the stream ends.
 def read_all(tls: TlsStream, count: i32) async -> String {
     var received = "";
@@ -87,6 +98,34 @@ def main() async -> i32 {
         case .err(let error): println(error.message);
     }
     println(f"{await serving} clients rejected the certificate");
+
+    // Verification needs the host name the certificate must match.
+    guard let pipe = AsyncPipe.create() else { return 2; }
+    switch await TlsStream.client(pipe.first, "", trusting) {
+        case .ok(let tls): println("unexpectedly verified");
+        case .err(let error): println(error.message);
+    }
+
+    // A peer that drops the connection without close_notify may be an attacker cutting data short.
+    guard let abrupt = AsyncListener.bind("127.0.0.1", 0, 16).ok_value() else { return 5; }
+    let abrupt_port = abrupt.port();
+    let replies = ["partial", "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nbody until EOF", "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nframed"];
+    let abrupt_serving = spawn abrupt_server(abrupt, server_config, replies);
+    switch await TlsStream.connect("localhost", abrupt_port, trusting) {
+        case .ok(let tls):
+            println((await tls.read()).ok_value() ?? "?");
+            switch await tls.read() { case .ok(let data): println(f"read '{data}'"); case .err(let error): println(f"{error.truncated} {error.message}"); }
+        case .err(let error): println(error.message);
+    }
+    let abrupt_client = HttpClient.new();
+    abrupt_client.tls = trusting;
+    for index in 0..<2 {
+        switch await abrupt_client.get(f"https://localhost:{abrupt_port}/") {
+            case .ok(let response): println(f"{response.status} {response.body}");
+            case .err(let error): println(error.to_string());
+        }
+    }
+    await abrupt_serving;
 
     switch TlsConfig.server("missing.pem", "key.pem") {
         case .ok(let config): println("unexpected config");

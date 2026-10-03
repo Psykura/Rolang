@@ -312,12 +312,17 @@ pub def status_reason(status: i32) -> String {
 struct HttpConnection {
     let plain: AsyncStream?;
     let secure: TlsStream?;
+    // The TLS peer closed without close_notify: messages framed by length
+    // are still complete, but a body read until EOF may have been cut short.
+    var truncated: Bool = false;
 
     def read(limit: i32) async -> Result<String, String> {
         if let tls = self.secure {
             switch await tls.read(limit) {
                 case .ok(let data): return Result<String, String>.ok(value: data);
-                case .err(let error): return Result<String, String>.err(error: error.message);
+                case .err(let error):
+                    if error.truncated { self.truncated = true; return Result<String, String>.ok(value: ""); }
+                    return Result<String, String>.err(error: error.message);
             }
         }
         guard let stream = self.plain else { return Result<String, String>.ok(value: ""); }
@@ -420,6 +425,7 @@ struct HttpReader {
                 case .err(let error): return Result<String, HttpError>.err(error: error);
             }
         }
+        if self.stream.truncated { return http_error("connection closed without TLS close_notify; the body may be truncated"); }
         let data = self.buffer;
         self.buffer = "";
         Result<String, HttpError>.ok(value: data)

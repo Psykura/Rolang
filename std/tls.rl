@@ -37,6 +37,10 @@ pub extern "C" def rt_tls_wait_start(session: RawPtr, writable: i32) -> RawPtr;
 
 pub struct TlsError {
     pub let message: String;
+    // The peer ended the connection without TLS close_notify, so an attacker
+    // may have cut the data short. Protocols that frame their messages (HTTP
+    // with Content-Length) can treat this as the end of the stream.
+    pub let truncated: Bool = false;
     pub def to_string() -> String { self.message }
 }
 
@@ -159,13 +163,15 @@ pub struct TlsStream {
         unsafe { return TlsError { message: String.from_handle(rt_tls_session_error(self.handle)) }; }
     }
 
-    // Decrypted bytes, at most `limit`; empty at the end of the stream.
+    // Decrypted bytes, at most `limit`; empty at the end of the stream. An
+    // end without close_notify is an error whose `truncated` is true.
     pub def read(limit: i32 = 65536) async -> Result<String, TlsError> {
         while true {
             var status: i32 = 0;
             var data = "";
             unsafe { data = String.from_handle(rt_tls_read(self.handle, limit, status as RawPtr)); }
             if status == 0 { return Result<String, TlsError>.ok(value: data); }
+            if status == 4 { return Result<String, TlsError>.err(error: TlsError { message: "connection closed without TLS close_notify; the data may be truncated", truncated: true }); }
             if status < 0 { return Result<String, TlsError>.err(error: self.error()); }
             if let problem = await self.wait(status) { return Result<String, TlsError>.err(error: problem); }
         }

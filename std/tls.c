@@ -11,6 +11,9 @@
 #if defined(__unix__) || defined(__APPLE__)
 #include <dlfcn.h>
 #include <signal.h>
+#ifdef __linux__
+#include <sys/auxv.h>
+#endif
 
 /* Values from the OpenSSL headers, stable across 1.1.1 and 3.x. */
 enum {
@@ -22,7 +25,8 @@ enum {
     TLS_VERSION_1_2 = 0x0303, TLS_FILETYPE_PEM = 1,
     TLS_EXT_ERR_OK = 0, TLS_EXT_ERR_NOACK = 3, TLS_NPN_NEGOTIATED = 1
 };
-#define TLS_OP_IGNORE_UNEXPECTED_EOF ((uint64_t)1 << 7)
+/* SSL_R_UNEXPECTED_EOF_WHILE_READING in ERR_LIB_SSL, as OpenSSL 3 packs it. */
+#define TLS_UNEXPECTED_EOF ((20UL << 23) | 294UL)
 
 static struct {
     int state; /* 0 not tried, 1 loaded, -1 unavailable */
@@ -60,6 +64,7 @@ static struct {
     void (*SSL_get0_alpn_selected)(const void*, const unsigned char**, unsigned int*);
     const char* (*SSL_get_version)(const void*);
     unsigned long (*ERR_get_error)(void);
+    unsigned long (*ERR_peek_error)(void);
     void (*ERR_error_string_n)(unsigned long, char*, size_t);
     const char* (*ERR_reason_error_string)(unsigned long);
     void (*ERR_clear_error)(void);
@@ -83,16 +88,34 @@ static void tls_describe(char* out, size_t size, const char* fallback) {
     tls.ERR_clear_error();
 }
 
+/* ROLANG_LIBSSL, when it is an absolute path and the program does not run
+ * with elevated privileges (setuid, setgid or file capabilities), where the
+ * environment belongs to a less privileged user. */
+static const char* tls_library_override(void) {
+    const char* path = getenv("ROLANG_LIBSSL");
+    if (!path || path[0] != '/') return NULL;
+#if defined(__linux__)
+    if (getauxval(AT_SECURE)) return NULL;
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+    if (issetugid()) return NULL;
+#else
+    if (getuid() != geteuid() || getgid() != getegid()) return NULL;
+#endif
+    return path;
+}
+
 static int tls_load(void) {
     if (tls.state) return tls.state > 0;
     tls.state = -1;
+    /* macOS searches the working directory for bare library names, so only
+     * absolute paths are tried there. */
     const char* candidates[] = {
-        getenv("ROLANG_LIBSSL"),
+        tls_library_override(),
 #ifdef __APPLE__
         "/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib",
         "/usr/local/opt/openssl@3/lib/libssl.3.dylib",
         "/opt/local/lib/libssl.3.dylib",
-        "libssl.3.dylib",
+        "/usr/local/lib/libssl.3.dylib",
 #else
         "libssl.so.3", "libssl.so.1.1", "libssl.so",
 #endif
@@ -101,7 +124,7 @@ static int tls_load(void) {
     for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]) && !library; i++)
         if (candidates[i] && candidates[i][0]) library = dlopen(candidates[i], RTLD_NOW | RTLD_LOCAL);
     if (!library) {
-        tls_fail("TLS needs OpenSSL 3 (libssl), which was not found; install it or set ROLANG_LIBSSL to the library path");
+        tls_fail("TLS needs OpenSSL 3 (libssl), which was not found; install it or set ROLANG_LIBSSL to the library's absolute path");
         return 0;
     }
 #define TLS_SYMBOL(name) \
@@ -120,7 +143,7 @@ static int tls_load(void) {
     TLS_SYMBOL(SSL_read) TLS_SYMBOL(SSL_write) TLS_SYMBOL(SSL_shutdown) TLS_SYMBOL(SSL_get_error)
     TLS_SYMBOL(SSL_get_verify_result) TLS_SYMBOL(X509_verify_cert_error_string)
     TLS_SYMBOL(SSL_get0_alpn_selected) TLS_SYMBOL(SSL_get_version)
-    TLS_SYMBOL(ERR_get_error) TLS_SYMBOL(ERR_error_string_n) TLS_SYMBOL(ERR_reason_error_string) TLS_SYMBOL(ERR_clear_error)
+    TLS_SYMBOL(ERR_get_error) TLS_SYMBOL(ERR_peek_error) TLS_SYMBOL(ERR_error_string_n) TLS_SYMBOL(ERR_reason_error_string) TLS_SYMBOL(ERR_clear_error)
 #undef TLS_SYMBOL
 #ifndef __APPLE__
     /* OpenSSL writes with write(2), which raises SIGPIPE on a closed
@@ -136,6 +159,7 @@ typedef struct TlsContext {
     int refs;
     unsigned char* alpn; /* wire format: length-prefixed protocol names */
     unsigned int alpn_size;
+    int verify; /* clients: certificates are verified, so a host name is required */
 } TlsContext;
 
 typedef struct TlsSession {
@@ -212,12 +236,11 @@ void* rt_tls_context_new(int32_t server, int32_t verify, void* ca_file, void* ce
     context = calloc(1, sizeof(*context));
     if (!context) rt_panic("TLS allocation failed");
     context->refs = 1;
+    context->verify = !server && verify;
     context->ctx = tls.SSL_CTX_new(server ? tls.TLS_server_method() : tls.TLS_client_method());
     if (!context->ctx) { tls_describe(reason, sizeof(reason), "cannot create a TLS context"); tls_fail(reason); free(context); context = NULL; goto done; }
     tls.SSL_CTX_ctrl(context->ctx, TLS_CTRL_SET_MIN_PROTO_VERSION, TLS_VERSION_1_2, NULL);
     tls.SSL_CTX_ctrl(context->ctx, TLS_CTRL_MODE, TLS_MODE_PARTIAL_WRITE | TLS_MODE_MOVING_BUFFER, NULL);
-    /* Peers that close without close_notify end the stream, as most HTTP servers do. */
-    tls.SSL_CTX_set_options(context->ctx, TLS_OP_IGNORE_UNEXPECTED_EOF);
     if (!tls_alpn(context, protocols)) goto fail;
     if (server) {
         if (tls.SSL_CTX_use_certificate_chain_file(context->ctx, cert) != 1) {
@@ -280,6 +303,11 @@ void* rt_tls_session_new(void* context_ptr, void* stream_ptr, void* host_string,
     if (server) tls.SSL_set_accept_state(ssl);
     else {
         tls.SSL_set_connect_state(ssl);
+        if (!host[0] && context->verify) {
+            /* A valid chain alone would accept a certificate issued for any host. */
+            tls_fail("verifying the server's certificate needs its host name");
+            tls.SSL_free(ssl); free(host); return NULL;
+        }
         if (host[0]) {
             unsigned char address[16];
             int numeric = inet_pton(AF_INET, host, address) == 1 || inet_pton(AF_INET6, host, address) == 1;
@@ -308,16 +336,19 @@ void rt_tls_session_free(void* ptr) {
     free(session);
 }
 
-/* 1 or 2 to wait for a readable or writable socket, 3 for a closed
- * connection, or -1 with the session's error set. */
+/* 1 or 2 to wait for a readable or writable socket, 3 for a connection the
+ * peer closed with close_notify, 4 for one closed without it (the data may
+ * have been truncated by an attacker), or -1 with the session's error set. */
 static int tls_step(TlsSession* session, int result) {
     int error = tls.SSL_get_error(session->ssl, result);
     if (error == TLS_ERROR_WANT_READ) return 1;
     if (error == TLS_ERROR_WANT_WRITE) return 2;
     if (error == TLS_ERROR_ZERO_RETURN) { tls.ERR_clear_error(); return 3; }
+    if (error == TLS_ERROR_SSL && (tls.ERR_peek_error() & 0x7FFFFFFFUL) == TLS_UNEXPECTED_EOF) { tls.ERR_clear_error(); return 4; }
     if (error == TLS_ERROR_SYSCALL) {
         int code = errno;
-        if (tls.ERR_get_error() == 0 && (result == 0 || code == 0)) { tls.ERR_clear_error(); return 3; }
+        /* OpenSSL 1.1.1 reports an unexpected EOF this way. */
+        if (tls.ERR_peek_error() == 0 && (result == 0 || code == 0)) { tls.ERR_clear_error(); return 4; }
         snprintf(session->error, sizeof(session->error), "%s", code ? strerror(code) : "connection failed");
         tls.ERR_clear_error();
         return -1;
@@ -340,11 +371,12 @@ int32_t rt_tls_handshake(void* ptr) {
     int result = tls.SSL_do_handshake(session->ssl);
     if (result == 1) return 0;
     int step = tls_step(session, result);
-    if (step == 3) { snprintf(session->error, sizeof(session->error), "connection closed during the TLS handshake"); return -1; }
+    if (step == 3 || step == 4) { snprintf(session->error, sizeof(session->error), "connection closed during the TLS handshake"); return -1; }
     return step;
 }
 
-/* Up to `limit` bytes; status 0 with an empty result is the end of the stream. */
+/* Up to `limit` bytes; status 0 with an empty result is the end of the
+ * stream, and status 4 an end without close_notify. */
 void* rt_tls_read(void* ptr, int32_t limit, int32_t* status) {
     TlsSession* session = ptr;
     if (limit < 1) limit = 1;
@@ -374,7 +406,7 @@ int32_t rt_tls_write(void* ptr, void* data, int32_t offset, int32_t* status) {
     int result = tls.SSL_write(session->ssl, value.data + offset, chunk);
     if (result > 0) return result;
     int step = tls_step(session, result);
-    if (step == 3) { snprintf(session->error, sizeof(session->error), "connection closed"); step = -1; }
+    if (step == 3 || step == 4) { snprintf(session->error, sizeof(session->error), "connection closed"); step = -1; }
     *status = step;
     return 0;
 }
