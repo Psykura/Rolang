@@ -385,6 +385,9 @@ pub struct CompilationDriver {
                 if !is_llvm_bitcode(data) { return self.fail("LTO requires LLVM bitcode from the C compiler; use --cc with a clang compatible with --clang"); }
             }
             let link = self.tool_args(self.cc); link.push(object); link.push(runtime_obj); link.push("-lm"); link.push("-o"); link.push(artifact);
+            // std.tls loads OpenSSL with dlopen, which glibc before 2.34 keeps in libdl.
+            var link_target = self.options.target; if link_target.len() == 0 { link_target = host_target(); }
+            if link_target.contains("linux") { link.push("-ldl"); }
             link.push("-O" + self.options.opt_level.to_string());
             if self.options.lto.equals("none") { link.push("-fno-lto"); }
             else { link.push("-flto=" + self.options.lto); }

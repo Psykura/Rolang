@@ -44,6 +44,8 @@ static void rl_resolve_ready(TaskHandle* task);
 void rl_async_ready(TaskHandle* task) {
 #if defined(__unix__) || defined(__APPLE__)
     if (task->native_kind == 8) { rl_resolve_ready(task); return; }
+    /* Readiness waits (TLS) leave the I/O to the waiting task. */
+    if (task->native_kind == 9 || task->native_kind == 10) { rl_task_native_result(task, 0); return; }
     if (task->native_kind == 4) {
         int error = 0;
         socklen_t size = sizeof(error);

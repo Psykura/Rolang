@@ -1,4 +1,4 @@
-// Standard library: HTTP/1.1 clients and servers over TCP.
+// Standard library: HTTP/1.1 clients and servers over TCP, with https over TLS.
 //
 //     switch await http_get("http://example.com/") {
 //         case .ok(let response): println(f"{response.status} {response.body.len()} bytes");
@@ -12,8 +12,10 @@
 //     });
 //
 // Bodies are binary-safe strings. Requests and responses carry their length
-// (or use chunked encoding); clients follow up to five redirects. https URLs
-// need TLS, which is not available yet.
+// (or use chunked encoding); clients follow up to five redirects. https uses
+// std.tls: clients verify servers against the system's trusted certificates
+// (`client.tls` changes that), and `HttpServer.bind(..., tls: config)` serves
+// https.
 import "string.rl"
 import "vec.rl"
 import "dict.rl"
@@ -22,6 +24,7 @@ import "result.rl"
 import "task.rl"
 import "string_builder.rl"
 import "async_io.rl"
+import "tls.rl"
 import "json.rl"
 import "time.rl"
 
@@ -305,9 +308,47 @@ pub def status_reason(status: i32) -> String {
 
 // ---- Wire format ----
 
-// Bytes read from a stream, consumed as lines, fixed-size blocks or until EOF.
+// A TCP connection, or TLS over one.
+struct HttpConnection {
+    let plain: AsyncStream?;
+    let secure: TlsStream?;
+
+    def read(limit: i32) async -> Result<String, String> {
+        if let tls = self.secure {
+            switch await tls.read(limit) {
+                case .ok(let data): return Result<String, String>.ok(value: data);
+                case .err(let error): return Result<String, String>.err(error: error.message);
+            }
+        }
+        guard let stream = self.plain else { return Result<String, String>.ok(value: ""); }
+        switch await stream.read(limit) {
+            case .ok(let data): return Result<String, String>.ok(value: data);
+            case .err(let code): return Result<String, String>.err(error: os_error_message(code));
+        }
+    }
+    def write(data: String) async -> Result<i32, String> {
+        if let tls = self.secure {
+            switch await tls.write(data) {
+                case .ok(let count): return Result<i32, String>.ok(value: count);
+                case .err(let error): return Result<i32, String>.err(error: error.message);
+            }
+        }
+        guard let stream = self.plain else { return Result<i32, String>.err(error: "connection closed"); }
+        switch await stream.write(data) {
+            case .ok(let count): return Result<i32, String>.ok(value: count);
+            case .err(let code): return Result<i32, String>.err(error: os_error_message(code));
+        }
+    }
+    // Ends the sending side: TLS close_notify, or a TCP half-close.
+    def finish() async -> Void {
+        if let tls = self.secure { await tls.close(); return; }
+        if let stream = self.plain { stream.shutdown_write(); }
+    }
+}
+
+// Bytes read from a connection, consumed as lines, fixed-size blocks or until EOF.
 struct HttpReader {
-    let stream: AsyncStream;
+    let stream: HttpConnection;
     var buffer: String;
     var eof: Bool;
     let max_body: i32;
@@ -319,7 +360,7 @@ struct HttpReader {
                 if data.len() == 0 { self.eof = true; return Result<Bool, HttpError>.ok(value: false); }
                 self.buffer = self.buffer + data;
                 return Result<Bool, HttpError>.ok(value: true);
-            case .err(let code): return http_error(f"read failed: {os_error_message(code)}");
+            case .err(let message): return http_error(f"read failed: {message}");
         }
     }
     // The header block up to the blank line; nil at a clean EOF before any byte.
@@ -458,12 +499,15 @@ pub struct HttpClient {
     pub var timeout: Duration;
     // Sent with every request unless the request sets the same field.
     pub let headers: HttpHeaders;
+    // TLS settings for https, such as trusted certificates; nil verifies
+    // servers against the system's trusted certificates.
+    pub var tls: TlsConfig?;
 
     pub static def new() -> HttpClient {
         let headers = HttpHeaders.new();
         headers.set("User-Agent", "Rolang");
         headers.set("Accept", "*/*");
-        HttpClient { follow_redirects: true, max_body: 67108864, timeout: Duration.seconds(30), headers }
+        HttpClient { follow_redirects: true, max_body: 67108864, timeout: Duration.seconds(30), headers, tls: nil }
     }
 
     pub def get(url: String) async -> Result<HttpResponse, HttpError> { await self.send(HttpRequest.new("GET"), url) }
@@ -483,7 +527,6 @@ pub struct HttpClient {
         var method = request.method; var body = request.body;
         var redirects = 0;
         while true {
-            if target.scheme.equals("https") { return http_error("https needs TLS, which std.http does not support yet"); }
             var response = HttpResponse.new(0);
             let exchange = spawn self.exchange(method, target, request.headers, body);
             guard let outcome = await with_timeout(exchange, self.timeout) else {
@@ -507,12 +550,20 @@ pub struct HttpClient {
     }
 
     def exchange(method: String, url: Url, extra: HttpHeaders, body: String) async -> Result<HttpResponse, HttpError> {
-        var connected: AsyncStream? = nil;
+        var stream: AsyncStream? = nil;
         switch await AsyncStream.connect(url.host, url.port) {
-            case .ok(let stream): connected = stream;
+            case .ok(let connected): stream = connected;
             case .err(let code): return http_error(f"cannot connect to {url.authority()}: {os_error_message(code)}");
         }
-        guard let connection = connected else { return http_error("connection failed"); }
+        guard let socket = stream else { return http_error("connection failed"); }
+        var secure: TlsStream? = nil;
+        if url.scheme.equals("https") {
+            switch await TlsStream.client(socket, url.host, self.tls) {
+                case .ok(let established): secure = established;
+                case .err(let error): return http_error(f"TLS with {url.authority()} failed: {error.message}");
+            }
+        }
+        let connection = HttpConnection { plain: socket, secure };
         let headers = HttpHeaders.new();
         headers.set("Host", url.authority());
         for field in self.headers.entries() { if !extra.contains(field.name) { headers.add(field.name, field.value); } }
@@ -521,7 +572,7 @@ pub struct HttpClient {
         if body.len() > 0 || method.equals("POST") || method.equals("PUT") || method.equals("PATCH") { headers.set("Content-Length", body.len().to_string()); }
         switch await connection.write(write_message(f"{method} {url.target()} HTTP/1.1", headers, body)) {
             case .ok(let count): {}
-            case .err(let code): return http_error(f"write failed: {os_error_message(code)}");
+            case .err(let message): return http_error(f"write failed: {message}");
         }
         let reader = HttpReader { stream: connection, buffer: "", eof: false, max_body: self.max_body };
         while true {
@@ -567,11 +618,14 @@ pub struct HttpServer {
     // A connection is closed when a request's head or body takes longer,
     // including the wait for the next request on a keep-alive connection.
     pub var idle_timeout: Duration;
+    // Serves https with this certificate when set.
+    pub var tls: TlsConfig?;
 
-    // Listens on a numeric address; port zero picks a free port.
-    pub static def bind(address: String, port: i32) -> Result<HttpServer, HttpError> {
+    // Listens on a numeric address; port zero picks a free port. With
+    // `tls` (from TlsConfig.server), connections use https.
+    pub static def bind(address: String, port: i32, tls: TlsConfig? = nil) -> Result<HttpServer, HttpError> {
         switch AsyncListener.bind(address, port, 128) {
-            case .ok(let listener): return Result<HttpServer, HttpError>.ok(value: HttpServer { listener, max_body: 16777216, idle_timeout: Duration.seconds(60) });
+            case .ok(let listener): return Result<HttpServer, HttpError>.ok(value: HttpServer { listener, max_body: 16777216, idle_timeout: Duration.seconds(60), tls });
             case .err(let code): return http_error(f"cannot listen on {address}:{port}: {os_error_message(code)}");
         }
     }
@@ -587,7 +641,7 @@ pub struct HttpServer {
             switch await self.listener.accept() {
                 case .ok(let stream):
                     accepted += 1;
-                    running.push(spawn serve_connection(stream, handler, self.max_body, self.idle_timeout));
+                    running.push(spawn serve_connection(stream, handler, self.max_body, self.idle_timeout, self.tls));
                 case .err(let code): return http_error(f"accept failed: {os_error_message(code)}");
             }
         }
@@ -596,7 +650,17 @@ pub struct HttpServer {
     }
 }
 
-def serve_connection(stream: AsyncStream, handler: (HttpRequest) async -> HttpResponse, max_body: i32, idle: Duration) async -> Void {
+def serve_connection(socket: AsyncStream, handler: (HttpRequest) async -> HttpResponse, max_body: i32, idle: Duration, tls: TlsConfig?) async -> Void {
+    var secure: TlsStream? = nil;
+    if let config = tls {
+        // A client that fails the handshake, or stalls in it, is dropped.
+        guard let handshake = await with_timeout(spawn TlsStream.server(socket, config), idle) else { return; }
+        switch handshake {
+            case .ok(let established): secure = established;
+            case .err(let error): return;
+        }
+    }
+    let stream = HttpConnection { plain: socket, secure };
     let reader = HttpReader { stream, buffer: "", eof: false, max_body };
     while true {
         var head = "";
@@ -625,10 +689,10 @@ def serve_connection(stream: AsyncStream, handler: (HttpRequest) async -> HttpRe
         if !(await respond(stream, response, keep_alive, request.method.equals("HEAD"))) { break; }
         if !keep_alive { break; }
     }
-    stream.shutdown_write();
+    await stream.finish();
 }
 
-def respond(stream: AsyncStream, response: HttpResponse, keep_alive: Bool, head_only: Bool = false) async -> Bool {
+def respond(stream: HttpConnection, response: HttpResponse, keep_alive: Bool, head_only: Bool = false) async -> Bool {
     let headers = HttpHeaders.new();
     for field in response.headers.entries() { headers.add(field.name, field.value); }
     if !headers.contains("Server") { headers.set("Server", "Rolang"); }
@@ -638,6 +702,6 @@ def respond(stream: AsyncStream, response: HttpResponse, keep_alive: Bool, head_
     var body = response.body; if head_only { body = ""; }
     switch await stream.write(write_message(f"HTTP/1.1 {response.status} {reason}", headers, body)) {
         case .ok(let count): return true;
-        case .err(let code): return false;
+        case .err(let message): return false;
     }
 }

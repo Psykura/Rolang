@@ -126,6 +126,9 @@ pub struct AsyncStream {
     pub def shutdown_write() -> i32 {
         unsafe { return rt_async_stream_shutdown(self.handle); }
     }
+
+    // The runtime's stream object, for native code layered over the stream.
+    pub unsafe def raw_handle() -> RawPtr { return self.handle; }
 }
 
 pub struct AsyncPipe {

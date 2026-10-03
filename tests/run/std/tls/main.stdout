@@ -1,0 +1,14 @@
+TLSv1.3 http/1.1
+HELLO TLS
+1048576 true
+IP
+certificate verification failed: unable to get local issuer certificate
+certificate verification failed: hostname mismatch
+LAX
+2 clients rejected the certificate
+cannot load certificate missing.pem: No such file or directory
+cannot load private key ca.pem: unsupported
+200 hello over https
+200 300000 bytes
+TLS with localhost:PORT failed: certificate verification failed: unable to get local issuer certificate
+served 3 connections

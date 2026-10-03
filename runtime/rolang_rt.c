@@ -21,4 +21,5 @@
 #include "scheduler.c"
 #include "../std/task.c"
 #include "../std/async_io.c"
+#include "../std/tls.c"
 #include "entry.c"

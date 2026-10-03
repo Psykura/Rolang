@@ -49,7 +49,6 @@ def main() async -> i32 {
     switch await http_get(f"http://127.0.0.1:{listener.port()}/") { case .ok(let r): println(f"chunked {r.body}"); case .err(let e): println(e.to_string()); }
     await chunked;
 
-    switch await http_get("https://example.com/") { case .ok(let r): println("?"); case .err(let e): println(e.to_string()); }
     switch await http_get("http://127.0.0.1:1/") { case .ok(let r): println("?"); case .err(let e): println(e.to_string()); }
     let url = Url.parse("http://Example.com:8080/a/b?x=1#frag");
     println(f"{url?.host ?? "?"} {url?.port ?? 0} {url?.target() ?? "?"} {url?.join("../c?y=2")?.to_string() ?? "?"} {url?.join("/d")?.to_string() ?? "?"}");

@@ -17,9 +17,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install LLVM
+      - name: Install LLVM and OpenSSL
         run: |
-          brew install llvm
+          brew install llvm openssl@3
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
 
       - name: Fetch bootstrap compiler

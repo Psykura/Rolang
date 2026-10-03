@@ -5,7 +5,6 @@
 keep-alive 2 true
 served 6 connections
 chunked hello, world
-https needs TLS, which std.http does not support yet
 cannot connect to 127.0.0.1:1: Connection refused
 example.com 8080 /a/b?x=1 http://example.com:8080/c?y=2 http://example.com:8080/d
 a%20b%2F%C3%BC a b/ü two words true
