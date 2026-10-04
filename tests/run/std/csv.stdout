@@ -1,0 +1,21 @@
+2 [<a><b><c>][<1><2><3>]
+2 [<a><b>][<x, y><say "hi">]
+2 [<multi\nline><z>][<><>]
+1 [<one>]
+0 
+line 1: unexpected character after a quoted field
+line 1: quote inside an unquoted field
+line 1: unterminated quoted field
+ada is 36
+grace is 85
+line 2: expected 2 fields, found 1
+name,note
+ada,"says ""hi"", twice"
+x," padded"
+multi,"a
+b"
+4 says "hi", twice 3
+a;"b;c"
+name,age,note
+ada,36,
+grace,85,"cobol, compilers"
