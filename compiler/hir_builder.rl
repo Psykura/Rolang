@@ -335,6 +335,7 @@ pub struct HirBuilder {
                 return self.arena.add(HirForm.unary_op(HirUnaryOpData { type_id, op: data.op, operand }));
             case .ternary_op(let data): return self.arena.add(HirForm.ternary(HirTernaryData { type_id, condition: self.expr(data.condition), then_expr: self.expr(data.then_expr), else_expr: self.expr(data.else_expr) }));
             case .call(let data):
+                if let lowered = self.result.lowered_expressions[ref.id] { return self.expr(lowered); }
                 let call = self.call(ref, data);
                 if let explicit = self.result.explicit_type_args[ref.id] { self.arena.type_arguments[call.id] = explicit; }
                 return call;
@@ -519,16 +520,17 @@ pub struct HirBuilder {
     }
     // The checker rewrites field, call and subscript chains to an ordinary expression whose
     // receiver is the `__opt_chain` binding of the unwrapped object.
+    // The binding an optional chain's content starts from (or the type of
+    // `Type?.member`), below its member accesses, calls and subscripts.
     def chain_binding(content: NodeId) -> NodeId? {
         guard let node = self.ast.get(content) else { return nil; }
-        var member: NodeId? = nil;
-        switch node.form { case .member_access: member = content; case .call(let data): member = data.callee; case .subscript(let data): member = data.object; default: {} }
-        if let ref = member { if let child = self.ast.get(ref) { switch child.form {
-            case .member_access(let access): return access.object;
-            // `object?[index]`: the subscript's object is the binding itself.
-            case .identifier: return ref;
+        switch node.form {
+            case .identifier, .type_reference: return content;
+            case .member_access(let data): if let object = data.object { return self.chain_binding(object); }
+            case .call(let data): if let callee = data.callee { return self.chain_binding(callee); }
+            case .subscript(let data): if let object = data.object { return self.chain_binding(object); }
             default: {}
-        } } }
+        }
         nil
     }
     def optional_chain(id: NodeId, data: OptionalChainAst, type: TypeId) -> HirId {

@@ -234,7 +234,8 @@ converts to `T` and wraps the result.
 path. With a non-optional value these bindings need a refutable pattern, such as
 `while let .item(value) = next()`.
 Chaining covers fields, method calls and subscripts (`a?.items[0]`,
-`a?.find(key)`); an optional member is not wrapped again, so `a?.next?.value`
+`a?.find(key)`), and the steps after it continue the chain: `a?.name.trim().len()`
+is nil when `a` is. An optional member is not wrapped again, so `a?.next?.value`
 has type `T?`. Chained calls must not return Void.
 
 Postfix `?` in a function returning an optional unwraps a present value or

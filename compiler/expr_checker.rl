@@ -424,6 +424,18 @@ pub struct ExprChecker {
         let old = self.state.expected_type; self.state.expected_type = nil;
         defer { self.state.expected_type = old; }
         guard let callee = data.callee else { return self.state.type_table.error_type; }
+        // `a?.b.method(x)`: the call joins the optional chain.
+        if let node = self.state.arena.get(callee) { switch node.form { case .member_access(let member):
+            if self.syntactic_chain(member.object) {
+                let object_type = self.state.infer_with_expected(member.object, nil);
+                if let parts = self.chain_parts(member.object, object_type) {
+                    let method = self.state.arena.add(NodeForm.member_access(MemberAccessAst { object: parts.1, member: member.member, type_args: member.type_args }), self.span_of(callee));
+                    let step = self.state.arena.add(NodeForm.call(CallAst { callee: method, arguments: data.arguments, is_interpolation: data.is_interpolation }), self.span_of(id));
+                    self.state.expected_type = old;
+                    return self.extend_chain(id, parts.0, step);
+                }
+            }
+            default: {} } }
         let prev = self.callee; self.callee = callee;
         var implicit = false;
         if let node = self.state.arena.get(callee) { switch node.form { case .member_access(let member): implicit = member.object == nil; default: {} } }
@@ -620,6 +632,11 @@ pub struct ExprChecker {
             } } return self.state.type_table.error_type;
         } }
         let type = self.state.infer_with_expected(data.object, nil); let object_is_type = self.is_type_reference(data.object);
+        var called = false; if let callee = self.callee { called = callee == id; }
+        if !called { if let parts = self.chain_parts(data.object, type) {
+            let step = self.state.arena.add(NodeForm.member_access(MemberAccessAst { object: parts.1, member: data.member, type_args: data.type_args }), self.span_of(id));
+            return self.extend_chain(id, parts.0, step);
+        } }
         if let info = self.state.type_table.get_type(type) { switch info.data {
             case .existential(let value): if let member = self.protocol_member(value.protocol_id, data.member, true) {
                 // Through `any P` the concrete type is unknown, so a member must not depend on
@@ -660,6 +677,50 @@ pub struct ExprChecker {
     }
     // `.case`, or `.case(payload)` as a callee: the case of the enum the context
     // expects, also through an optional.
+    def span_of(id: NodeId) -> Span? { if let node = self.state.arena.get(id) { return node.span; } nil }
+    // An optional chain or a step already joined to one: `a?.b`, `a?.b.c`.
+    def syntactic_chain(id: NodeId?) -> Bool {
+        guard let ref = id else { return false; }
+        guard let node = self.state.arena.get(ref) else { return false; }
+        switch node.form {
+            case .optional_chain(let data): return data.member.len() > 0 || data.suffix != nil;
+            case .member_access(let data): return self.syntactic_chain(data.object);
+            case .call(let data): if let callee = data.callee { return self.syntactic_chain(callee); }
+            case .subscript(let data): return self.syntactic_chain(data.object);
+            default: {}
+        }
+        false
+    }
+    // For an optional `object` that is an optional chain: the chain node and the
+    // content it evaluates on the unwrapped value.
+    def chain_parts(object: NodeId?, type: TypeId) -> (NodeId, NodeId)? {
+        guard let ref = object else { return nil; }
+        if !self.state.type_table.is_optional(type) || !self.syntactic_chain(ref) { return nil; }
+        var chain = ref;
+        if let lowered = self.state.lowered_expressions[ref.id] {
+            if let node = self.state.arena.get(lowered) { switch node.form { case .optional_chain: chain = lowered; default: {} } }
+        }
+        guard let node = self.state.arena.get(chain) else { return nil; }
+        switch node.form { case .optional_chain: {} default: return nil; }
+        guard let content = self.state.lowered_expressions[chain.id] else { return nil; }
+        (chain, content)
+    }
+    // `a?.b.c`: a member access, call or subscript after an optional chain
+    // continues it, so the whole expression is nil when `a` is.
+    def extend_chain(id: NodeId, chain: NodeId, step: NodeId) -> TypeId {
+        var object: NodeId? = nil;
+        if let node = self.state.arena.get(chain) { switch node.form { case .optional_chain(let data): object = data.object; default: {} } }
+        let combined = self.state.arena.add(NodeForm.optional_chain(OptionalChainAst { object, member: "", suffix: nil }), self.span_of(id));
+        self.state.lowered_expressions[combined.id] = step;
+        self.state.lowered_expressions[id.id] = combined;
+        let result = self.infer_expr(step);
+        if self.state.type_table.is_error(result) { return result; }
+        if result == self.state.type_table.void_type { self.state.error(TypeErrorKind.invalid_operation(), "Optional chaining cannot end in a call returning Void; unwrap the value with if let", id); return self.state.type_table.error_type; }
+        var type = result;
+        if !self.state.type_table.is_optional(result) { type = self.state.type_table.make_optional(result); }
+        self.state.result.expr_types[combined.id] = type;
+        type
+    }
     def implicit_member(id: NodeId, data: MemberAccessAst) -> TypeId {
         var enum_type: TypeId? = nil;
         if let expected = self.state.expected_type {
@@ -688,6 +749,10 @@ pub struct ExprChecker {
     def symbol_name(id: SymbolId?) -> String { if let sid = id { if let sym = self.state.symbol_table.get_symbol(sid) { return sym.name; } } "" }
     def subscript_expr(id: NodeId, data: SubscriptAst) -> TypeId {
         let type = self.state.infer_expr(data.object);
+        if let parts = self.chain_parts(data.object, type) {
+            let step = self.state.arena.add(NodeForm.subscript(SubscriptAst { object: parts.1, indices: data.indices }), self.span_of(id));
+            return self.extend_chain(id, parts.0, step);
+        }
         let indices = Vec<TypeId>.new(); for index in data.indices { indices.push(self.state.infer_with_expected(index, nil)); }
         if let info = self.state.type_table.get_type(type) { switch info.data { case .struct_type(let value):
             let name = self.symbol_name(value.symbol_id);
