@@ -103,6 +103,10 @@ struct LlvmModuleEmitter {
                     if template || owner.starts_with("std:") { linkage = "weak_odr "; }
                     else if owner.len() > 0 && !owner.equals(self.owner) { defined = false; }
                 } else { linkage = "internal "; }
+            } else if !name.equals("__rolang_user_main") {
+                // A whole program keeps its functions to itself, so one named like a C
+                // library function (`rename`, `free`) cannot replace it for the runtime.
+                linkage = "internal ";
             }
             self.linkages[name] = linkage;
             self.function_names.push(name);
