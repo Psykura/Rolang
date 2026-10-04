@@ -10,10 +10,13 @@ TaskHandle* rt_async_sleep_start(int64_t ms) {
     return task;
 }
 
+void rl_task_finished(TaskHandle* task);
+
 int32_t rt_task_cancel(TaskHandle* task) {
     if (!task || task->completed) return 0;
     task->cancelled = task->completed = 1;
     rl_task_clear_dependency(task, 1);
+    rl_task_finished(task);
     return 1;
 }
 
@@ -21,9 +24,12 @@ int32_t rt_task_cancelled(TaskHandle* task) { return task && task->cancelled; }
 
 void rt_task_destroy(TaskHandle* task) {
     if (!task) return;
-    rt_task_cancel(task);
+    if (!task->detached) rt_task_cancel(task);
     rl_task_release(task);
 }
+
+/* The task keeps running when its Task is released. */
+void rt_task_detach(TaskHandle* task) { if (task) task->detached = 1; }
 
 void rt_task_gc_trace(void* payload, GCTraceCb cb, void* ctx) {
     if (!payload || !cb) return;

@@ -6,5 +6,5 @@ closed 1000
 plain http
 HTTP/1.1 200 OK
 true true
-882303ea
 server: WebSocket protocol error: the client sent an unmasked frame
+882303ea

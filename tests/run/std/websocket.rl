@@ -50,9 +50,10 @@ def main() async -> i32 {
     await bad.write((hex_decode("8102") ?? "") + "hi");
     // The server answers with a close frame (opcode 8, code 1002).
     let closing = (await bad.read(4096)).ok_value() ?? "";
-    println(f"{hex_encode(closing.substring(0, 4))}");
     bad.shutdown_write();
     await serving;
+    // After the server's own report, so the output order does not depend on scheduling.
+    println(f"{hex_encode(closing.substring(0, 4))}");
     0
 }
 def describe(result: Result<WebSocketMessage?, HttpError>) -> String {

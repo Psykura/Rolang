@@ -9,6 +9,7 @@
 int32_t rt_task_cancel(TaskHandle* task);
 void rt_task_gc_trace(void* payload, GCTraceCb cb, void* ctx);
 void rt_task_destroy(TaskHandle* task);
+void rt_task_detach(TaskHandle* task);
 int32_t rt_task_poll(TaskHandle* task);
 int32_t rt_task_cancelled(TaskHandle* task);
 void* rt_task_join(TaskHandle* task);
