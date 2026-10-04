@@ -1,3 +1,4 @@
+done
 [hello world] exit code 0 true
 [out] [err] exit code 3
 cannot run no-such-program-xyz: No such file or directory

@@ -27,6 +27,7 @@ typedef struct ChildJob {
     int owners;     /* the waiting thread and the Child object */
     pid_t pid;
     int done;       /* the child has been reaped */
+    int failed;     /* waiting failed, so the status is unknown */
     int status;     /* waitpid status */
     int notify;     /* pipe write end, owned by the thread */
     int ready;      /* pipe read end, readable once the child is reaped */
@@ -44,11 +45,18 @@ static void child_job_release(ChildJob* job) {
 
 static void* child_wait_thread(void* argument) {
     ChildJob* job = argument;
-    int status = 0;
-    pid_t waited;
-    do { waited = waitpid(job->pid, &status, 0); } while (waited < 0 && errno == EINTR);
+    /* Wait without reaping, then reap under the lock: rt_child_kill either runs
+     * while the pid still names this (zombie) child or sees `done`, so it never
+     * signals an unrelated process that reused the pid. */
+    siginfo_t info;
+    int waited;
+    do { memset(&info, 0, sizeof(info)); waited = waitid(P_PID, (id_t)job->pid, &info, WEXITED | WNOWAIT); } while (waited < 0 && errno == EINTR);
     pthread_mutex_lock(&job->lock);
-    job->status = waited < 0 ? 0 : status;
+    int status = 0;
+    pid_t reaped;
+    do { reaped = waitpid(job->pid, &status, 0); } while (reaped < 0 && errno == EINTR);
+    job->status = status;
+    job->failed = waited < 0 || reaped < 0;
     job->done = 1;
     pthread_mutex_unlock(&job->lock);
     char byte = 1;
@@ -108,8 +116,12 @@ static char** child_environment(char** overrides, int override_count, int cleare
 }
 
 static int child_socketpair(int fds[2]) {
+#ifdef SOCK_CLOEXEC
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds) < 0) return errno;
+#else
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) < 0) return errno;
     (void)fcntl(fds[0], F_SETFD, FD_CLOEXEC); (void)fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+#endif
     return 0;
 }
 
@@ -152,10 +164,20 @@ void* rt_child_spawn(void* program_string, void* arguments, void* environment, i
     /* The child starts with default signal handling (the parent may ignore SIGPIPE). */
     sigset_t defaults; sigemptyset(&defaults); sigaddset(&defaults, SIGPIPE);
     posix_spawnattr_setsigdefault(&attributes, &defaults);
-    posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETSIGDEF);
+    short flags = POSIX_SPAWN_SETSIGDEF;
+    /* The child gets only its three standard streams: descriptors the program
+     * opened without close-on-exec (files, sockets) stay with the parent. */
+#ifdef POSIX_SPAWN_CLOEXEC_DEFAULT
+    flags |= POSIX_SPAWN_CLOEXEC_DEFAULT;
+#endif
+    posix_spawnattr_setflags(&attributes, flags);
     int status = 0;
     for (int stream = 0; stream < 3 && !status; stream++) {
-        if (modes[stream] == 1) {
+        if (modes[stream] == 0) {
+#ifdef POSIX_SPAWN_CLOEXEC_DEFAULT
+            posix_spawn_file_actions_addinherit_np(&actions, stream);
+#endif
+        } else if (modes[stream] == 1) {
             status = child_socketpair(pairs[stream]);
             if (!status) {
                 posix_spawn_file_actions_adddup2(&actions, pairs[stream][1], stream);
@@ -164,6 +186,9 @@ void* rt_child_spawn(void* program_string, void* arguments, void* environment, i
             posix_spawn_file_actions_addopen(&actions, stream, "/dev/null", stream == 0 ? O_RDONLY : O_WRONLY, 0);
         }
     }
+#if !defined(POSIX_SPAWN_CLOEXEC_DEFAULT) && defined(__GLIBC__) && (__GLIBC__ > 2 || __GLIBC_MINOR__ >= 34)
+    if (!status) status = posix_spawn_file_actions_addclosefrom_np(&actions, 3);
+#endif
     if (!status && cwd) {
 #if defined(__APPLE__) || (defined(__GLIBC__) && (__GLIBC__ > 2 || __GLIBC_MINOR__ >= 29))
         status = posix_spawn_file_actions_addchdir_np(&actions, cwd);
@@ -218,13 +243,15 @@ TaskHandle* rt_child_wait_start(void* child) {
     return task;
 }
 
-/* The exit code, or -1 with `signal` set when a signal ended the child. */
+/* The exit code, or -1 with `signal` set when a signal ended the child; -1
+ * with no signal when the status is unknown (waiting failed). */
 int32_t rt_child_status(void* child, int32_t* signal) {
     ChildJob* job = child;
     pthread_mutex_lock(&job->lock);
-    int status = job->status;
+    int status = job->status, failed = job->failed || !job->done;
     pthread_mutex_unlock(&job->lock);
     *signal = 0;
+    if (failed) return -1;
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     if (WIFSIGNALED(status)) { *signal = WTERMSIG(status); return -1; }
     return -1;

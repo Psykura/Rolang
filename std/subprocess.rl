@@ -161,6 +161,8 @@ pub struct Child {
             code = rt_child_status(self.handle, signal as RawPtr);
         }
         if signal != 0 { return ExitStatus { code: nil, signal }; }
+        // -1 without a signal: waiting failed and the status is unknown.
+        if code < 0 { return ExitStatus { code: nil, signal: nil }; }
         ExitStatus { code, signal: nil }
     }
     // Sends a signal (SIGTERM by default); false when the program has exited.

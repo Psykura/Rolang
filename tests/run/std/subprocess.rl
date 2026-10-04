@@ -1,6 +1,12 @@
 import std.io
 import std.subprocess
+import std.fs
 def main() async -> i32 {
+    // A file the parent opened is not passed to children.
+    var file: File? = nil;
+    unsafe { file = File.open("subprocess.rl", 0); }
+    let inherited = await Command.new("/bin/sh").arg("-c").arg("for n in 3 4 5 6 7 8 9; do if [ -e /dev/fd/$n ]; then printf \"$n \"; fi; done; echo done").output();
+    println(inherited.ok_value()?.stdout.trim() ?? "?");
     switch await run("echo", ["hello", "world"]) {
         case .ok(let r): println(f"[{r.stdout.trim()}] {r.status} {r.status.success()}");
         case .err(let e): println(e.to_string());
