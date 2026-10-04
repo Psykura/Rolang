@@ -25,4 +25,5 @@
 #include "../std/subprocess.c"
 #include "../std/encoding.c"
 #include "../std/crypto.c"
+#include "../std/regex.c"
 #include "entry.c"

@@ -1,0 +1,40 @@
+\d+ on abc 123 def: [123] at 4..7
+(\w+)@(\w+)\.com on mail ro@lang.com now: [ro@lang.com] at 5..16|ro|lang
+^abc$ on abc: [abc] at 0..3
+a.c on a
+c: no match
+(?s)a.c on a
+c: [a
+c] at 0..3
+(?i)hello on Say HeLLo: [HeLLo] at 4..9
+colou?r on color: [color] at 0..5
+a{2,3} on aaaa: [aaa] at 0..3
+a{2,3}? on aaaa: [aa] at 0..2
+<.+> on <a><b>: [<a><b>] at 0..6
+<.+?> on <a><b>: [<a>] at 0..3
+(a|ab)(c|bcd)(d*) on abcd: [abcd] at 0..4|a|bcd|
+\bcat\b on concat cat: [cat] at 7..10
+[^a-c]+ on abcdefabc: [def] at 3..6
+[\d\s]+ on x 1 2 3y: [ 1 2 3] at 1..7
+(x)?y on y: [y] at 0..1|nil
+é+ on café été: [é] at 3..5
+[à-ü]+ on naïve: [ï] at 2..4
+(a*)*b on aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac: no match
+(?m)^\w+$ on one
+two: [one] at 0..3
+\x41\x{1F600} on A😀: [A😀] at 0..5
+invalid pattern (abc: unclosed group at offset 4
+invalid pattern abc): unmatched ) at offset 3
+invalid pattern [a-: unclosed character class at offset 3
+invalid pattern *a: repetition with nothing to repeat at offset 0
+invalid pattern a{3,2}: repetition maximum below minimum at offset 6
+invalid pattern \q: unknown escape at offset 1
+invalid pattern (?<n>a)(?<n>b): duplicate group name at offset 11
+from 04.10.2026 to 31.01.2027.
+from [2026-10-04] $ to 2027-01-31.
+2 10 3
+<a><b><c><d>
+-a-b-c-
+HELLO BIG WORLD
+a\.b\*c
+true
