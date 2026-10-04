@@ -14,8 +14,10 @@ enum { RX_BOL, RX_EOL, RX_BOT, RX_EOT, RX_WORD, RX_NOT_WORD };
 enum { RX_IGNORE_CASE = 1, RX_MULTILINE = 2, RX_DOT_ALL = 4 };
 #define RX_MAX_PROGRAM 50000
 #define RX_MAX_REPEAT 1000
-/* Nesting of groups and repetitions, which bounds the parser's and compiler's recursion. */
+/* Nesting of groups and of repetitions on one atom, which bounds the parser's
+ * recursion; the syntax tree's height, which bounds the compiler's. */
 #define RX_MAX_DEPTH 200
+#define RX_MAX_HEIGHT 1000
 #define RX_MAX_GROUPS 1000
 /* Instructions times capture slots: the VM's per-search thread storage. */
 #define RX_MAX_SLOTS (4 * 1024 * 1024)
@@ -28,6 +30,7 @@ typedef struct { RxRange* ranges; int32_t count, capacity, negated; } RxClass;
 enum { RN_EMPTY, RN_CHAR, RN_ANY, RN_CLASS, RN_CONCAT, RN_ALT, RN_REPEAT, RN_GROUP, RN_ASSERT };
 typedef struct RxNode {
     int32_t kind, value, min, max, greedy, flags;
+    int32_t height;  /* longest path to a leaf: the compiler's recursion depth */
     struct RxNode** children; int32_t count, capacity;
 } RxNode;
 
@@ -101,6 +104,7 @@ static RxNode* rx_node(RxParser* p, int32_t kind) {
 static void rx_add_child(RxNode* parent, RxNode* child) {
     parent->children = rx_grow(parent->children, &parent->capacity, parent->count + 1, sizeof(RxNode*));
     parent->children[parent->count++] = child;
+    if (child->height + 1 > parent->height) parent->height = child->height + 1;
 }
 static int rx_fail(RxParser* p, const char* message) {
     if (!p->error[0]) snprintf(p->error, sizeof(p->error), "%s at offset %lld", message, (long long)p->at);
@@ -489,6 +493,7 @@ void* rt_regex_compile(void* pattern_string, int32_t flags) {
     parser.length = pattern.len; parser.re = re; parser.flags = flags;
     RxNode* tree = rx_alternation(&parser);
     if (tree && parser.at < parser.length) { rx_fail(&parser, parser.pattern[parser.at] == ')' ? "unmatched )" : "unexpected character"); tree = NULL; }
+    if (tree && tree->height > RX_MAX_HEIGHT) { snprintf(parser.error, sizeof(parser.error), "pattern nested too deeply"); tree = NULL; }
     int ok = tree != NULL;
     if (ok) {
         ok = rx_emit(re, RX_SAVE, 0, 0) >= 0 && rx_compile(re, tree) && rx_emit(re, RX_SAVE, 1, 0) >= 0 && rx_emit(re, RX_MATCH, 0, 0) >= 0;
