@@ -144,6 +144,8 @@ def main() -> i32 {
 ~~~
 
 Instance methods access `self`; `static def` methods are called on a type.
+Parameter, argument, type-argument, tuple and collection lists accept a
+trailing comma.
 Function-value signatures also describe higher-order callbacks.
 
 ## Structs, field shorthand and copying
@@ -182,9 +184,12 @@ def main() -> i32 {
 ## Enums, patterns and exhaustive switch
 
 Enum cases can carry typed payloads. Patterns bind those payloads, match nested
-optionals/enum cases, and may add `where` guards. Guarded or partial patterns do
-not establish complete coverage. A value-producing switch needs compatible arm
-types and exhaustive coverage; the input is evaluated once.
+optionals/enum cases, literals (including negative numbers), ranges of numbers
+or characters (`case 1...9:`, `case 'a'..<'z':`) and alternatives (`case 1 | 2:`),
+and may add `where` guards. Guarded or partial patterns do not establish complete
+coverage. A value-producing switch needs compatible arm types and exhaustive
+coverage, so one over numbers or strings needs `default`; the input is evaluated
+once.
 
 <!-- example: patterns -->
 ~~~rolang
@@ -210,14 +215,20 @@ def main() -> i32 {
 
 Switch is available as a statement or expression. `if c { a } else { b }` is
 also an expression, including `else if` chains, when each branch holds a single
-expression. Enum construction can use `Type.case(...)` or a contextually typed
-dot shorthand.
+expression. Enum construction can use `Type.case(...)` or, where the context
+expects the enum (an annotation, parameter, return, field, collection element,
+the other operand of `==`/`!=`, or the other branch of a conditional), the dot
+shorthand `.case(...)`: `if mode == .fast`, `run(.custom(3))`.
 
 ## Optionals, guards and propagation
 
 `T?` represents a value or `nil`. `if let` binds a present value, `while let`
 repeats while one is present, `guard let` requires one and keeps the binding
 after the guard, `??` supplies a fallback, and `?.` performs optional chaining.
+`if`, `guard` and `while` take a list of conditions, each able to use the
+bindings before it: `if let user = find(id), user.active, let name = user.name { ... }`.
+An optional function value is called with `f?(arguments)`, and `value as T?`
+converts to `T` and wraps the result.
 `x == nil` and `x != nil` test for a value, and `x == 5` compares a present value
 (`nil` equals only `nil`, so two optionals are equal when both are nil). A guard's else branch must leave the
 path. With a non-optional value these bindings need a refutable pattern, such as
@@ -310,8 +321,9 @@ of generic parameters, and calls through a constrained type parameter infer them
 from the arguments.
 
 `Self` in a requirement is the conforming type (`def beats(other: Self) -> Bool;`).
-A generic function's type arguments may be written at the call, `parse<i32>(text)`
-or `decode_json<User>(text)`, which is needed when they appear only in the body.
+A generic function's type arguments may be written at the call, `parse<i32>(text)`,
+`decode_json<User>(text)` or `store.first<User>()` for methods, which is needed
+when they appear only in the body.
 Optionals are Equatable and Hashable when their value type is.
 A requirement may be static (`static def make(n: i32) -> Self;`); generic code
 calls it on the type parameter, `T.make(1)`. Static methods of builtin types are
@@ -515,7 +527,8 @@ U+FFFD), `graphemes()`/`grapheme_count()` give extended grapheme clusters
 encoding and `String.from_scalar(cp)` encodes one code point.
 
 Ordinary quoted literals process escapes, including `\u{1F600}` for any Unicode
-scalar (also in character literals). Raw literals preserve backslashes;
+scalar (also in character literals). Raw literals preserve backslashes, and
+`r#"..."#` (with as many `#` as needed) may contain quotes;
 triple-quoted literals preserve newlines and indentation. Explicit `f"..."`
 interpolation evaluates fields once from left to right through to_string.
 `{{` and `}}` emit literal braces. `{value:spec}` formats with a
@@ -554,7 +567,8 @@ escaping function when embedding data into another language.
 ## Control flow, defer and cleanup
 
 if, while and for use lexical scopes. break/continue exit the corresponding
-loop path. defer runs in reverse registration order on normal synchronous
+loop path; a loop labeled `outer: for ...` (or `outer: while ...`) is left or
+continued from a nested loop with `break outer` and `continue outer`. defer runs in reverse registration order on normal synchronous
 scope exits, returns and supported propagation paths.
 
 <!-- example: defer -->

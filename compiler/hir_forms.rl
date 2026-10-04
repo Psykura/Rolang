@@ -115,11 +115,13 @@ pub struct HirGuardData {
 pub struct HirWhileData {
     pub var condition: HirId;
     pub var body: HirId;
+    pub var label: String? = nil;
 }
 pub struct HirForData {
     pub var pattern: HirId;
     pub var iterable: HirId;
     pub var body: HirId;
+    pub var label: String? = nil;
 }
 pub struct HirSwitchCaseData {
     pub var patterns: Vec<(HirId, HirId?)>;
@@ -272,6 +274,9 @@ pub struct HirBindingPatternData {
 pub struct HirLiteralPatternData {
     pub var value: HirValue;
     pub var type_id: TypeId;
+    // The other end of a range pattern, `value...upper` or `value..<upper`.
+    pub var upper: HirValue? = nil;
+    pub var inclusive: Bool = false;
 }
 pub struct HirTuplePatternData {
     pub var elements: Vec<(String?, HirId)>;
@@ -306,8 +311,9 @@ pub enum HirForm {
     case assign(HirAssignData);
     case expr_stmt(HirExprStmtData);
     case return_stmt(HirReturnData);
-    case break_stmt;
-    case continue_stmt;
+    // The label of the loop to leave or continue; nil for the innermost loop.
+    case break_stmt(String?);
+    case continue_stmt(String?);
     case if_stmt(HirIfData);
     case if_let(HirIfLetData);
     case guard_stmt(HirGuardData);
@@ -671,8 +677,8 @@ pub enum HirForm {
             case .return_stmt(let data):
                 var new_value: HirId? = nil; if let x = data.value { new_value = node(x); }
                 return HirForm.return_stmt(HirReturnData { value: new_value });
-            case .break_stmt: return HirForm.break_stmt();
-            case .continue_stmt: return HirForm.continue_stmt();
+            case .break_stmt(let label): return HirForm.break_stmt(label);
+            case .continue_stmt(let label): return HirForm.continue_stmt(label);
             case .if_stmt(let data):
                 let new_condition = node(data.condition);
                 let new_then_block = node(data.then_block);
@@ -691,12 +697,12 @@ pub enum HirForm {
             case .while_stmt(let data):
                 let new_condition = node(data.condition);
                 let new_body = node(data.body);
-                return HirForm.while_stmt(HirWhileData { condition: new_condition, body: new_body });
+                return HirForm.while_stmt(HirWhileData { condition: new_condition, body: new_body, label: data.label });
             case .for_stmt(let data):
                 let new_pattern = node(data.pattern);
                 let new_iterable = node(data.iterable);
                 let new_body = node(data.body);
-                return HirForm.for_stmt(HirForData { pattern: new_pattern, iterable: new_iterable, body: new_body });
+                return HirForm.for_stmt(HirForData { pattern: new_pattern, iterable: new_iterable, body: new_body, label: data.label });
             case .switch_case(let data):
                 let new_patterns = Vec<(HirId, HirId?)>.new();
                 for x in data.patterns { let first = node(x.0); var second: HirId? = nil; if let y = x.1 { second = node(y); } new_patterns.push((first, second)); }
@@ -861,7 +867,7 @@ pub enum HirForm {
             case .literal_pattern(let data):
                 let new_value = data.value;
                 let new_type_id = type(data.type_id);
-                return HirForm.literal_pattern(HirLiteralPatternData { value: new_value, type_id: new_type_id });
+                return HirForm.literal_pattern(HirLiteralPatternData { value: new_value, type_id: new_type_id, upper: data.upper, inclusive: data.inclusive });
             case .tuple_pattern(let data):
                 let new_elements = Vec<(String?, HirId)>.new();
                 for x in data.elements { new_elements.push((x.0, node(x.1))); }

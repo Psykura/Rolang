@@ -17,6 +17,8 @@ pub struct AstArena {
     // use arenas without recovery.
     pub var recovering: Bool;
     pub let syntax_errors: Vec<SyntaxError>;
+    // Labels of loops (`outer: for ...`) and of the break and continue statements naming them.
+    pub let labels: Dict<i32, String> = Dict<i32, String>.new();
 
     pub static def new(recovering: Bool = false) -> AstArena {
         AstArena { nodes: Vec<AstNode>.new(), source_modules: Dict<i32, String>.with_capacity(16, 0),

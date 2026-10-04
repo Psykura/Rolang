@@ -56,6 +56,9 @@ pub struct IdentifierPatternAst {
 }
 pub struct LiteralPatternAst {
     pub var value: NodeId?;
+    // `low...high` or `low..<high` matches a range of numbers or characters.
+    pub var upper: NodeId? = nil;
+    pub var inclusive: Bool = false;
 }
 pub struct TuplePatternAst {
     pub var elements: Vec<(String?, NodeId)>;
@@ -112,6 +115,8 @@ pub struct TryExprAst {
 pub struct MemberAccessAst {
     pub var object: NodeId?;
     pub var member: String;
+    // Explicit type arguments of a generic method call: `value.convert<T>(x)`.
+    pub var type_args: Vec<NodeId> = Vec<NodeId>.new();
 }
 pub struct OptionalChainAst {
     pub var object: NodeId?;
@@ -609,6 +614,7 @@ pub enum NodeForm {
                 if let child = data.protocol { result.push(child); }
             case .literal_pattern(let data):
                 if let child = data.value { result.push(child); }
+                if let child = data.upper { result.push(child); }
             case .tuple_pattern(let data):
                 for pair in data.elements { result.push(pair.1); }
             case .enum_case_pattern(let data):

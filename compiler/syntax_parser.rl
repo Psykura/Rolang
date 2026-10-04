@@ -528,6 +528,7 @@ struct ExpressionCursor {
             arguments.push(self.make(NodeForm.argument(ArgumentAst { label, value }), start));
             if self.match_text(")") { break; }
             if !self.expect(",") { return nil; }
+            if self.match_text(")") { break; }
         }
         arguments
     }
@@ -537,6 +538,7 @@ struct ExpressionCursor {
         guard let first = self.parse_expression() else { return nil; }
         indices.push(first);
         while self.match_text(",") {
+            if self.spelling().equals("]") { break; }
             guard let next = self.parse_expression() else { return nil; }
             indices.push(next);
         }
@@ -559,8 +561,19 @@ struct ExpressionCursor {
                 var valid = self.at_identifier();
                 switch token.kind { case .integer: valid = true; default: {} }
                 if !valid { self.fail("member name"); return nil; }
-                let member = self.take();
-                result = self.make(NodeForm.member_access(MemberAccessAst { object: result, member }), start);
+                if self.generic_call_ahead() {
+                    // `value.method<T>(...)` passes explicit type arguments.
+                    guard let named = self.parse_named_type() else { return nil; }
+                    guard let node = self.arena.get(named) else { return nil; }
+                    switch node.form {
+                        case .named_type(let method):
+                            result = self.make(NodeForm.member_access(MemberAccessAst { object: result, member: method.name, type_args: method.generic_args }), start);
+                        default: self.fail("method name"); return nil;
+                    }
+                } else {
+                    let member = self.take();
+                    result = self.make(NodeForm.member_access(MemberAccessAst { object: result, member }), start);
+                }
             } else if self.match_text("?.") {
                 if !self.at_identifier() { self.fail("optional member name"); return nil; }
                 let member = self.take();
@@ -585,6 +598,13 @@ struct ExpressionCursor {
                 result = self.make(NodeForm.optional_chain(OptionalChainAst {
                     object: result, member: "", suffix: AstOptionalSuffix.index(indices)
                 }), start);
+            } else if self.spelling().equals("?") && self.adjacent_bracket("(") {
+                // `function?(arguments)` calls an optional function value.
+                self.take();
+                guard let arguments = self.parse_arguments() else { return nil; }
+                result = self.make(NodeForm.optional_chain(OptionalChainAst {
+                    object: result, member: "", suffix: AstOptionalSuffix.call(arguments)
+                }), start);
             } else if self.spelling().equals("?") && !self.ternary_question() {
                 self.take();
                 result = self.make(NodeForm.try_expr(TryExprAst { value: result }), start);
@@ -595,10 +615,10 @@ struct ExpressionCursor {
         result
     }
     // A `[` written directly after the current `?`, as in `value?[0]`.
-    def adjacent_bracket() -> Bool {
+    def adjacent_bracket(bracket: String = "[") -> Bool {
         if self.index + 1 >= self.tokens.len() { return false; }
         let question = self.tokens[self.index].span; let next = self.tokens[self.index + 1];
-        next.text.equals("[") && next.span.line == question.end_line && next.span.column == question.end_column
+        next.text.equals(bracket) && next.span.line == question.end_line && next.span.column == question.end_column
     }
     def parse_intrinsic(name: String, start: Span) -> NodeId? {
         self.take();
@@ -635,6 +655,7 @@ struct ExpressionCursor {
         guard let second = self.parse_tuple_element() else { return nil; }
         elements.push(second);
         while self.match_text(",") {
+            if self.spelling().equals(")") { break; }
             guard let next = self.parse_tuple_element() else { return nil; }
             elements.push(next);
         }
@@ -660,6 +681,7 @@ struct ExpressionCursor {
             guard let value = self.parse_expression() else { return nil; }
             entries.push((first, value));
             while self.match_text(",") {
+                if self.spelling().equals("]") { break; }
                 guard let key = self.parse_expression() else { return nil; }
                 if !self.expect(":") { return nil; }
                 guard let entry_value = self.parse_expression() else { return nil; }
@@ -671,6 +693,7 @@ struct ExpressionCursor {
         let elements = Vec<NodeId>.new();
         elements.push(first);
         while self.match_text(",") {
+            if self.spelling().equals("]") { break; }
             guard let next = self.parse_expression() else { return nil; }
             elements.push(next);
         }
@@ -937,38 +960,70 @@ struct ExpressionCursor {
         self.end_column = cursor.end_column;
         expression
     }
-    def typed_primary_ahead() -> Bool {
-        if !self.at_identifier() { return false; }
+    // `name<...>(`: a member name, explicit type arguments and a call.
+    def generic_call_ahead() -> Bool {
+        if !self.at_identifier() || self.index + 1 >= self.tokens.len() || !self.tokens[self.index + 1].text.equals("<") { return false; }
         var depth = 0;
-        var saw_generic = false;
         var look = self.index + 1;
         while look < self.tokens.len() {
             let token = self.tokens[look];
             let word = token.text;
-            if depth == 0 && word.equals("{") { return true; }
-            if word.equals("<") { depth += 1; saw_generic = true; }
+            if word.equals("<") { depth += 1; }
             else if word.equals(">") { depth -= 1; }
             else if word.equals(">>") { depth -= 2; }
-            else if depth > 0 {
-                // Only type syntax can appear inside generic arguments, so `a < 1 || b > c.d` is a comparison.
+            else {
                 switch token.kind {
                     case .identifier: {}
                     default: if !type_argument_punctuation(word) { return false; }
                 }
-            } else if depth == 0 {
-                if word.equals(".") || word.equals("?.") {
-                    if saw_generic { return true; }
-                } else if word.equals("(") && saw_generic && self.tokens[look - 1].text.ends_with(">") {
-                    // `name<T>(...)` calls a generic function with explicit type arguments.
-                    return true;
-                } else {
+            }
+            if depth < 0 { return false; }
+            if depth == 0 { return look + 1 < self.tokens.len() && self.tokens[look + 1].text.equals("("); }
+            look += 1;
+        }
+        false
+    }
+    // A type at the start of a primary: `Name {` and `Name<T> {` (struct literals),
+    // `Name<T>.member`, `Name<T>?.member` and `name<T>(...)`. After the type
+    // arguments close, the next token decides, so `f(a < b, c > d.e)` compares.
+    def typed_primary_ahead() -> Bool {
+        if !self.at_identifier() { return false; }
+        var depth = 0;
+        var saw_generic = false;
+        var dotted = false;
+        var look = self.index + 1;
+        while look < self.tokens.len() {
+            let token = self.tokens[look];
+            let word = token.text;
+            if depth == 0 {
+                if saw_generic {
+                    if word.equals(".") || word.equals("?.") || word.equals("{") { return true; }
+                    // `value.method<T>(...)` is a method call, parsed as a postfix.
+                    if word.equals("(") { return !dotted; }
+                    return false;
+                }
+                if word.equals("{") { return true; }
+                if word.equals("<") { depth = 1; saw_generic = true; }
+                else if word.equals(".") { dotted = true; }
+                else {
                     switch token.kind {
                         case .identifier: {}
                         default: return false;
                     }
                 }
+            } else {
+                // Only type syntax can appear inside generic arguments, so `a < 1 || b > c.d` is a comparison.
+                if word.equals("<") { depth += 1; }
+                else if word.equals(">") { depth -= 1; }
+                else if word.equals(">>") { depth -= 2; }
+                else {
+                    switch token.kind {
+                        case .identifier: {}
+                        default: if !type_argument_punctuation(word) { return false; }
+                    }
+                }
+                if depth < 0 { return false; }
             }
-            if depth < 0 { return false; }
             look += 1;
         }
         false
@@ -1031,6 +1086,16 @@ struct ExpressionCursor {
             self.take();
             return self.make(form, start);
         }
+        // `.case` names a case of the enum the context expects.
+        if self.spelling().equals(".") && self.index + 1 < self.tokens.len() {
+            switch self.tokens[self.index + 1].kind {
+                case .identifier:
+                    self.take();
+                    let member = self.take();
+                    return self.make(NodeForm.member_access(MemberAccessAst { object: nil, member }), start);
+                default: {}
+            }
+        }
         if self.spelling().equals("(") && arrow_lambda_ahead(self.tokens, self.index) { return self.parse_lambda_expr(); }
         if self.spelling().equals("(") { return self.parse_parenthesized(start); }
         if self.spelling().equals("[") { return self.parse_collection(start); }
@@ -1087,6 +1152,9 @@ struct StatementCursor {
     var end_line: i32;
     var end_column: i32;
     var error: SyntaxError?;
+    // Statements that follow the one just parsed in the same block, such as the
+    // further guards of `guard let a = x, let b = y else { ... }`.
+    var following: Vec<NodeId> = Vec<NodeId>.new();
 
     def current() -> LexToken {
         if self.index < self.tokens.len() { return self.tokens[self.index]; }
@@ -1159,13 +1227,16 @@ struct StatementCursor {
     // Probe candidate boundaries in a separate arena. A following operator or
     // parenthesis may start the next statement, so token lookahead alone cannot
     // distinguish the body from a struct literal in the condition.
-    def parse_condition_expression(delimiter: String) -> NodeId? {
+    def parse_condition_expression(delimiter: String, list: Bool = false) -> NodeId? {
         var boundary = self.index;
         var nesting = 0;
         var first_boundary = -1;
         var chosen_boundary = -1;
+        var at_comma = false;
         while boundary < self.tokens.len() {
             let word = self.tokens[boundary].text;
+            // In a condition list, a top-level comma ends this condition.
+            if list && word.equals(",") && nesting == 0 && first_boundary < 0 { at_comma = true; break; }
             if word.equals(delimiter) && nesting == 0 {
                 if !delimiter.equals("{") { break; }
                 if first_boundary < 0 { first_boundary = boundary; }
@@ -1193,7 +1264,7 @@ struct StatementCursor {
             else if word.equals(")") || word.equals("]") { nesting -= 1; }
             boundary += 1;
         }
-        if delimiter.equals("{") {
+        if delimiter.equals("{") && !at_comma {
             if chosen_boundary >= 0 { boundary = chosen_boundary; }
             else if first_boundary >= 0 { boundary = first_boundary; }
         }
@@ -1208,15 +1279,35 @@ struct StatementCursor {
         self.accept_end();
         result.expression
     }
-    def parse_condition(delimiter: String) -> AstCondition? {
+    def parse_condition(delimiter: String, list: Bool = false) -> AstCondition? {
         if self.match_text("let") {
             guard let pattern = self.parse_pattern() else { return nil; }
             if !self.expect("=") { return nil; }
-            guard let value = self.parse_condition_expression(delimiter) else { return nil; }
+            guard let value = self.parse_condition_expression(delimiter, list) else { return nil; }
             return AstCondition.binding(pattern, value);
         }
-        guard let value = self.parse_condition_expression(delimiter) else { return nil; }
+        guard let value = self.parse_condition_expression(delimiter, list) else { return nil; }
         AstCondition.expression(value)
+    }
+    def loop_label_ahead() -> Bool {
+        if !self.at_identifier() || self.index + 2 >= self.tokens.len() { return false; }
+        if !self.tokens[self.index + 1].text.equals(":") { return false; }
+        let keyword = self.tokens[self.index + 2].text;
+        keyword.equals("for") || keyword.equals("while")
+    }
+    // `c1, c2, ...`: each condition may use the bindings of those before it.
+    def parse_conditions(delimiter: String) -> Vec<AstCondition>? {
+        let conditions = Vec<AstCondition>.new();
+        while true {
+            guard let condition = self.parse_condition(delimiter, true) else { return nil; }
+            conditions.push(condition);
+            if !self.match_text(",") { break; }
+        }
+        conditions
+    }
+    def parse_else() -> NodeId? {
+        if self.spelling().equals("if") { return self.parse_if(); }
+        self.parse_block()
     }
     def assignment_ahead() -> Bool {
         var depth = 0;
@@ -1241,6 +1332,7 @@ struct StatementCursor {
         guard let first = self.parse_expression() else { return nil; }
         indices.push(first);
         while self.match_text(",") {
+            if self.spelling().equals("]") { break; }
             guard let next = self.parse_expression() else { return nil; }
             indices.push(next);
         }
@@ -1330,10 +1422,12 @@ struct StatementCursor {
            word.equals("break") || word.equals("continue") || word.equals("if") ||
            word.equals("guard") || word.equals("while") || word.equals("for") ||
            (word.equals("switch") && braced_switch_ahead(self.tokens, self.index)) || word.equals("defer") || word.equals("unsafe") ||
-           word.equals("{") ||
+           word.equals("{") || self.loop_label_ahead() ||
            self.assignment_ahead() {
             guard let statement = self.parse_statement() else { return nil; }
             statements.push(statement);
+            for extra in self.following { statements.push(extra); }
+            self.following = Vec<NodeId>.new();
             return false;
         }
         let expression_start = self.current().span;
@@ -1398,7 +1492,7 @@ struct StatementCursor {
                     annotation = type_node;
                 }
                 params.push((pattern, annotation));
-                if !self.match_text(",") { break; }
+                if !self.match_text(",") || self.spelling().equals(")") { break; }
             }
         }
         if !self.expect(")") { return nil; }
@@ -1415,39 +1509,88 @@ struct StatementCursor {
         promote_tail_switch(self.arena, body);
         self.make(NodeForm.lambda(LambdaAst { params, body, return_type, is_async }), start)
     }
+    // `if c1, c2 { a } else { b }` is `if c1 { if c2 { a } else { b } } else { b }`;
+    // each copy of the else branch is parsed again from its tokens.
     def parse_if() -> NodeId? {
         let start = self.current().span;
         self.take();
-        guard let condition = self.parse_condition("{") else { return nil; }
+        guard let conditions = self.parse_conditions("{") else { return nil; }
         guard let then_block = self.parse_block() else { return nil; }
         var else_block: NodeId? = nil;
+        var else_start = -1;
         if self.match_text("else") {
-            if self.spelling().equals("if") {
-                guard let nested = self.parse_if() else { return nil; }
-                else_block = nested;
-            } else {
-                guard let block = self.parse_block() else { return nil; }
-                else_block = block;
-            }
+            else_start = self.index;
+            guard let branch = self.parse_else() else { return nil; }
+            else_block = branch;
         }
-        self.make(NodeForm.if_stmt(IfStmtAst { condition, then_block, else_block }), start)
+        let end = self.index; let end_line = self.end_line; let end_column = self.end_column;
+        var body = then_block;
+        var index = conditions.len() - 1;
+        while index >= 1 {
+            var otherwise: NodeId? = nil;
+            if else_start >= 0 {
+                self.index = else_start;
+                guard let copy = self.parse_else() else { return nil; }
+                otherwise = copy;
+            }
+            let inner = self.make(NodeForm.if_stmt(IfStmtAst { condition: conditions[index], then_block: body, else_block: otherwise }), start);
+            body = self.make(NodeForm.block(BlockAst { statements: [inner], is_unsafe: false }), start);
+            index -= 1;
+        }
+        self.index = end; self.end_line = end_line; self.end_column = end_column;
+        self.make(NodeForm.if_stmt(IfStmtAst { condition: conditions[0], then_block: body, else_block }), start)
     }
+    // `guard c1, c2 else { b }` is `guard c1 else { b }` followed by `guard c2 else { b }`.
     def parse_guard() -> NodeId? {
         let start = self.current().span;
         self.take();
-        guard let condition = self.parse_condition("else") else { return nil; }
+        guard let conditions = self.parse_conditions("else") else { return nil; }
         if !self.expect("else") { return nil; }
+        let else_start = self.index;
         guard let else_block = self.parse_block() else { return nil; }
-        self.make(NodeForm.guard_stmt(GuardStmtAst { condition, else_block }), start)
+        let end = self.index; let end_line = self.end_line; let end_column = self.end_column;
+        // Collected apart: blocks parsed meanwhile take `following` for their own statements.
+        let guards = Vec<NodeId>.new();
+        for index in 1..<conditions.len() {
+            self.index = else_start;
+            guard let copy = self.parse_block() else { return nil; }
+            guards.push(self.make(NodeForm.guard_stmt(GuardStmtAst { condition: conditions[index], else_block: copy }), start));
+        }
+        for item in guards { self.following.push(item); }
+        self.index = end; self.end_line = end_line; self.end_column = end_column;
+        self.make(NodeForm.guard_stmt(GuardStmtAst { condition: conditions[0], else_block }), start)
+    }
+    // A top-level comma before the loop body: `while x > 0, let y = next() {`.
+    def condition_list_ahead() -> Bool {
+        var nesting = 0; var look = self.index;
+        while look < self.tokens.len() {
+            let word = self.tokens[look].text;
+            if word.equals("(") || word.equals("[") { nesting += 1; }
+            else if word.equals(")") || word.equals("]") { nesting -= 1; }
+            else if nesting == 0 && (word.equals("{") || word.equals(";")) { return false; }
+            else if nesting == 0 && word.equals(",") { return true; }
+            look += 1;
+        }
+        false
     }
     def parse_while() -> NodeId? {
         let start = self.current().span;
         self.take();
-        if self.spelling().equals("let") {
+        if self.spelling().equals("let") || self.condition_list_ahead() {
             // `while let p = e { body }` is `while true { if let p = e { body } else { break; } }`,
-            // so continue re-evaluates e and break leaves the loop.
-            guard let binding = self.parse_condition("{") else { return nil; }
-            guard let body = self.parse_block() else { return nil; }
+            // so continue re-evaluates e and break leaves the loop; with a list
+            // `while c1, c2 { body }`, each condition that fails breaks.
+            guard let conditions = self.parse_conditions("{") else { return nil; }
+            guard let body_block = self.parse_block() else { return nil; }
+            var body = body_block;
+            var index = conditions.len() - 1;
+            while index >= 1 {
+                let stop = self.make(NodeForm.block(BlockAst { statements: [self.make(NodeForm.break_stmt, start)], is_unsafe: false }), start);
+                let inner = self.make(NodeForm.if_stmt(IfStmtAst { condition: conditions[index], then_block: body, else_block: stop }), start);
+                body = self.make(NodeForm.block(BlockAst { statements: [inner], is_unsafe: false }), start);
+                index -= 1;
+            }
+            let binding = conditions[0];
             let exit = Vec<NodeId>.new(); exit.push(self.make(NodeForm.break_stmt, start));
             let otherwise = self.make(NodeForm.block(BlockAst { statements: exit, is_unsafe: false }), start);
             let step = Vec<NodeId>.new();
@@ -1496,6 +1639,8 @@ struct StatementCursor {
             }
             guard let statement = self.parse_statement() else { return nil; }
             body.push(statement);
+            for extra in self.following { body.push(extra); }
+            self.following = Vec<NodeId>.new();
         }
         self.make(NodeForm.switch_case(SwitchCaseAst { patterns, body, is_default }), start)
     }
@@ -1552,12 +1697,28 @@ struct StatementCursor {
         if word.equals("unsafe") { return self.parse_unsafe(); }
         if word.equals("let") || word.equals("var") { return self.parse_binding(); }
         if word.equals("return") { return self.parse_return(); }
+        // `name: for ...` or `name: while ...` labels a loop for `break name` and `continue name`.
+        if self.loop_label_ahead() {
+            let label = self.take();
+            self.take();
+            guard let loop = self.parse_statement() else { return nil; }
+            self.arena.labels[loop.id] = label;
+            return loop;
+        }
         if word.equals("break") || word.equals("continue") {
             let start = self.current().span;
             self.take();
+            var label: String? = nil;
+            if self.at_identifier() && self.current().span.line == start.line { label = self.take(); }
             self.match_text(";");
-            if word.equals("break") { return self.make(NodeForm.break_stmt(), start); }
-            return self.make(NodeForm.continue_stmt(), start);
+            if word.equals("break") {
+                let statement = self.make(NodeForm.break_stmt(), start);
+                if let name = label { self.arena.labels[statement.id] = name; }
+                return statement;
+            }
+            let statement = self.make(NodeForm.continue_stmt(), start);
+            if let name = label { self.arena.labels[statement.id] = name; }
+            return statement;
         }
         if self.assignment_ahead() { return self.parse_assignment(); }
         let start = self.current().span;

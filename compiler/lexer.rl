@@ -184,6 +184,29 @@ struct Scanner {
         else { self.emit(LexKind.string(), start, start_line, start_column); }
     }
 
+    // `r#"..."#`: a raw string ending at a quote followed by as many `#` as
+    // opened it, so it may contain `"` (and `"#` with `r##"..."##`). False when
+    // the `#`s are not followed by a quote.
+    def scan_hashed_raw(start: i32, start_line: i32, start_column: i32) -> Bool {
+        var hashes = 0;
+        while self.peek(1 + hashes) == 35 { hashes += 1; }
+        if self.peek(1 + hashes) != 34 { return false; }
+        self.advance_many(2 + hashes);
+        while self.peek() >= 0 {
+            if self.peek() == 34 {
+                var closing = 0;
+                while closing < hashes && self.peek(1 + closing) == 35 { closing += 1; }
+                if closing == hashes {
+                    self.advance_many(1 + hashes);
+                    self.emit(LexKind.raw_string(), start, start_line, start_column);
+                    return true;
+                }
+            }
+            self.advance();
+        }
+        self.fail("unterminated raw string", start_line, start_column);
+        true
+    }
     def scan_character(start: i32, start_line: i32, start_column: i32) -> Void {
         self.advance();
         var count = 0;
@@ -280,6 +303,7 @@ struct Scanner {
         let start_column = self.column;
         if self.starts("//") { self.skip_line_comment(); return; }
         if self.starts("/*") { self.skip_block_comment(start_line, start_column); return; }
+        if byte == 114 && self.peek(1) == 35 && self.scan_hashed_raw(start, start_line, start_column) { return; }
         if (byte == 114 || byte == 102) && self.peek(1) == 34 {
             self.scan_string(start, start_line, start_column, byte == 114, byte == 102, true);
             return;

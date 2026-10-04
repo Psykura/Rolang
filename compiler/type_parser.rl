@@ -86,8 +86,8 @@ struct TypeCursor {
         var result = base;
         while true {
             var depth = 0;
-            if self.match_text("?") { depth = 1; }
-            else if self.spelling().equals("??") && self.closes_type(self.next_spelling()) { self.take(); depth = 2; }
+            if self.spelling().equals("?") && self.ends_type() { self.take(); depth = 1; }
+            else if self.spelling().equals("??") && self.ends_type() { self.take(); depth = 2; }
             if depth == 0 { break; }
             for level in 0..<depth {
                 result = self.make(NodeForm.optional_type(OptionalTypeAst { inner: result }), start.line, start.column);
@@ -95,8 +95,14 @@ struct TypeCursor {
         }
         result
     }
-    // The lexer reads `T??` as the coalescing operator; it is a nested optional
-    // only where the type ends, so `value as T ?? fallback` still coalesces.
+    // `?` and `??` after a type make it optional only where the type ends:
+    // `value as T ? a : b` is a conditional and `value as T ?? fallback` coalesces.
+    // After the current `?` or `??`: the type ends at a closing token or a line end.
+    def ends_type() -> Bool {
+        if self.fragment.len() > 0 || self.index + 1 >= self.tokens.len() { return true; }
+        if self.tokens[self.index + 1].span.line > self.current().span.end_line { return true; }
+        self.closes_type(self.next_spelling())
+    }
     def closes_type(next: String) -> Bool {
         switch next {
             case "", "=", ",", ")", "]", ">", ">>", "{", "}", ";", ":", "?", "??", "where", "->": true;
@@ -157,6 +163,7 @@ struct TypeCursor {
             guard let first = self.parse_type() else { return nil; }
             generic_args.push(first);
             while self.match_text(",") {
+                if self.spelling().starts_with(">") { break; }
                 guard let argument = self.parse_type() else { return nil; }
                 generic_args.push(argument);
             }
@@ -185,6 +192,7 @@ struct TypeCursor {
                 if self.match_text(")") { break; }
                 if !self.expect(",") { return nil; }
                 had_comma = true;
+                if self.match_text(")") { break; }
             }
         }
         var is_async = false;

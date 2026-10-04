@@ -223,8 +223,8 @@ pub struct HirBuilder {
                 return self.arena.add(HirForm.assign(HirAssignData { target: self.expr(data.target), value: self.expr(data.value), compound_op: op }));
             case .expr_stmt(let data): return self.arena.add(HirForm.expr_stmt(HirExprStmtData { expr: self.expr(data.expr) }));
             case .return_stmt(let data): var value: HirId? = nil; if let ref = data.value { value = self.expr(ref); } return self.arena.add(HirForm.return_stmt(HirReturnData { value }));
-            case .break_stmt: return self.arena.add(HirForm.break_stmt());
-            case .continue_stmt: return self.arena.add(HirForm.continue_stmt());
+            case .break_stmt: return self.arena.add(HirForm.break_stmt(self.ast.labels[id.id]));
+            case .continue_stmt: return self.arena.add(HirForm.continue_stmt(self.ast.labels[id.id]));
             case .if_stmt(let data): return self.conditional(data.condition, data.then_block, data.else_block);
             case .guard_stmt(let data):
                 if let cond = data.condition { switch cond {
@@ -232,11 +232,11 @@ pub struct HirBuilder {
                     case .expression(let ref): return self.arena.add(HirForm.guard_stmt(HirGuardData { condition: self.expr(ref), else_block: self.block(data.else_block) }));
                 } }
                 return self.arena.add(HirForm.guard_stmt(HirGuardData { condition: self.error_expr(), else_block: self.block(data.else_block) }));
-            case .while_stmt(let data): return self.arena.add(HirForm.while_stmt(HirWhileData { condition: self.expr(data.condition), body: self.block(data.body, true) }));
+            case .while_stmt(let data): return self.arena.add(HirForm.while_stmt(HirWhileData { condition: self.expr(data.condition), body: self.block(data.body, true), label: self.ast.labels[id.id] }));
             case .for_stmt(let data):
                 let iterable = self.expr(data.iterable); let p = self.pattern(data.pattern, self.result.loop_element_types[id.id] ?? self.iterable_element(self.type_of(data.iterable)));
                 let cells = self.take_cells();
-                return self.arena.add(HirForm.for_stmt(HirForData { pattern: p, iterable, body: self.prepend(self.block(data.body, true), cells) }));
+                return self.arena.add(HirForm.for_stmt(HirForData { pattern: p, iterable, body: self.prepend(self.block(data.body, true), cells), label: self.ast.labels[id.id] }));
             case .switch_stmt(let data): return self.switch_stmt(data.value, data.cases);
             case .defer_stmt(let data): return self.arena.add(HirForm.defer_stmt(HirDeferData { body: self.block(data.body) }));
             default: self.errors.push(internal_compiler_error("HIR lowering does not handle statement " + node.form.kind())); return self.empty_block();
@@ -562,7 +562,9 @@ pub struct HirBuilder {
                 }
                 return self.arena.add(HirForm.binding_pattern(HirBindingPatternData { name: data.name, symbol_id: sid, type_id: expected, is_mutable: mutable }));
             case .literal_pattern(let data):
-                if let value = data.value { if let child = self.ast.get(value) { switch child.form { case .literal(let lit): return self.arena.add(HirForm.literal_pattern(HirLiteralPatternData { value: self.literal_value(lit.value), type_id: expected })); default: {} } } }
+                var upper: HirValue? = nil;
+                if let bound = data.upper { if let child = self.ast.get(bound) { switch child.form { case .literal(let lit): upper = self.literal_value(lit.value); default: {} } } }
+                if let value = data.value { if let child = self.ast.get(value) { switch child.form { case .literal(let lit): return self.arena.add(HirForm.literal_pattern(HirLiteralPatternData { value: self.literal_value(lit.value), type_id: expected, upper, inclusive: data.inclusive })); default: {} } } }
             case .tuple_pattern(let data):
                 let elements = Vec<(String?, HirId)>.new(); var fields = FrozenVec<TupleField>.empty();
                 if let info = self.type_table.get_type(expected) { switch info.data { case .struct_type(let value): if let sid = value.symbol_id {} else { fields = value.anon_fields ?? fields; } default: {} } }

@@ -502,6 +502,8 @@ pub struct Monomorphizer {
             let initial = Dict<String, TypeId>.with_capacity(16, 1); var owner_args = Vec<TypeId>.new();
             if let info = self.types.get_type(subst.apply(self.arena.type_of(data.receiver, self.types.error_type), self.types)) { switch info.data { case .struct_type(let d): owner_args = d.type_args.to_vec(); case .enum_type(let d): owner_args = d.type_args.to_vec(); case .optional(let inner): owner_args = [inner]; default: {} } }
             let owner_names = self.generic_names(owner); for i in 0..<owner_names.len() { if i < owner_args.len() { initial[owner_names[i]] = owner_args[i]; } }
+            // Explicit type arguments, `value.method<T>(...)`, seed the method's own parameters.
+            if let explicit = self.arena.type_arguments[id.id] { for pair in explicit.entries() { initial[pair.key] = subst.apply(pair.value, self.types); } }
             let type_args = self.infer_call(sid, self.inference_arguments(data.arguments, subst), subst.apply(data.type_id, self.types), initial);
             for type in type_args { if self.types.is_error(type) || self.types.has_type_variables(type) { self.errors.push("could not infer type arguments for generic method '" + original.name + "'"); return id; } }
             let key = InstanceKey.new(sid, type_args); self.enqueue(0, key); let name = mangle_name(original.name + f"$method{sid.id}", key.type_args, self.types); let new_sid = self.special_symbol(key, name);

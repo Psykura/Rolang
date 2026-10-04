@@ -451,6 +451,7 @@ pub struct NameResolver {
             case .identifier(let data): self.lookup_value(data.name, ref); for argument in data.type_args { self.resolve_type(argument); }
             case .type_reference(let data): self.resolve_type(data.type_name);
             case .member_access(let data):
+                for argument in data.type_args { self.resolve_type(argument); }
                 if let name = self.member_name(ref) {
                     if let symbol = self.imported_symbols[name] { self.node_symbols[ref.id] = symbol; return; }
                 }

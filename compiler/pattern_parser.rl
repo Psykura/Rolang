@@ -69,18 +69,47 @@ struct PatternCursor {
         guard let first = self.parse_pattern() else { return nil; }
         patterns.push(first);
         while self.match_text(",") {
+            if self.current().text.equals(")") { break; }
             guard let next = self.parse_pattern() else { return nil; }
             patterns.push(next);
         }
         patterns
     }
+    // A literal, or a negative number such as `-1`.
+    def parse_literal() -> NodeId? {
+        let token = self.current();
+        if token.text.equals("-") && self.index + 1 < self.tokens.len() {
+            let number = self.tokens[self.index + 1];
+            var numeric = false;
+            switch number.kind { case .integer, .floating: numeric = true; default: {} }
+            if !numeric { return nil; }
+            guard let form = literal_form(number) else { return nil; }
+            self.take(); self.take();
+            switch form {
+                case .literal(let item): switch item.value {
+                    case .integer(let text): return self.make(NodeForm.literal(LiteralAst { value: LiteralValue.integer("-" + text), kind: item.kind }), token.span);
+                    case .floating(let value): return self.make(NodeForm.literal(LiteralAst { value: LiteralValue.floating(-value), kind: item.kind }), token.span);
+                    default: {}
+                }
+                default: {}
+            }
+            return nil;
+        }
+        guard let form = literal_form(token) else { return nil; }
+        self.take();
+        self.make(form, token.span)
+    }
     def parse_primary() -> NodeId? {
         let token = self.current();
         let start = token.span;
         if self.match_text("_") { return self.make(NodeForm.wildcard_pattern(), start); }
-        if let form = literal_form(token) {
-            self.take();
-            let literal = self.make(form, start);
+        if let literal = self.parse_literal() {
+            let separator = self.current().text;
+            if separator.equals("...") || separator.equals("..<") {
+                self.take();
+                guard let upper = self.parse_literal() else { self.fail("range end"); return nil; }
+                return self.make(NodeForm.literal_pattern(LiteralPatternAst { value: literal, upper, inclusive: separator.equals("...") }), start);
+            }
             return self.make(NodeForm.literal_pattern(LiteralPatternAst { value: literal }), start);
         }
         if self.match_text(".") {

@@ -325,7 +325,10 @@ pub struct TypeTable {
             case .function(let data):
                 let prefix = if_async(data.is_async);
                 return f"{prefix}({self.format_types(data.params)}) -> {self.format_type(data.return_type)}";
-            case .optional(let inner): return f"{self.format_type(inner)}?";
+            case .optional(let inner):
+                // `((i32) -> i32)?` is an optional function; `(i32) -> i32?` returns an optional.
+                if self.is_function(inner) { return f"({self.format_type(inner)})?"; }
+                return f"{self.format_type(inner)}?";
             case .closure(let data):
                 let prefix = if_async(data.is_async);
                 return f"{prefix}closure({self.format_types(data.params)}) -> {self.format_type(data.return_type)} [captures: {self.format_types(data.captures)}]";

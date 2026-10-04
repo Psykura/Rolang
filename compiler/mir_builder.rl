@@ -5,7 +5,7 @@ pub import "capture_analysis.rl"
 import "operators.rl"
 import "module_abi.rl"
 
-struct MirLoopScope { let header: MirBlockId; let exit: MirBlockId; let defer_depth: i32; }
+struct MirLoopScope { let header: MirBlockId; let exit: MirBlockId; let defer_depth: i32; let label: String? = nil; }
 pub struct MirPendingLambda { pub let name: String; pub let lambda: HirLambdaData; pub let captures: Vec<CaptureInfo>; pub let closure_type: TypeId; pub let location: HirLocation?; }
 
 pub struct MirFunctionBuilder {
@@ -34,6 +34,7 @@ pub struct MirFunctionBuilder {
     var current: MirBlockId?;
     var loops: Vec<MirLoopScope>;
     var defer_scopes: Vec<Vec<HirId>>;
+    var pending_label: String? = nil;
     pub static def new(ast: AstArena, hir: HirArena, program: HirId, func: HirFunctionData, types: TypeTable, symbols: SymbolTable) -> MirFunctionBuilder {
         MirFunctionBuilder { ast, hir, program, func, types, symbols, members: MemberResolver.new(ast, types, symbols), args: Vec<MirLocal>.new(), locals: Vec<MirLocal>.new(),
             blocks: Dict<i32, MirBlock>.with_capacity(16, 0), block_order: Vec<MirBlockId>.new(),
@@ -147,8 +148,8 @@ pub struct MirFunctionBuilder {
             case .assign(let data): self.lower_assign(data);
             case .expr_stmt(let data): self.lower_expr(data.expr);
             case .return_stmt(let data): self.lower_return(data);
-            case .break_stmt: self.lower_break();
-            case .continue_stmt: self.lower_continue();
+            case .break_stmt(let label): self.lower_break(label);
+            case .continue_stmt(let label): self.lower_continue(label);
             case .if_stmt(let data): self.lower_if(data);
             case .if_let(let data): self.lower_if_let(data);
             case .guard_stmt(let data): self.lower_guard(data);
@@ -189,6 +190,11 @@ pub struct MirFunctionBuilder {
             self.assign(self.place(local, self.locals[local.id].type_id), operand);
         } else { self.default_init(local, data.type_id); }
     }
+    def is_closure(type_id: TypeId) -> Bool {
+        if self.types.is_function(type_id) { return true; }
+        if let info = self.types.get_type(type_id) { switch info.data { case .closure: return true; default: {} } }
+        false
+    }
     pub def coerce(value: MirOperand, target: TypeId) -> MirOperand {
         let source = value.type_id(); if source == target { return value; }
         if let info = self.types.get_type(target) { switch info.data { case .existential(let data):
@@ -204,7 +210,8 @@ pub struct MirFunctionBuilder {
                 default: {}
             } default: {} }
             let content = self.coerce(value, inner);
-            if content.type_id() == inner { let local = self.temp(target);
+            // A closure value has its own type but is stored as the function value.
+            if content.type_id() == inner || (self.types.is_function(inner) && self.is_closure(content.type_id())) { let local = self.temp(target);
                 self.emit(MirOp.make_some(MirMakeSomeData { result: local, value: content, result_type: target })); return self.copy(local, target);
             }
         }
@@ -227,14 +234,28 @@ pub struct MirFunctionBuilder {
         } }
         self.emit_defers(); self.return_term(result);
     }
-    def lower_break() -> Void {
+    def lower_break(label: String? = nil) -> Void {
         if self.loops.len() == 0 { self.errors.push("break outside of loop"); return; }
-        let loop = self.loops[self.loops.len()-1]; self.emit_defers(loop.defer_depth); self.branch(loop.exit);
+        guard let loop = self.target_loop(label, "break") else { return; }
+        self.emit_defers(loop.defer_depth); self.branch(loop.exit);
     }
-    def lower_continue() -> Void {
+    def lower_continue(label: String? = nil) -> Void {
         if self.loops.len() == 0 { self.errors.push("continue outside of loop"); return; }
-        let loop = self.loops[self.loops.len()-1]; self.emit_defers(loop.defer_depth); self.branch(loop.header);
+        guard let loop = self.target_loop(label, "continue") else { return; }
+        self.emit_defers(loop.defer_depth); self.branch(loop.header);
     }
+    // The innermost loop, or the enclosing loop with `label`.
+    def target_loop(label: String?, statement: String) -> MirLoopScope? {
+        guard let name = label else { return self.loops[self.loops.len()-1]; }
+        var index = self.loops.len() - 1;
+        while index >= 0 {
+            if let found = self.loops[index].label { if found.equals(name) { return self.loops[index]; } }
+            index -= 1;
+        }
+        self.errors.push(f"{statement} {name}: no enclosing loop is labeled '{name}'"); nil
+    }
+    // The label of the loop being lowered, consumed by the loop's scope.
+    def take_label() -> String? { let label = self.pending_label; self.pending_label = nil; label }
     def lower_if(data: HirIfData) -> Void {
         let condition = self.lower_expr(data.condition); let yes = self.create_block(); let merge = self.create_block();
         if let other = data.else_block {
@@ -255,9 +276,10 @@ pub struct MirFunctionBuilder {
         self.switch_to(next);
     }
     def lower_while(data: HirWhileData) -> Void {
+        self.pending_label = data.label;
         let header = self.create_block(); let body = self.create_block(); let done = self.create_block(); self.branch(header);
         self.switch_to(header); let condition = self.lower_expr(data.condition); self.cond_branch(condition, body, done);
-        self.switch_to(body); self.loops.push(MirLoopScope { header, exit: done, defer_depth: self.defer_scopes.len() });
+        self.switch_to(body); self.loops.push(MirLoopScope { header, exit: done, defer_depth: self.defer_scopes.len(), label: self.take_label() });
         self.lower_block(data.body); self.loops.pop(); if !self.is_terminated() { self.branch(header); }
         self.switch_to(done);
     }
@@ -697,6 +719,15 @@ pub struct MirFunctionBuilder {
             case .wildcard_pattern | .binding_pattern: return nil;
             case .literal_pattern(let data):
                 let condition = self.temp(self.bool_type());
+                if let upper = data.upper {
+                    // low <= value && value <= upper (or < upper)
+                    let above = self.temp(self.bool_type());
+                    self.emit(MirOp.cmp_op(MirCmpOpData { result: above, op: CmpOpKind.ge(), left: value, right: self.literal_constant(data.value, data.type_id) }));
+                    let below = self.temp(self.bool_type()); var op = CmpOpKind.lt(); if data.inclusive { op = CmpOpKind.le(); }
+                    self.emit(MirOp.cmp_op(MirCmpOpData { result: below, op, left: value, right: self.literal_constant(upper, data.type_id) }));
+                    self.emit(MirOp.bin_op(MirBinOpData { result: condition, op: BinOpKind.bit_and(), left: self.copy(above, self.bool_type()), right: self.copy(below, self.bool_type()), result_type: self.bool_type() }));
+                    return self.copy(condition, self.bool_type());
+                }
                 var right = self.literal_constant(data.value, data.type_id); var left = value;
                 var nil_pattern = false; switch data.value { case .none: nil_pattern = self.types.is_optional(value.type_id()); default: {} }
                 if nil_pattern { let tag = self.temp(self.i32_type()); self.emit(MirOp.get_tag(MirGetTagData { result: tag, enum_val: value }));
@@ -860,7 +891,8 @@ pub struct MirFunctionBuilder {
         } self.lower_block(data.body); if !self.is_terminated() { self.branch(merge); } }
     }
     def lower_for(data: HirForData) -> Void {
-        let value = self.lower_expr(data.iterable); let header = self.create_block(); let body = self.create_block(); let done = self.create_block();
+        let value = self.lower_expr(data.iterable);
+        self.pending_label = data.label; let header = self.create_block(); let body = self.create_block(); let done = self.create_block();
         let prefix = self.type_prefix(value.type_id());
         if prefix.equals("Dict") || prefix.starts_with("Dict_") { self.lower_dict_for(data, value, header, body, done); self.switch_to(done); return; }
         if prefix.equals("Vec") || prefix.starts_with("Vec_") { self.lower_vec_for(data, value, header, body, done); self.switch_to(done); return; }
@@ -880,7 +912,7 @@ pub struct MirFunctionBuilder {
         let condition = self.temp(self.bool_type()); self.emit(MirOp.cmp_op(MirCmpOpData { result: condition, op: CmpOpKind.ne(),
             left: self.copy(tag, self.i64_type()), right: self.int_operand("0", self.i64_type()) }));
         self.cond_branch(self.copy(condition, self.bool_type()), body, done); self.switch_to(body);
-        self.loops.push(MirLoopScope { header, exit: done, defer_depth: self.defer_scopes.len() });
+        self.loops.push(MirLoopScope { header, exit: done, defer_depth: self.defer_scopes.len(), label: self.take_label() });
         let element = self.temp(element_type, "__elem"); self.emit(MirOp.extract_enum_payload(MirExtractEnumPayloadData {
             result: element, enum_val: self.copy(next, next_type), case_name: "Some", payload_index: 0, result_type: element_type }));
         self.bind_pattern(data.pattern, self.copy(element, element_type)); self.lower_block(data.body); self.loops.pop();
@@ -901,7 +933,7 @@ pub struct MirFunctionBuilder {
         let condition = self.temp(self.bool_type());
         self.emit(MirOp.cmp_op(MirCmpOpData { result: condition, op: CmpOpKind.lt(), left: self.copy(index, i32_type), right: self.copy(length, i32_type) }));
         self.cond_branch(self.copy(condition, self.bool_type()), body, done); self.switch_to(body);
-        self.loops.push(MirLoopScope { header, exit: done, defer_depth: self.defer_scopes.len() });
+        self.loops.push(MirLoopScope { header, exit: done, defer_depth: self.defer_scopes.len(), label: self.take_label() });
         let element = self.temp(element_type, "__elem");
         self.static_call(element, prefix + "_get", [self.copy(vector, value.type_id()), self.copy(index, i32_type)], element_type);
         // The index advances before the body so `continue` moves on.
@@ -922,7 +954,7 @@ pub struct MirFunctionBuilder {
         self.branch(header); self.switch_to(header); let condition = self.temp(self.bool_type());
         self.emit(MirOp.cmp_op(MirCmpOpData { result: condition, op: CmpOpKind.lt(), left: self.copy(index, i64_type), right: self.copy(length, i64_type) }));
         self.cond_branch(self.copy(condition, self.bool_type()), body, done); self.switch_to(body);
-        self.loops.push(MirLoopScope { header, exit: done, defer_depth: self.defer_scopes.len() });
+        self.loops.push(MirLoopScope { header, exit: done, defer_depth: self.defer_scopes.len(), label: self.take_label() });
         let handle = self.temp(ptr_type, "__handle"); self.emit(MirOp.extract_field(MirExtractFieldData { result: handle,
             aggregate: value, field_name: "handle", field_index: 0, result_type: ptr_type }));
         let pointer = self.temp(ptr_type, "__keyptr"); self.static_call(pointer, "rt_dict_key_ptr", [self.copy(handle, ptr_type), self.copy(index, i64_type)], ptr_type);
@@ -1111,7 +1143,19 @@ pub struct MirFunctionBuilder {
                 if data.kind.equals("optional") || data.kind.equals("forced") {
                     return self.lower_downcast(data);
                 }
-                let operand = self.lower_expr(data.expr); let result = self.temp(data.target_type);
+                let operand = self.lower_expr(data.expr);
+                // `value as T?` converts to T and wraps the result.
+                if let inner = self.types.get_optional_inner(data.target_type) {
+                    if operand.type_id() == data.target_type || self.types.is_optional(operand.type_id()) { return self.coerce(operand, data.target_type); }
+                    var value = operand;
+                    if operand.type_id() != inner {
+                        let converted = self.temp(inner);
+                        self.emit(MirOp.cast_op(MirCastOpData { result: converted, operand, target_type: inner }));
+                        value = self.copy(converted, inner);
+                    }
+                    return self.coerce(value, data.target_type);
+                }
+                let result = self.temp(data.target_type);
                 self.emit(MirOp.cast_op(MirCastOpData { result, operand, target_type: data.target_type }));
                 return self.copy(result, data.target_type);
             case .optional_some(let data):

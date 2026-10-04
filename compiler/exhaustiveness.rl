@@ -40,6 +40,8 @@ pub struct ExhaustivenessChecker {
             }
         }
         guard let info = self.type_table.get_type(value_type) else { return; }
+        var expression = false;
+        switch node.form { case .switch_expr: expression = true; default: {} }
         let all = Vec<String>.new();
         var domain = "";
         switch info.data {
@@ -68,9 +70,9 @@ pub struct ExhaustivenessChecker {
             case .primitive(let primitive):
                 switch primitive {
                     case .bool_type: domain = "bool"; all.push("true"); all.push("false");
-                    default: return;
+                    default: self.require_catch_all(cases, expression, value_type); return;
                 }
-            default: return;
+            default: self.require_catch_all(cases, expression, value_type); return;
         }
         let matched = Dict<String, Bool>.with_capacity(16, 1);
         for item in cases {
@@ -112,12 +114,29 @@ pub struct ExhaustivenessChecker {
         if domain.equals("optional") { message = "Switch on Optional must be exhaustive, missing: "; }
         self.report_error(TypeErrorKind.non_exhaustive_match(), message + join_strings(missing, ", "));
     }
+    // Numbers, strings and other unbounded values: a switch producing a value
+    // needs `default` or a pattern matching anything.
+    def require_catch_all(cases: Vec<NodeId>, expression: Bool, value_type: TypeId) -> Void {
+        if !expression || self.type_table.is_error(value_type) { return; }
+        for item in cases { if let branch = self.arena.get(item) { switch branch.form {
+            case .switch_case(let data):
+                for pair in data.patterns {
+                    if let guard_expr = pair.1 { continue; }
+                    if self.irrefutable(pair.0) { return; }
+                }
+            default: {}
+        } } }
+        self.report_error(TypeErrorKind.non_exhaustive_match(), f"A switch expression over {self.type_table.format_type(value_type)} must be exhaustive: add a `default` case");
+    }
     def irrefutable(id: NodeId) -> Bool {
         guard let node = self.arena.get(id) else { return false; }
         switch node.form {
             case .identifier_pattern(_), .wildcard_pattern: return true;
             case .typed_pattern(let data):
                 if let pattern = data.pattern { return self.irrefutable(pattern); }
+                return true;
+            case .tuple_pattern(let data):
+                for element in data.elements { if !self.irrefutable(element.1) { return false; } }
                 return true;
             default: return false;
         }
@@ -142,6 +161,7 @@ pub struct ExhaustivenessChecker {
                     if full { names.push(data.case_name); }
                 }
             case .literal_pattern(let data):
+                if let range = data.upper { return PatternCoverage.values(names); }
                 if let literal = data.value {
                     if let value = self.arena.get(literal) {
                         switch value.form {

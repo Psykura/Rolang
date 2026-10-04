@@ -152,7 +152,13 @@ pub struct ExprChecker {
         // A numeric literal takes the other operand's numeric type: `x * 5` with x: u64 is u64.
         let table = self.state.type_table;
         var left = table.error_type; var right = table.error_type;
-        if self.literal_kind(data.left).len() > 0 && self.literal_kind(data.right).len() == 0 {
+        if self.implicit_case(data.left) && !self.implicit_case(data.right) {
+            right = self.state.infer_expr(data.right);
+            left = self.state.infer_with_expected(data.left, right);
+        } else if self.implicit_case(data.right) {
+            left = self.state.infer_expr(data.left);
+            right = self.state.infer_with_expected(data.right, left);
+        } else if self.literal_kind(data.left).len() > 0 && self.literal_kind(data.right).len() == 0 {
             right = self.state.infer_expr(data.right);
             left = self.state.infer_with_expected(data.left, self.literal_hint(data.left, right));
         } else {
@@ -170,6 +176,14 @@ pub struct ExprChecker {
                 if let type = self.state.try_operator_overload(id, inner_left, data.op, inner_right) { return type; }
                 self.state.binary_types(inner_left, data.op, inner_right);
                 return self.state.builtin("Bool");
+            }
+        }
+        // `a < b < c` compares the Bool `a < b` with c.
+        if (is_order_comparison_op(data.op) || is_equality_op(data.op)) && self.is_comparison(data.left) {
+            let boolean = self.state.builtin("Bool");
+            if left == boolean && right != boolean && !table.is_error(right) {
+                self.state.error(TypeErrorKind.invalid_operation(), f"comparisons do not chain: this compares the Bool result of the left comparison with {table.format_type(right)}; combine them with &&, as in `a < b && b < c`", id);
+                return boolean;
             }
         }
         if let type = self.state.try_operator_overload(id, left, data.op, right) { return type; }
@@ -285,9 +299,33 @@ pub struct ExprChecker {
         }
         self.state.type_table.error_type
     }
+    def is_comparison(id: NodeId?) -> Bool {
+        guard let ref = id else { return false; }
+        guard let node = self.state.arena.get(ref) else { return false; }
+        switch node.form { case .binary_op(let data): return is_order_comparison_op(data.op) || is_equality_op(data.op); default: return false; }
+    }
+    // `.case` or `.case(...)`, which needs an expected enum type.
+    def implicit_case(id: NodeId?) -> Bool {
+        guard let ref = id else { return false; }
+        guard let node = self.state.arena.get(ref) else { return false; }
+        switch node.form {
+            case .member_access(let member): return member.object == nil;
+            case .call(let call): return self.implicit_case(call.callee);
+            default: return false;
+        }
+    }
     def ternary(data: TernaryOpAst) -> TypeId {
+        let context = self.state.expected_type;
         if let cond = data.condition { self.state.check_boolean(self.state.infer_expr(cond), "ternary condition"); }
-        let a = self.state.infer_expr(data.then_expr); let b = self.state.infer_expr(data.else_expr);
+        // Branches share the context's type, so `flag ? .on : .off` works where an enum is expected.
+        var a = self.state.type_table.error_type; var b = self.state.type_table.error_type;
+        if self.implicit_case(data.then_expr) && !self.implicit_case(data.else_expr) && context == nil {
+            b = self.state.infer_expr(data.else_expr); a = self.state.infer_with_expected(data.then_expr, b);
+        } else if self.implicit_case(data.else_expr) && context == nil {
+            a = self.state.infer_expr(data.then_expr); b = self.state.infer_with_expected(data.else_expr, a);
+        } else {
+            a = self.state.infer_with_expected(data.then_expr, context); b = self.state.infer_with_expected(data.else_expr, context);
+        }
         if a == b { return a; }
         if self.state.type_table.can_widen_int(a, b) { return b; } if self.state.type_table.can_widen_int(b, a) { return a; }
         if let inner = self.state.type_table.get_optional_inner(a) { if !self.state.type_table.is_optional(b) && self.state.types_equal(inner, b) { return a; } }
@@ -295,8 +333,8 @@ pub struct ExprChecker {
         // A contextual type both branches fit, or `nil` against a value making it optional.
         if let want = self.state.expected_type { if self.converts_to(a, want) && self.converts_to(b, want) { return want; } }
         let table = self.state.type_table;
-        if a == table.nil_type && !table.is_optional(b) && !table.is_error(b) { return table.make_optional(b); }
-        if b == table.nil_type && !table.is_optional(a) && !table.is_error(a) { return table.make_optional(a); }
+        if a == table.nil_type && !table.is_error(b) { if table.is_optional(b) { return b; } return table.make_optional(b); }
+        if b == table.nil_type && !table.is_error(a) { if table.is_optional(a) { return a; } return table.make_optional(a); }
         self.state.error(TypeErrorKind.type_mismatch(), f"Ternary branches have incompatible types: '{self.state.type_table.format_type(a)}' vs '{self.state.type_table.format_type(b)}'"); a
     }
     // Whether a value of `source` converts implicitly to `target` (equal, widened or wrapped).
@@ -314,7 +352,7 @@ pub struct ExprChecker {
     def explicit_arguments(callee: NodeId, sid: SymbolId) -> Dict<String, TypeId>? {
         guard let node = self.state.arena.get(callee) else { return nil; }
         var arguments = Vec<NodeId>.new();
-        switch node.form { case .identifier(let data): arguments = data.type_args; default: return nil; }
+        switch node.form { case .identifier(let data): arguments = data.type_args; case .member_access(let data): arguments = data.type_args; default: return nil; }
         if arguments.len() == 0 { return nil; }
         guard let symbol = self.state.symbol_table.get_symbol(sid) else { return nil; }
         guard let decl = self.state.function(symbol.decl_node) else { return nil; }
@@ -387,7 +425,11 @@ pub struct ExprChecker {
         defer { self.state.expected_type = old; }
         guard let callee = data.callee else { return self.state.type_table.error_type; }
         let prev = self.callee; self.callee = callee;
-        let type = self.state.infer_expr(callee); self.callee = prev;
+        var implicit = false;
+        if let node = self.state.arena.get(callee) { switch node.form { case .member_access(let member): implicit = member.object == nil; default: {} } }
+        var type = self.state.type_table.error_type;
+        if implicit { type = self.state.infer_with_expected(callee, old); } else { type = self.state.infer_expr(callee); }
+        self.callee = prev;
         if let func = self.state.type_table.get_function_data(type) {
             var symbol = self.state.node_symbols[callee.id];
             if let found = symbol {} else { symbol = self.state.result.member_method_symbols[callee.id]; }
@@ -568,6 +610,7 @@ pub struct ExprChecker {
         } } nil
     }
     def member(id: NodeId, data: MemberAccessAst) -> TypeId {
+        guard let object = data.object else { return self.implicit_member(id, data); }
         if let parts = self.member_parts(id) { if let sid = self.state.resolution.imported_symbols[join_strings(parts, ".")] {
             if let sym = self.state.symbol_table.get_symbol(sid) { switch sym.kind {
                 case .function | .type_alias | .struct_type | .enum_type:
@@ -614,6 +657,29 @@ pub struct ExprChecker {
             default: {}
         } } }
         self.state.error(TypeErrorKind.undefined_member(), f"Type {self.state.type_table.format_type(type)} has no member '{data.member}'", id); self.state.type_table.error_type
+    }
+    // `.case`, or `.case(payload)` as a callee: the case of the enum the context
+    // expects, also through an optional.
+    def implicit_member(id: NodeId, data: MemberAccessAst) -> TypeId {
+        var enum_type: TypeId? = nil;
+        if let expected = self.state.expected_type {
+            let target = self.state.type_table.get_optional_inner(expected) ?? expected;
+            if let info = self.state.type_table.get_type(target) { switch info.data { case .enum_type: enum_type = target; default: {} } }
+        }
+        guard let type = enum_type else {
+            self.state.error(TypeErrorKind.undefined_member(), f"'.{data.member}' needs a context that expects an enum type; write the type, as in `Type.{data.member}`", id);
+            return self.state.type_table.error_type;
+        }
+        guard let case_def = self.state.lookup_enum_case(type, data.member) else {
+            self.state.error(TypeErrorKind.undefined_member(), f"Enum {self.state.type_table.format_type(type)} has no case '{data.member}'", id);
+            return self.state.type_table.error_type;
+        }
+        var called = false; if let callee = self.callee { called = callee == id; }
+        if !called {
+            self.state.record_call(id, CalleeKind.enum_ctor(), nil, data.member);
+            return self.enum_args(type, case_def, Vec<NodeId>.new(), type);
+        }
+        type
     }
     def field_visibility(field: FieldInfo, id: NodeId) -> Void {
         if field.visibility.equals("pub") { return; }
@@ -890,7 +956,12 @@ pub struct ExprChecker {
         if self.state.type_table.is_error(source) || self.state.type_table.is_error(target) || self.state.types_equal(source, target) || self.is_variable(source) || self.is_variable(target) { return target; }
         let table = self.state.type_table;
         if table.is_numeric(source) && table.is_numeric(target) || table.is_bool(source) && table.is_numeric(target) || table.is_numeric(source) && table.is_bool(target) { return target; }
-        if let inner = table.get_optional_inner(target) { if self.state.types_equal(source, inner) || table.is_error(inner) { return target; } }
+        if let inner = table.get_optional_inner(target) {
+            // `value as T?` converts as `value as T` and wraps the result.
+            if self.state.types_equal(source, inner) || table.is_error(inner) { return target; }
+            let scalar = (table.is_numeric(source) || table.is_bool(source)) && (table.is_numeric(inner) || table.is_bool(inner)) && !(table.is_bool(source) && table.is_bool(inner));
+            if scalar { return target; }
+        }
         var message = f"cannot cast {table.format_type(source)} to {table.format_type(target)} using `as`. ";
         if self.is_heap(source) {
             if self.is_heap(target) { message += "Heap types cannot be reinterpreted as other heap types; construct the target type explicitly."; }

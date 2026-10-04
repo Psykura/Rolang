@@ -180,6 +180,7 @@ struct DeclarationCursor {
         guard let first = self.parse_generic_param() else { return nil; }
         params.push(first);
         while self.match_text(",") {
+            if self.spelling().starts_with(">") { break; }
             guard let next = self.parse_generic_param() else { return nil; }
             params.push(next);
         }
@@ -350,6 +351,7 @@ struct DeclarationCursor {
         guard let first = self.parse_param() else { return nil; }
         params.push(first);
         while self.match_text(",") {
+            if self.spelling().equals(")") { break; }
             guard let next = self.parse_param() else { return nil; }
             params.push(next);
         }
@@ -550,7 +552,7 @@ struct DeclarationCursor {
                     guard let type_node = self.parse_type() else { return nil; }
                     self.texts[type_node.id] = self.text_from(type_start);
                     payload.push((label, type_node));
-                    if !self.match_text(",") { break; }
+                    if !self.match_text(",") || self.spelling().equals(")") { break; }
                 }
             }
             if !self.expect(")") { return nil; }

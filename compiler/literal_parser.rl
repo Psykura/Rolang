@@ -115,6 +115,12 @@ pub def literal_form(token: LexToken) -> NodeForm? {
             var prefix = 2;
             var ending = 1;
             if raw.starts_with("r\"\"\"") { prefix = 4; ending = 3; }
+            else if raw.starts_with("r#") {
+                // r#"..."#: the opening and closing quotes carry the same `#`s.
+                var hashes = 0;
+                while raw.byte_at(1 + hashes) == 35 { hashes += 1; }
+                prefix = 2 + hashes; ending = 1 + hashes;
+            }
             return NodeForm.literal(LiteralAst { value: LiteralValue.text(raw.substring(prefix, (raw.len() as i32) - prefix - ending)), kind: "string" });
         case .multiline_string:
             return NodeForm.literal(LiteralAst { value: LiteralValue.text(unescape_literal(raw.substring(3, (raw.len() as i32) - 6))), kind: "string" });
