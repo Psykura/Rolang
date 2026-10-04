@@ -2,7 +2,7 @@ CLANG ?= clang
 CC = $(CLANG)
 GENESIS ?= $(CURDIR)/genesis/rolangc
 PREFIX ?= $(HOME)/.local
-VERSION ?= 0.4.10
+VERSION ?= 0.5.0
 SOURCES := $(wildcard compiler/*.rl compiler/codegen/*.rl std/*.rl std/*.c std/*.h runtime/*.c runtime/*.h)
 
 .PHONY: all rebuild release install clean bootstrap test check-selfhost
