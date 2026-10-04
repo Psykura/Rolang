@@ -45,7 +45,7 @@ void rl_async_ready(TaskHandle* task) {
 #if defined(__unix__) || defined(__APPLE__)
     if (task->native_kind == 8) { rl_resolve_ready(task); return; }
     if (task->native_kind == 12) { rl_fs_ready(task); return; }
-    if (task->native_kind == 13) { rl_parallel_ready(task); return; }
+    if (task->native_kind == 13 || task->native_kind == 14) { rl_parallel_ready(task); return; }
     /* Readiness waits (TLS) leave the I/O to the waiting task. */
     if (task->native_kind == 9 || task->native_kind == 10 || task->native_kind == 11) { rl_task_native_result(task, 0); return; }
     if (task->native_kind == 4) {

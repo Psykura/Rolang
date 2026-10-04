@@ -46,6 +46,35 @@ which must be Sendable themselves; types holding resources (sockets, files,
 tasks) or functions cannot be sent. Encoding is depth-limited, so a cyclic
 value fails instead of encoding forever.
 
+## Channels
+
+`Channel<T>` (std.parallel) is a queue of Sendable values that every thread
+holding it shares. A channel is itself Sendable: passed to a parallel function
+or sent inside a value, it refers to the same queue on the other thread.
+
+```rolang
+parallel def worker(jobs: Channel<Job>, reports: Channel<Report>) async -> i32 {
+    var handled = 0;
+    while let job = await jobs.receive() { await reports.send(run(job)); handled += 1; }
+    handled
+}
+
+let jobs = Channel<Job>.bounded(8);
+let reports = Channel<Report>.new();
+let pool = [spawn worker(jobs, reports), spawn worker(jobs, reports)];
+for job in work { await jobs.send(job); }
+jobs.close();
+```
+
+- `Channel<T>.new()` is unbounded; `bounded(capacity)` holds at most
+  `capacity` values, and `send` waits while it is full.
+- `send(value)` copies the value in and returns false once the channel is
+  closed; `receive()` waits for a value and returns nil once the channel is
+  closed and empty. `try_send` and `try_receive` do not wait.
+- `close()` ends sending; values already sent can still be received.
+  `len()` and `is_closed()` report the state.
+- Only the waiting task waits: other tasks on its thread keep running.
+
 ## Rules
 
 - A parallel function is a top-level `async` function; it cannot be generic
@@ -74,6 +103,11 @@ value fails instead of encoding forever.
   (`rl_hot`), one thread-local address per allocation. A runtime built by an
   older compiler (the bootstrap) keeps process-wide state and refuses
   parallel calls.
+- A channel is a lock-protected ring of encoded values, reference-counted
+  across threads. A task that finds it full or empty registers a wait and
+  awaits; a send or receive hands the first waiter of the other side to its
+  thread's inbox, and the woken task tries again. A wake that reaches a
+  cancelled task passes to the next waiter.
 - The scheduler keeps runnable tasks on a ready queue, waiting tasks on the
   waiters list of the task they await, native tasks on their own list and
   finished tasks on a retire queue, so a step costs time in its own work

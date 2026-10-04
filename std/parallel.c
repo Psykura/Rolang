@@ -119,6 +119,8 @@ typedef struct Inbox {
     int wake[2];
     pthread_mutex_t lock;
     struct ParallelJob* done;
+    struct ChannelWait* woken;
+    int signalled;   /* a byte is in the pipe and not drained yet */
 } Inbox;
 
 typedef struct Worker {
@@ -163,6 +165,7 @@ static void job_release(ParallelJob* job) {
 static ParallelJob* job_of(TaskHandle* task) { ParallelJob* job; memcpy(&job, task->peer, sizeof(job)); return job; }
 
 static void wake(Inbox* inbox) {
+    if (__atomic_exchange_n(&inbox->signalled, 1, __ATOMIC_ACQ_REL)) return;
     char byte = 1;
     ssize_t written = write(inbox->wake[1], &byte, 1);
     (void)written;
@@ -184,17 +187,25 @@ static Inbox* inbox_of_thread(void) {
     return inbox;
 }
 
+static void channel_waits_deliver(struct ChannelWait* wait);
+
 /* Called by the scheduler when the wake pipe is readable: completes the
- * waiting tasks of finished jobs. */
+ * waiting tasks of finished jobs and of woken channel operations. */
 void rl_parallel_wake(void) {
     Inbox* inbox = current_inbox;
     if (!inbox) return;
     char drain[64];
+    /* Cleared after draining: a wake that sees it clear writes a byte this
+     * drain did not take, so the flag is never set with the pipe empty. */
     while (read(inbox->wake[0], drain, sizeof(drain)) > 0) {}
+    __atomic_store_n(&inbox->signalled, 0, __ATOMIC_SEQ_CST);
     pthread_mutex_lock(&inbox->lock);
     ParallelJob* job = inbox->done;
     inbox->done = NULL;
+    struct ChannelWait* woken = inbox->woken;
+    inbox->woken = NULL;
     pthread_mutex_unlock(&inbox->lock);
+    channel_waits_deliver(woken);
     while (job) {
         ParallelJob* next = job->next;
         job->next = NULL;
@@ -227,12 +238,13 @@ static void* worker_main(void* argument) {
     current_inbox = worker->inbox;
     rl_task_set_wake_fd(worker->inbox->wake[0]);
     while (1) {
-        rl_parallel_wake();
+        if (__atomic_load_n(&worker->inbox->signalled, __ATOMIC_ACQUIRE)) rl_parallel_wake();
         worker_start_jobs(worker);
         if (rl_task_has_tasks()) { rl_task_step(); continue; }
         /* Idle: sleep until a job (or a nested job's result) arrives. */
         struct pollfd wait = { worker->inbox->wake[0], POLLIN, 0 };
         while (poll(&wait, 1, -1) < 0 && errno == EINTR) {}
+        rl_parallel_wake();
     }
     return NULL;
 }
@@ -355,6 +367,229 @@ void* rt_parallel_result(TaskHandle* task) {
     return result;
 }
 
+
+/* ---- Channels: queues of encoded values shared by threads ----
+ *
+ * A channel holds SendBuffers; any thread with a handle may send or receive.
+ * A task that finds it full (sending) or empty (receiving) registers a
+ * ChannelWait and awaits a native task (kind 14); a change wakes one waiter
+ * of the other side through its thread's inbox, and the woken task tries
+ * again, so a spurious wake costs only a retry. Closing wakes everyone. */
+
+typedef struct ChannelWait {
+    int owners;                    /* the waiting task, and the channel's list or an inbox */
+    struct ParallelChannel* channel;
+    TaskHandle* task;              /* only the waiting thread uses it */
+    Inbox* inbox;
+    int receiving;
+    int woken;                     /* under the channel's lock */
+    int delivered;                 /* only the waiting thread uses it */
+    struct ChannelWait* next;      /* in the channel's list, then in the inbox */
+} ChannelWait;
+
+typedef struct ParallelChannel {
+    pthread_mutex_t lock;
+    int refs;                      /* handles on every thread, encoded handles and waits */
+    int64_t capacity;              /* 0: unbounded */
+    SendBuffer** items;
+    int64_t head, count, slots;
+    int closed;
+    ChannelWait *receivers, *receivers_tail, *senders, *senders_tail;
+} ParallelChannel;
+
+void* rt_channel_new(int64_t capacity) {
+    if (capacity < 0) rt_panic("a channel's capacity cannot be negative");
+    ParallelChannel* channel = calloc(1, sizeof(*channel));
+    if (!channel) rt_panic("channel allocation failed");
+    pthread_mutex_init(&channel->lock, NULL);
+    channel->refs = 1;
+    channel->capacity = capacity;
+    return channel;
+}
+
+void rt_channel_retain(void* pointer) {
+    __atomic_add_fetch(&((ParallelChannel*)pointer)->refs, 1, __ATOMIC_RELAXED);
+}
+
+void rt_channel_release(void* pointer) {
+    ParallelChannel* channel = pointer;
+    if (!channel || __atomic_sub_fetch(&channel->refs, 1, __ATOMIC_ACQ_REL)) return;
+    for (int64_t i = 0; i < channel->count; i++) rt_send_buffer_free(channel->items[(channel->head + i) % channel->slots]);
+    free(channel->items);
+    pthread_mutex_destroy(&channel->lock);
+    free(channel);
+}
+
+/* A handle encoded for another thread: an owned reference as a number. */
+int64_t rt_channel_share(void* pointer) { rt_channel_retain(pointer); return (int64_t)(intptr_t)pointer; }
+void* rt_channel_from_shared(int64_t id) { return (void*)(intptr_t)id; }
+
+static void wait_release(ChannelWait* wait) {
+    if (__atomic_sub_fetch(&wait->owners, 1, __ATOMIC_ACQ_REL)) return;
+    rt_channel_release(wait->channel);
+    free(wait);
+}
+
+/* Under the channel's lock: hands the first waiter of a list (or all of
+ * them) to its thread's inbox, with the list's ownership. */
+static void channel_signal(ParallelChannel* channel, int receivers, int all) {
+    ChannelWait** head = receivers ? &channel->receivers : &channel->senders;
+    ChannelWait** tail = receivers ? &channel->receivers_tail : &channel->senders_tail;
+    while (*head) {
+        ChannelWait* wait = *head;
+        *head = wait->next;
+        if (!*head) *tail = NULL;
+        wait->woken = 1;
+        Inbox* inbox = wait->inbox;
+        pthread_mutex_lock(&inbox->lock);
+        wait->next = inbox->woken;
+        inbox->woken = wait;
+        pthread_mutex_unlock(&inbox->lock);
+        wake(inbox);
+        if (!all) break;
+    }
+}
+
+/* On the waiting thread: completes the tasks of woken waits. */
+static void channel_waits_deliver(ChannelWait* wait) {
+    while (wait) {
+        ChannelWait* next = wait->next;
+        wait->next = NULL;
+        if (wait->task) { wait->delivered = 1; rl_task_native_result(wait->task, 0); }
+        wait_release(wait);   /* the inbox's ownership */
+        wait = next;
+    }
+}
+
+/* Takes the writer's bytes when there is room: 1 sent, 0 full, -1 closed. */
+int32_t rt_channel_try_send(void* pointer, void* writer) {
+    ParallelChannel* channel = pointer;
+    SendBuffer* source = writer;
+    pthread_mutex_lock(&channel->lock);
+    if (channel->closed) { pthread_mutex_unlock(&channel->lock); return -1; }
+    if (channel->capacity && channel->count >= channel->capacity) { pthread_mutex_unlock(&channel->lock); return 0; }
+    if (channel->count == channel->slots) {
+        int64_t slots = channel->slots ? channel->slots * 2 : 16;
+        SendBuffer** items = malloc((size_t)slots * sizeof(*items));
+        if (!items) rt_panic("channel allocation failed");
+        for (int64_t i = 0; i < channel->count; i++) items[i] = channel->items[(channel->head + i) % channel->slots];
+        free(channel->items);
+        channel->items = items; channel->slots = slots; channel->head = 0;
+    }
+    SendBuffer* item = calloc(1, sizeof(*item));
+    if (!item) rt_panic("channel allocation failed");
+    *item = *source;
+    item->depth = 0;
+    memset(source, 0, sizeof(*source));
+    channel->items[(channel->head + channel->count) % channel->slots] = item;
+    channel->count++;
+    channel_signal(channel, 1, 0);
+    pthread_mutex_unlock(&channel->lock);
+    return 1;
+}
+
+/* The oldest value, as a reader that owns it, or NULL when empty. */
+void* rt_channel_try_receive(void* pointer) {
+    ParallelChannel* channel = pointer;
+    pthread_mutex_lock(&channel->lock);
+    if (channel->count == 0) { pthread_mutex_unlock(&channel->lock); return NULL; }
+    SendBuffer* item = channel->items[channel->head];
+    channel->head = (channel->head + 1) % channel->slots;
+    channel->count--;
+    channel_signal(channel, 0, 0);
+    pthread_mutex_unlock(&channel->lock);
+    item->read_at = 0;
+    return item;
+}
+
+/* Whether the channel is closed and empty: nothing will arrive any more. */
+int32_t rt_channel_drained(void* pointer) {
+    ParallelChannel* channel = pointer;
+    pthread_mutex_lock(&channel->lock);
+    int drained = channel->closed && channel->count == 0;
+    pthread_mutex_unlock(&channel->lock);
+    return drained;
+}
+
+int32_t rt_channel_closed(void* pointer) {
+    ParallelChannel* channel = pointer;
+    pthread_mutex_lock(&channel->lock);
+    int closed = channel->closed;
+    pthread_mutex_unlock(&channel->lock);
+    return closed;
+}
+
+int64_t rt_channel_len(void* pointer) {
+    ParallelChannel* channel = pointer;
+    pthread_mutex_lock(&channel->lock);
+    int64_t count = channel->count;
+    pthread_mutex_unlock(&channel->lock);
+    return count;
+}
+
+/* Values sent and not received yet stay receivable; later sends fail. */
+void rt_channel_close(void* pointer) {
+    ParallelChannel* channel = pointer;
+    pthread_mutex_lock(&channel->lock);
+    channel->closed = 1;
+    channel_signal(channel, 1, 1);
+    channel_signal(channel, 0, 1);
+    pthread_mutex_unlock(&channel->lock);
+}
+
+/* A task completing when a receive (or send) may succeed, or NULL when it
+ * may already: then the caller tries again at once. */
+TaskHandle* rt_channel_wait(void* pointer, int32_t receiving) {
+    ParallelChannel* channel = pointer;
+    Inbox* inbox = inbox_of_thread();
+    pthread_mutex_lock(&channel->lock);
+    int ready = channel->closed || (receiving ? channel->count > 0 : (!channel->capacity || channel->count < channel->capacity));
+    if (ready) { pthread_mutex_unlock(&channel->lock); return NULL; }
+    ChannelWait* wait = calloc(1, sizeof(*wait));
+    if (!wait) rt_panic("channel allocation failed");
+    TaskHandle* task = rl_task_new(); task->native_kind = 14;
+    memcpy(task->peer, &wait, sizeof(wait));
+    wait->owners = 2;
+    wait->channel = channel;
+    rt_channel_retain(channel);
+    wait->task = task;
+    wait->inbox = inbox;
+    wait->receiving = receiving;
+    ChannelWait** head = receiving ? &channel->receivers : &channel->senders;
+    ChannelWait** tail = receiving ? &channel->receivers_tail : &channel->senders_tail;
+    if (*tail) (*tail)->next = wait; else *head = wait;
+    *tail = wait;
+    pthread_mutex_unlock(&channel->lock);
+    return task;
+}
+
+/* The waiting task is gone. A wait still listed leaves the list; one woken
+ * but never delivered passes its wake to the next waiter. */
+void rl_channel_wait_release(TaskHandle* task) {
+    ChannelWait* wait; memcpy(&wait, task->peer, sizeof(wait));
+    ParallelChannel* channel = wait->channel;
+    int listed = 0;
+    pthread_mutex_lock(&channel->lock);
+    if (!wait->woken) {
+        ChannelWait** head = wait->receiving ? &channel->receivers : &channel->senders;
+        ChannelWait** tail = wait->receiving ? &channel->receivers_tail : &channel->senders_tail;
+        ChannelWait* previous = NULL;
+        for (ChannelWait* at = *head; at; previous = at, at = at->next) {
+            if (at != wait) continue;
+            if (previous) previous->next = wait->next; else *head = wait->next;
+            if (*tail == wait) *tail = previous;
+            listed = 1;
+            break;
+        }
+    } else if (!wait->delivered) {
+        channel_signal(channel, wait->receiving, 0);
+    }
+    wait->task = NULL;
+    pthread_mutex_unlock(&channel->lock);
+    if (listed) wait_release(wait);   /* the list's ownership */
+    wait_release(wait);               /* the task's */
+}
+
 /* Whether this thread is a worker (code running for a parallel function). */
 int32_t rt_parallel_on_worker(void) { return current_worker != NULL; }
 
@@ -373,5 +608,18 @@ void rl_parallel_release(TaskHandle* task) { (void)task; }
 void rl_parallel_wake(void) {}
 void* rt_parallel_result(TaskHandle* task) { (void)task; return NULL; }
 int32_t rt_parallel_on_worker(void) { return 0; }
+void* rt_channel_new(int64_t capacity) { (void)capacity; rt_panic("channels need POSIX threads"); return NULL; }
+void rt_channel_retain(void* channel) { (void)channel; }
+void rt_channel_release(void* channel) { (void)channel; }
+int64_t rt_channel_share(void* channel) { (void)channel; return 0; }
+void* rt_channel_from_shared(int64_t id) { (void)id; return NULL; }
+int32_t rt_channel_try_send(void* channel, void* writer) { (void)channel; (void)writer; return -1; }
+void* rt_channel_try_receive(void* channel) { (void)channel; return NULL; }
+int32_t rt_channel_drained(void* channel) { (void)channel; return 1; }
+int32_t rt_channel_closed(void* channel) { (void)channel; return 1; }
+int64_t rt_channel_len(void* channel) { (void)channel; return 0; }
+void rt_channel_close(void* channel) { (void)channel; }
+TaskHandle* rt_channel_wait(void* channel, int32_t receiving) { (void)channel; (void)receiving; return NULL; }
+void rl_channel_wait_release(TaskHandle* task) { (void)task; }
 
 #endif

@@ -641,11 +641,17 @@ processor, or `ROLANG_WORKERS`), each with its own scheduler; calls stay
 no objects: a parallel function's parameters and result must be `Sendable`
 (numbers, Bool, String, Vec, Dict, optionals, Result, and structs or enums
 declaring `: Sendable`, which derives the copy) and are copied between
-threads. See docs/parallelism.md.
+threads. A `Channel<T>` of Sendable values is shared: passed to a parallel
+function, it is the same channel there, so threads can stream values to each
+other. See docs/parallelism.md.
 
 ~~~rolang
 parallel def checksum(data: Vec<u8>) async -> u64 { ... }
 let sums = [spawn checksum(a), spawn checksum(b)];   // two cores
+
+parallel def worker(jobs: Channel<Job>, done: Channel<i64>) async -> Void {
+    while let job = await jobs.receive() { await done.send(run(job)); }
+}
 ~~~
 
 <!-- example: async -->

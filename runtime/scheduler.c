@@ -158,6 +158,7 @@ void rl_task_release(TaskHandle* task) {
     if (task->native_kind == 8) rl_resolve_release(task);
     if (task->native_kind == 12) rl_fs_release(task);
     if (task->native_kind == 13) rl_parallel_release(task);
+    if (task->native_kind == 14) rl_channel_wait_release(task);
     rl_stream_release(task->stream);
     rl_stream_release(task->result_stream);
     free(task->buffer);

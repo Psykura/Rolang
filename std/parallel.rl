@@ -9,7 +9,8 @@
 // are Sendable values, encoded on one thread and decoded into new objects on
 // the other. Numbers, Bool, String, Vec, Dict, optionals and Result of
 // Sendable values are Sendable; a struct or enum declares `: Sendable` to
-// derive the encoding from its fields (which must be Sendable too).
+// derive the encoding from its fields (which must be Sendable too). A
+// Channel<T> passes Sendable values between threads while they run.
 import "string.rl"
 import "vec.rl"
 import "dict.rl"
@@ -34,6 +35,17 @@ pub extern "C" def rt_parallel_complete(job: RawPtr, result: RawPtr) -> Void;
 pub extern "C" def rt_parallel_result(task: RawPtr) -> RawPtr;
 pub extern "C" def rt_parallel_on_worker() -> i32;
 pub extern "C" def rt_task_detach(task: RawPtr) -> Void;
+pub extern "C" def rt_channel_new(capacity: i64) -> RawPtr;
+pub extern "C" def rt_channel_release(channel: RawPtr) -> Void;
+pub extern "C" def rt_channel_share(channel: RawPtr) -> i64;
+pub extern "C" def rt_channel_from_shared(id: i64) -> RawPtr;
+pub extern "C" def rt_channel_try_send(channel: RawPtr, writer: RawPtr) -> i32;
+pub extern "C" def rt_channel_try_receive(channel: RawPtr) -> RawPtr;
+pub extern "C" def rt_channel_drained(channel: RawPtr) -> i32;
+pub extern "C" def rt_channel_closed(channel: RawPtr) -> i32;
+pub extern "C" def rt_channel_len(channel: RawPtr) -> i64;
+pub extern "C" def rt_channel_close(channel: RawPtr) -> Void;
+pub extern "C" def rt_channel_wait(channel: RawPtr, receiving: i32) -> RawPtr;
 
 // A value that can be copied to another thread.
 pub protocol Sendable {
@@ -110,6 +122,90 @@ pub def __parallel_arguments(job: RawPtr) -> SendReader {
 }
 pub def __parallel_finish(job: RawPtr, result: SendWriter) -> Void {
     unsafe { rt_parallel_complete(job, result.take()); }
+}
+
+// A queue of Sendable values that any thread holding it can use: a channel
+// passed to a parallel function is the same channel there.
+//
+//     let results = Channel<i64>.new();
+//     for part in parts { spawn sum_into(part, results); }   // parallel def sum_into(.., out: Channel<i64>)
+//
+// Values are copied in when sent and out when received. `send` waits while a
+// bounded channel is full; `receive` waits while it is empty and returns nil
+// once it is closed and empty.
+pub struct Channel<T> {
+    var handle: RawPtr;
+    // An unbounded channel.
+    pub static def new() -> Channel<T> { unsafe { return Channel<T> { handle: rt_channel_new(0) }; } }
+    // A channel holding at most `capacity` values (at least 1).
+    pub static def bounded(capacity: i64) -> Channel<T> {
+        var limit = capacity;
+        if limit < 1 { limit = 1; }
+        unsafe { return Channel<T> { handle: rt_channel_new(limit) }; }
+    }
+    pub def __release__() -> Void {
+        unsafe {
+            let handle = self.handle;
+            self.handle = 0 as RawPtr;
+            rt_channel_release(handle);
+        }
+    }
+    // No more sends; values already sent can still be received.
+    pub def close() -> Void { unsafe { rt_channel_close(self.handle); } }
+    pub def is_closed() -> Bool { unsafe { return rt_channel_closed(self.handle) != 0; } }
+    // Values sent and not received yet.
+    pub def len() -> i64 { unsafe { return rt_channel_len(self.handle); } }
+}
+pub extension<T> Channel<T> {
+    // Waits for room; false when the channel is closed.
+    pub def send(value: T) async -> Bool where T: Sendable {
+        let out = SendWriter.new();
+        value.send_encode(out);
+        while true {
+            unsafe {
+                let status = rt_channel_try_send(self.handle, out.handle);
+                if status != 0 { return status > 0; }
+                let wait = rt_channel_wait(self.handle, 0);
+                if (wait as i64) != 0 { await Task<i32>.from_handle(wait); }
+            }
+        }
+        false
+    }
+    // Sends when there is room now; false when full or closed.
+    pub def try_send(value: T) -> Bool where T: Sendable {
+        let out = SendWriter.new();
+        value.send_encode(out);
+        unsafe { return rt_channel_try_send(self.handle, out.handle) > 0; }
+    }
+    // Waits for a value; nil once the channel is closed and empty.
+    pub def receive() async -> T? where T: Sendable {
+        while true {
+            if let value = self.try_receive() { return value; }
+            unsafe {
+                if rt_channel_drained(self.handle) != 0 { let none: T? = nil; return none; }
+                let wait = rt_channel_wait(self.handle, 1);
+                if (wait as i64) != 0 { await Task<i32>.from_handle(wait); }
+            }
+        }
+        let none: T? = nil;
+        none
+    }
+    // A value if one is waiting.
+    pub def try_receive() -> T? where T: Sendable {
+        unsafe {
+            let handle = rt_channel_try_receive(self.handle);
+            if (handle as i64) == 0 { let none: T? = nil; return none; }
+            let input = SendReader.from_handle(handle);
+            let some: T? = T.send_decode(input);
+            return some;
+        }
+    }
+}
+pub extension<T> Channel<T>: Sendable {
+    pub def send_encode(out: SendWriter) -> Void { unsafe { out.put_int(rt_channel_share(self.handle)); } }
+    pub static def send_decode(input: SendReader) -> Channel<T> {
+        unsafe { return Channel<T> { handle: rt_channel_from_shared(input.int()) }; }
+    }
 }
 
 pub extension i64: Sendable {
