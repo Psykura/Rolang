@@ -1,0 +1,10 @@
+text echo /chat: hello
+binary 4
+200017
+text echo /chat: after ping
+closed 1000
+plain http
+HTTP/1.1 200 OK
+true true
+882303ea
+server: WebSocket protocol error: the client sent an unmasked frame

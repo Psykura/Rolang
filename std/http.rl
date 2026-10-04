@@ -14,7 +14,9 @@
 // Bodies are binary-safe strings. Requests and responses carry their length
 // (or use chunked encoding); clients follow up to five redirects and decode
 // gzip and deflate responses; a server with `gzip` set compresses large text
-// responses for clients that accept it. https uses
+// responses for clients that accept it. WebSocket connections start with
+// WebSocket.connect(url), or on a server whose `websocket` handler takes
+// upgraded requests. https uses
 // std.tls: clients verify servers against the system's trusted certificates
 // (`client.tls` changes that), and `HttpServer.bind(..., tls: config)` serves
 // https.
@@ -28,6 +30,8 @@ import "string_builder.rl"
 import "async_io.rl"
 import "tls.rl"
 import "compress.rl"
+import "crypto.rl"
+import "encoding.rl"
 import "json.rl"
 import "time.rl"
 
@@ -642,6 +646,245 @@ def decode_body(data: String, encoding: String, limit: i32) -> Result<String, St
     }
 }
 
+// ---- WebSocket (RFC 6455) ----
+
+pub extern "C" def rt_ws_sha1(input: String) -> RawPtr;
+pub extern "C" def rt_ws_frame(opcode: i32, fin: i32, payload: String, key: String) -> RawPtr;
+pub extern "C" def rt_ws_mask(data: String, key: String) -> RawPtr;
+pub extern "C" def rt_ws_close_payload(code: i32, reason: String) -> RawPtr;
+
+def websocket_accept(key: String) -> String {
+    unsafe { return base64_encode(String.from_handle(rt_ws_sha1(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))); }
+}
+// The client's key when the request asks to upgrade to WebSocket version 13.
+def websocket_key(headers: HttpHeaders) -> String? {
+    let upgrade = (headers.get("Upgrade") ?? "").lowercased();
+    let connection = (headers.get("Connection") ?? "").lowercased();
+    if !upgrade.equals("websocket") || !connection.contains("upgrade") { return nil; }
+    if !(headers.get("Sec-WebSocket-Version") ?? "").trim().equals("13") { return nil; }
+    guard let key = headers.get("Sec-WebSocket-Key") else { return nil; }
+    let trimmed = key.trim();
+    if (base64_decode(trimmed) ?? "").len() != 16 { return nil; }
+    trimmed
+}
+
+pub enum WebSocketMessage {
+    case text(String);
+    case binary(String);
+}
+
+// A frame's parts.
+struct WebSocketFrame { let fin: Bool; let opcode: i32; let payload: String; }
+
+// A WebSocket connection. receive() answers pings, joins fragmented messages
+// and completes the close handshake; it returns nil once the connection closed.
+pub struct WebSocket {
+    let connection: HttpConnection;
+    var buffer: String;
+    // Clients mask what they send; servers require it.
+    let client: Bool;
+    // The largest message accepted, in bytes.
+    pub var max_message: i32;
+    var sent_close: Bool;
+    var received_close: Bool;
+    // The close code for the last frame that broke the protocol (1002, or 1009 for size), else 0.
+    var violation: i32 = 0;
+    // The peer's close code and reason, once it closed.
+    pub var close_code: i32?;
+    pub var close_reason: String;
+
+    // Opens a connection to a ws:// or wss:// URL.
+    pub static def connect(url: String, headers: HttpHeaders = HttpHeaders.new(), tls: TlsConfig? = nil) async -> Result<WebSocket, HttpError> {
+        var address = url;
+        if url.starts_with("ws://") { address = "http://" + url.substring(5, (url.len() as i32) - 5); }
+        else if url.starts_with("wss://") { address = "https://" + url.substring(6, (url.len() as i32) - 6); }
+        else { return http_error(f"not a WebSocket URL: {url}"); }
+        guard let target = Url.parse(address) else { return http_error(f"invalid URL '{url}'"); }
+        var socket: AsyncStream? = nil;
+        switch await AsyncStream.connect(target.host, target.port) {
+            case .ok(let connected): socket = connected;
+            case .err(let code): return http_error(f"cannot connect to {target.authority()}: {os_error_message(code)}");
+        }
+        guard let plain = socket else { return http_error("connection failed"); }
+        var secure: TlsStream? = nil;
+        if target.scheme.equals("https") {
+            switch await TlsStream.client(plain, target.host, tls) {
+                case .ok(let established): secure = established;
+                case .err(let error): return http_error(f"TLS with {target.authority()} failed: {error.message}");
+            }
+        }
+        let connection = HttpConnection { plain, secure };
+        let key = base64_encode(random_bytes(16));
+        let request = HttpHeaders.new();
+        request.set("Host", target.authority());
+        request.set("Upgrade", "websocket");
+        request.set("Connection", "Upgrade");
+        request.set("Sec-WebSocket-Key", key);
+        request.set("Sec-WebSocket-Version", "13");
+        for field in headers.entries() { request.add(field.name, field.value); }
+        if (await connection.write(write_message(f"GET {target.target()} HTTP/1.1", request, ""))).is_err() { return http_error("cannot send the WebSocket handshake"); }
+        let reader = HttpReader { stream: connection, buffer: "", eof: false, max_body: 65536 };
+        var head = "";
+        switch await reader.head() {
+            case .ok(let block): if let text = block { head = text; } else { return http_error("connection closed during the WebSocket handshake"); }
+            case .err(let error): return Result<WebSocket, HttpError>.err(error: error);
+        }
+        let lines = head.split("\r\n");
+        let parts = lines[0].split(" ");
+        if parts.len() < 2 || !parts[1].equals("101") { return http_error(f"the server refused the WebSocket upgrade: {lines[0]}"); }
+        guard let fields = parse_header_lines(lines, 1) else { return http_error("invalid handshake response"); }
+        if !(fields.get("Sec-WebSocket-Accept") ?? "").trim().equals(websocket_accept(key)) { return http_error("the server's Sec-WebSocket-Accept does not match"); }
+        Result<WebSocket, HttpError>.ok(value: WebSocket { connection, buffer: reader.buffer, client: true, max_message: 16777216,
+            sent_close: false, received_close: false, close_code: nil, close_reason: "" })
+    }
+
+    pub def send_text(text: String) async -> Result<i32, HttpError> { await self.send_frame(1, text) }
+    pub def send_binary(data: String) async -> Result<i32, HttpError> { await self.send_frame(2, data) }
+    pub def ping(data: String = "") async -> Result<i32, HttpError> { await self.send_frame(9, data) }
+
+    def send_frame(opcode: i32, payload: String) async -> Result<i32, HttpError> {
+        if self.sent_close { return http_error("the WebSocket is closed"); }
+        var key = ""; if self.client { key = random_bytes(4); }
+        var frame = "";
+        unsafe { frame = String.from_handle(rt_ws_frame(opcode, 1, payload, key)); }
+        switch await self.connection.write(frame) {
+            case .ok(let count): return Result<i32, HttpError>.ok(value: payload.len() as i32);
+            case .err(let message): return http_error(f"WebSocket write failed: {message}");
+        }
+    }
+
+    // The next message; nil once the connection closed.
+    pub def receive() async -> Result<WebSocketMessage?, HttpError> {
+        let none: WebSocketMessage? = nil;
+        if self.received_close { return Result<WebSocketMessage?, HttpError>.ok(value: none); }
+        let message = StringBuilder.new();
+        var kind = 0;
+        while true {
+            var frame = WebSocketFrame { fin: true, opcode: 0, payload: "" };
+            switch await self.read_frame() {
+                case .ok(let next): frame = next;
+                case .err(let error):
+                    if self.violation != 0 { return await self.fail(self.violation, error.message); }
+                    return Result<WebSocketMessage?, HttpError>.err(error: error);
+            }
+            if frame.opcode >= 8 {
+                if !frame.fin || frame.payload.len() > 125 { return await self.fail(1002, "invalid control frame"); }
+                if frame.opcode == 9 { await self.send_frame(10, frame.payload); continue; }
+                if frame.opcode == 10 { continue; }
+                if frame.opcode == 8 {
+                    self.received_close = true;
+                    if frame.payload.len() >= 2 {
+                        self.close_code = frame.payload.byte_at(0) * 256 + frame.payload.byte_at(1);
+                        self.close_reason = frame.payload.substring(2, (frame.payload.len() as i32) - 2);
+                    }
+                    if !self.sent_close { await self.close(self.close_code ?? 1000); }
+                    return Result<WebSocketMessage?, HttpError>.ok(value: none);
+                }
+                return await self.fail(1002, f"unknown control opcode {frame.opcode}");
+            }
+            if frame.opcode == 1 || frame.opcode == 2 {
+                if kind != 0 { return await self.fail(1002, "a new message started inside a fragmented one"); }
+                kind = frame.opcode;
+            } else if frame.opcode == 0 {
+                if kind == 0 { return await self.fail(1002, "a continuation frame without a message"); }
+            } else { return await self.fail(1002, f"unknown opcode {frame.opcode}"); }
+            if (message.len() as i32) + (frame.payload.len() as i32) > self.max_message { return await self.fail(1009, "message too big"); }
+            message.append(frame.payload);
+            if frame.fin {
+                let data = message.to_string();
+                if kind == 1 {
+                    if !data.is_valid_utf8() { return await self.fail(1007, "text message is not UTF-8"); }
+                    return Result<WebSocketMessage?, HttpError>.ok(value: WebSocketMessage.text(data));
+                }
+                return Result<WebSocketMessage?, HttpError>.ok(value: WebSocketMessage.binary(data));
+            }
+        }
+        Result<WebSocketMessage?, HttpError>.ok(value: none)
+    }
+
+    // Sends a close frame (once); the connection ends when the peer answers
+    // or when the WebSocket is released.
+    pub def close(code: i32 = 1000, reason: String = "") async -> Void {
+        if self.sent_close { return; }
+        var payload = "";
+        unsafe { payload = String.from_handle(rt_ws_close_payload(code, reason)); }
+        await self.send_frame(8, payload);
+        self.sent_close = true;
+        if !self.received_close {
+            // Wait briefly for the peer's close frame.
+            let drained = spawn self.drain();
+            await with_timeout(drained, Duration.seconds(5));
+        }
+        await self.connection.finish();
+    }
+
+    def drain() async -> Bool {
+        while !self.received_close {
+            switch await self.read_frame() {
+                case .ok(let frame):
+                    if frame.opcode == 8 {
+                        self.received_close = true;
+                        if frame.payload.len() >= 2 {
+                            self.close_code = frame.payload.byte_at(0) * 256 + frame.payload.byte_at(1);
+                            self.close_reason = frame.payload.substring(2, (frame.payload.len() as i32) - 2);
+                        }
+                    }
+                case .err(let error): return false;
+            }
+        }
+        true
+    }
+
+    def fail(code: i32, message: String) async -> Result<WebSocketMessage?, HttpError> {
+        // Close reasons are limited to 123 bytes.
+        var reason = message; if reason.len() > 123 { reason = reason.substring(0, 123); }
+        await self.close(code, reason);
+        http_error(f"WebSocket protocol error: {message}")
+    }
+
+    def need(count: i32) async -> Bool {
+        while (self.buffer.len() as i32) < count {
+            switch await self.connection.read(65536) {
+                case .ok(let data): if data.len() == 0 { return false; } self.buffer = self.buffer + data;
+                case .err(let message): return false;
+            }
+        }
+        true
+    }
+
+    def read_frame() async -> Result<WebSocketFrame, HttpError> {
+        if !(await self.need(2)) { self.received_close = true; return http_error("the WebSocket connection closed"); }
+        let first = self.buffer.byte_at(0); let second = self.buffer.byte_at(1);
+        if (first & 112) != 0 { self.violation = 1002; return http_error("frame uses reserved bits"); }
+        let masked = (second & 128) != 0;
+        if masked == self.client {
+            self.violation = 1002;
+            if self.client { return http_error("the server sent a masked frame"); }
+            return http_error("the client sent an unmasked frame");
+        }
+        var length: i64 = (second & 127) as i64;
+        var offset = 2;
+        if length == 126 {
+            if !(await self.need(4)) { return http_error("the WebSocket connection closed"); }
+            length = (self.buffer.byte_at(2) * 256 + self.buffer.byte_at(3)) as i64; offset = 4;
+        } else if length == 127 {
+            if !(await self.need(10)) { return http_error("the WebSocket connection closed"); }
+            length = 0;
+            for index in 2..<10 { length = length * 256 + (self.buffer.byte_at(index) as i64); }
+            offset = 10;
+        }
+        if length > (self.max_message as i64) { self.violation = 1009; return http_error("frame too big"); }
+        var key = "";
+        if masked { if !(await self.need(offset + 4)) { return http_error("the WebSocket connection closed"); } key = self.buffer.substring(offset, 4); offset += 4; }
+        let size = length as i32;
+        if !(await self.need(offset + size)) { return http_error("the WebSocket connection closed"); }
+        var payload = self.buffer.substring(offset, size);
+        self.buffer = self.buffer.substring(offset + size, (self.buffer.len() as i32) - offset - size);
+        if masked { unsafe { payload = String.from_handle(rt_ws_mask(payload, key)); } }
+        Result<WebSocketFrame, HttpError>.ok(value: WebSocketFrame { fin: (first & 128) != 0, opcode: first & 15, payload })
+    }
+}
+
 pub def http_get(url: String) async -> Result<HttpResponse, HttpError> { await HttpClient.new().get(url) }
 pub def http_post(url: String, body: String, content_type: String = "application/octet-stream") async -> Result<HttpResponse, HttpError> {
     await HttpClient.new().post(url, body, content_type)
@@ -659,12 +902,14 @@ pub struct HttpServer {
     pub var tls: TlsConfig?;
     // Compresses text responses of 1 KiB or more for clients that accept gzip.
     pub var gzip: Bool;
+    // Takes requests that upgrade to WebSocket; others go to the request handler.
+    pub var websocket: ((HttpRequest, WebSocket) async -> Void)?;
 
     // Listens on a numeric address; port zero picks a free port. With
     // `tls` (from TlsConfig.server), connections use https.
     pub static def bind(address: String, port: i32, tls: TlsConfig? = nil) -> Result<HttpServer, HttpError> {
         switch AsyncListener.bind(address, port, 128) {
-            case .ok(let listener): return Result<HttpServer, HttpError>.ok(value: HttpServer { listener, max_body: 16777216, idle_timeout: Duration.seconds(60), tls, gzip: false });
+            case .ok(let listener): return Result<HttpServer, HttpError>.ok(value: HttpServer { listener, max_body: 16777216, idle_timeout: Duration.seconds(60), tls, gzip: false, websocket: nil });
             case .err(let code): return http_error(f"cannot listen on {address}:{port}: {os_error_message(code)}");
         }
     }
@@ -680,7 +925,7 @@ pub struct HttpServer {
             switch await self.listener.accept() {
                 case .ok(let stream):
                     accepted += 1;
-                    running.push(spawn serve_connection(stream, handler, self.max_body, self.idle_timeout, self.tls, self.gzip));
+                    running.push(spawn serve_connection(stream, handler, self.max_body, self.idle_timeout, self.tls, self.gzip, self.websocket));
                 case .err(let code): return http_error(f"accept failed: {os_error_message(code)}");
             }
         }
@@ -689,7 +934,8 @@ pub struct HttpServer {
     }
 }
 
-def serve_connection(socket: AsyncStream, handler: (HttpRequest) async -> HttpResponse, max_body: i32, idle: Duration, tls: TlsConfig?, gzip: Bool = false) async -> Void {
+def serve_connection(socket: AsyncStream, handler: (HttpRequest) async -> HttpResponse, max_body: i32, idle: Duration, tls: TlsConfig?, gzip: Bool = false,
+                     websocket: ((HttpRequest, WebSocket) async -> Void)? = nil) async -> Void {
     var secure: TlsStream? = nil;
     if let config = tls {
         // A client that fails the handshake, or stalls in it, is dropped.
@@ -723,6 +969,14 @@ def serve_connection(socket: AsyncStream, handler: (HttpRequest) async -> HttpRe
             case .err(let error): await respond(stream, HttpResponse.text(error.message, 400), false); break;
         }
         let connection = (headers.get("Connection") ?? "").lowercased();
+        if let upgrade = websocket { if let key = websocket_key(headers) {
+            let accept = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + websocket_accept(key) + "\r\n\r\n";
+            if (await stream.write(accept)).is_err() { break; }
+            let socket = WebSocket { connection: stream, buffer: reader.buffer, client: false, max_message: max_body, sent_close: false, received_close: false, close_code: nil, close_reason: "" };
+            await upgrade(request, socket);
+            if !socket.sent_close { await socket.close(); }
+            return;
+        } }
         let keep_alive = (request.version.equals("HTTP/1.1") && !connection.equals("close")) || connection.equals("keep-alive");
         let response = await handler(request);
         let accepts = gzip && (headers.get("Accept-Encoding") ?? "").lowercased().contains("gzip");

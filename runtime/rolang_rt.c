@@ -28,4 +28,5 @@
 #include "../std/regex.c"
 #include "../std/log.c"
 #include "../std/compress.c"
+#include "../std/websocket.c"
 #include "entry.c"
