@@ -16,3 +16,6 @@ chacha20-poly1305 30 attack at dawn true the message failed authentication
 aes-128-gcm 30 attack at dawn true the message failed authentication
 aes-256-gcm needs a 32-byte key
 true false false
+true the hasher was already finished
+33 false hello true the encrypted message is too short
+true unsupported cipher aes-256-cbc

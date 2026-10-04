@@ -8,7 +8,7 @@ void* rt_crypto_failure(void);
 void* rt_crypto_random_bytes(int32_t count);
 int32_t rt_crypto_equal(void* a, void* b);
 void* rt_crypto_hasher_new(void* name);
-void rt_crypto_hasher_update(void* context, void* data);
+int32_t rt_crypto_hasher_update(void* context, void* data);
 void* rt_crypto_hasher_finish(void* context);
 void rt_crypto_hasher_free(void* context);
 void* rt_crypto_hmac(void* name, void* key, void* data);

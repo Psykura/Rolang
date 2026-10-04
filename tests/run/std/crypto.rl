@@ -29,5 +29,17 @@ def main() -> i32 {
     }
     println(seal(Cipher.aes_256_gcm, "short", nonce, "x").err_value()?.message ?? "-");
     println(f"{constant_time_equals("abc", "abc")} {constant_time_equals("abc", "abd")} {constant_time_equals("abc", "ab")}");
+    // A hasher is finished once; random nonces through encrypt/decrypt.
+    if let hasher = Hasher.new(HashAlgorithm.sha256).ok_value() {
+        let first = hasher.finish();
+        hasher.update("more");
+        println(f"{first.is_ok()} {hasher.finish().err_value()?.message ?? "-"}");
+    }
+    let secret = random_bytes(32);
+    let message = encrypt(secret, "hello", "ctx").ok_value() ?? "";
+    let again = encrypt(secret, "hello", "ctx").ok_value() ?? "";
+    println(f"{message.len()} {message.equals(again)} {decrypt(secret, message, "ctx").ok_value() ?? "?"} {decrypt(secret, message).is_err()} {decrypt(secret, "short").err_value()?.message ?? "-"}");
+    // Only AEAD ciphers are accepted, even through the native function.
+    unsafe { println(f"{(rt_crypto_seal("aes-256-cbc", secret, nonce, "x", "") as i64) == 0} {String.from_handle(rt_crypto_failure())}"); }
     0
 }

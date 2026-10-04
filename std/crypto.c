@@ -113,7 +113,10 @@ static const void* crypto_digest(void* name_string) {
     return md;
 }
 
-/* An incremental digest; NULL when the algorithm is unavailable. */
+/* An incremental digest. Once finished, its OpenSSL context takes no more
+ * calls: later updates are ignored and finishing again fails. */
+typedef struct CryptoHasher { void* context; int finished; } CryptoHasher;
+
 void* rt_crypto_hasher_new(void* name) {
     const void* md = crypto_digest(name);
     if (!md) return NULL;
@@ -122,22 +125,37 @@ void* rt_crypto_hasher_new(void* name) {
         if (context) crypto.EVP_MD_CTX_free(context);
         crypto_fail("cannot start the digest"); return NULL;
     }
-    return context;
+    CryptoHasher* hasher = malloc(sizeof(*hasher));
+    if (!hasher) rt_panic("crypto allocation failed");
+    hasher->context = context; hasher->finished = 0;
+    return hasher;
 }
 
-void rt_crypto_hasher_update(void* context, void* data) {
+/* 0 when the data was added, -1 after finish. */
+int32_t rt_crypto_hasher_update(void* pointer, void* data) {
+    CryptoHasher* hasher = pointer;
+    if (!hasher || hasher->finished) return -1;
     StringVal value = rt_string_obj_value(data);
-    if (context && value.len) crypto.EVP_DigestUpdate(context, value.data, (size_t)value.len);
+    if (value.len) crypto.EVP_DigestUpdate(hasher->context, value.data, (size_t)value.len);
+    return 0;
 }
 
-/* The digest of everything added; the hasher cannot be updated afterwards. */
-void* rt_crypto_hasher_finish(void* context) {
+/* The digest of everything added. */
+void* rt_crypto_hasher_finish(void* pointer) {
+    CryptoHasher* hasher = pointer;
+    if (!hasher || hasher->finished) { crypto_fail("the hasher was already finished"); return NULL; }
+    hasher->finished = 1;
     unsigned char digest[64]; unsigned int size = 0;
-    if (!context || crypto.EVP_DigestFinal_ex(context, digest, &size) != 1) { crypto_fail("cannot finish the digest"); return NULL; }
+    if (crypto.EVP_DigestFinal_ex(hasher->context, digest, &size) != 1) { crypto_fail("cannot finish the digest"); return NULL; }
     return crypto_bytes(digest, size);
 }
 
-void rt_crypto_hasher_free(void* context) { if (context) crypto.EVP_MD_CTX_free(context); }
+void rt_crypto_hasher_free(void* pointer) {
+    CryptoHasher* hasher = pointer;
+    if (!hasher) return;
+    crypto.EVP_MD_CTX_free(hasher->context);
+    free(hasher);
+}
 
 void* rt_crypto_hmac(void* name, void* key, void* data) {
     const void* md = crypto_digest(name);
@@ -166,14 +184,19 @@ void* rt_crypto_pbkdf2(void* name, void* password, void* salt, int32_t iteration
     return result;
 }
 
-/* AEAD with a 12-byte nonce and a 16-byte tag appended to the ciphertext. */
+/* AEAD with a 12-byte nonce and a 16-byte tag appended to the ciphertext.
+ * Only these ciphers are accepted: the code below relies on their AEAD
+ * controls, stream output and key sizes. */
 static const void* crypto_cipher(void* name_string, int64_t key_size, int64_t nonce_size) {
     if (!crypto_load()) return NULL;
     StringVal name = rt_string_obj_value(name_string);
     char text[64];
     if (name.len <= 0 || name.len >= (int64_t)sizeof(text)) { crypto_fail("unknown cipher"); return NULL; }
     memcpy(text, name.data, (size_t)name.len); text[name.len] = 0;
-    int64_t wanted = strstr(text, "128") ? 16 : 32;
+    int64_t wanted = 0;
+    if (strcmp(text, "aes-128-gcm") == 0) wanted = 16;
+    else if (strcmp(text, "aes-256-gcm") == 0 || strcmp(text, "chacha20-poly1305") == 0) wanted = 32;
+    else { snprintf(crypto_failure, sizeof(crypto_failure), "unsupported cipher %s", text); return NULL; }
     if (key_size != wanted) { snprintf(crypto_failure, sizeof(crypto_failure), "%s needs a %lld-byte key", text, (long long)wanted); return NULL; }
     if (nonce_size != 12) { crypto_fail("the nonce must be 12 bytes"); return NULL; }
     const void* cipher = crypto.EVP_get_cipherbyname(text);
@@ -237,7 +260,7 @@ void* rt_crypto_open(void* name, void* key, void* nonce, void* sealed, void* aad
 #else
 
 void* rt_crypto_hasher_new(void* name) { (void)name; crypto_fail("crypto is not supported on this platform"); return NULL; }
-void rt_crypto_hasher_update(void* context, void* data) { (void)context; (void)data; }
+int32_t rt_crypto_hasher_update(void* context, void* data) { (void)context; (void)data; return -1; }
 void* rt_crypto_hasher_finish(void* context) { (void)context; return NULL; }
 void rt_crypto_hasher_free(void* context) { (void)context; }
 void* rt_crypto_hmac(void* name, void* key, void* data) { (void)name; (void)key; (void)data; crypto_fail("crypto is not supported on this platform"); return NULL; }

@@ -17,7 +17,7 @@ pub extern "C" def rt_crypto_failure() -> RawPtr;
 pub extern "C" def rt_crypto_random_bytes(count: i32) -> RawPtr;
 pub extern "C" def rt_crypto_equal(a: String, b: String) -> i32;
 pub extern "C" def rt_crypto_hasher_new(name: String) -> RawPtr;
-pub extern "C" def rt_crypto_hasher_update(context: RawPtr, data: String) -> Void;
+pub extern "C" def rt_crypto_hasher_update(context: RawPtr, data: String) -> i32;
 pub extern "C" def rt_crypto_hasher_finish(context: RawPtr) -> RawPtr;
 pub extern "C" def rt_crypto_hasher_free(context: RawPtr) -> Void;
 pub extern "C" def rt_crypto_hmac(name: String, key: String, data: String) -> RawPtr;
@@ -97,11 +97,12 @@ pub struct Hasher {
             rt_crypto_hasher_free(handle);
         }
     }
+    // Adds data; ignored once the hasher is finished.
     pub def update(data: String) -> Hasher {
         unsafe { rt_crypto_hasher_update(self.handle, data); }
         self
     }
-    // The digest; the hasher takes no more data afterwards.
+    // The digest; the hasher takes no more data afterwards, and finishing again fails.
     pub def finish() -> Result<String, CryptoError> {
         unsafe { return crypto_result(rt_crypto_hasher_finish(self.handle)); }
     }
@@ -122,6 +123,23 @@ pub def pbkdf2(password: String, salt: String, iterations: i32, length: i32 = 32
 // encrypting it). Never reuse a nonce with the same key.
 pub def seal(cipher: Cipher, key: String, nonce: String, plaintext: String, aad: String = "") -> Result<String, CryptoError> {
     unsafe { return crypto_result(rt_crypto_seal(cipher.name(), key, nonce, plaintext, aad)); }
+}
+
+// Encrypts with a fresh random nonce, returned in front of the sealed message,
+// so callers cannot reuse a nonce by mistake. Random 12-byte nonces are safe
+// for about 2^32 messages under one key.
+pub def encrypt(key: String, plaintext: String, aad: String = "", cipher: Cipher = Cipher.aes_256_gcm) -> Result<String, CryptoError> {
+    let nonce = random_bytes(12);
+    switch seal(cipher, key, nonce, plaintext, aad) {
+        case .ok(let sealed): return Result<String, CryptoError>.ok(value: nonce + sealed);
+        case .err(let error): return Result<String, CryptoError>.err(error: error);
+    }
+}
+
+// Decrypts what encrypt() produced.
+pub def decrypt(key: String, data: String, aad: String = "", cipher: Cipher = Cipher.aes_256_gcm) -> Result<String, CryptoError> {
+    if data.len() < 28 { return Result<String, CryptoError>.err(error: CryptoError { message: "the encrypted message is too short" }); }
+    open(cipher, key, data.substring(0, 12), data.substring(12, (data.len() as i32) - 12), aad)
 }
 
 // Decrypts a sealed message; fails when it was altered or sealed with another
