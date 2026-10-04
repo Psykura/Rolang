@@ -3,6 +3,7 @@ import std.async_fs
 import std.fs
 import std.task
 import std.result
+import std.subprocess
 def counter<T>(stop: Task<T>) async -> i32 {
     var ticks = 0;
     while !stop.done() { ticks += 1; await yield_now(); }
@@ -49,5 +50,14 @@ def main() async -> i32 {
     }
     await remove(dir + "/x/y/z"); await remove(dir + "/x/y"); await remove(dir + "/x"); await remove(dir);
     println(f"{await exists(dir)}");
+    // FIFOs are refused instead of blocking a worker; atomic writes keep the replaced file's mode.
+    guard let other = fs_temp_dir("rolang-afs-XXXXXX") else { return 1; }
+    await shell(f"mkfifo {other}/fifo");
+    println((await read_file(other + "/fifo")).err_value()?.message ?? "read a fifo?");
+    await write_file(other + "/secret", "old");
+    await shell(f"chmod 600 {other}/secret");
+    await write_file_atomic(other + "/secret", "new");
+    println(f"{(await file_info(other + "/secret")).ok_value()?.mode ?? -1} {(await read_file(other + "/secret")).ok_value() ?? "?"}");
+    await shell(f"rm -rf {other}");
     0
 }

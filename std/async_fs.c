@@ -1,5 +1,6 @@
 #include "../runtime/platform.h"
 #include "async_fs.h"
+#include "random.h"
 #include "../runtime/api.h"
 
 /* Asynchronous file operations for std.async_fs. Regular files are always
@@ -49,11 +50,28 @@ static void fs_job_release(FsJob* job) {
 
 static FsJob* fs_job_of(TaskHandle* task) { FsJob* job; memcpy(&job, task->peer, sizeof(job)); return job; }
 
-static int fs_read_file(FsJob* job) {
-    int fd = open(job->path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return errno;
+/* Opens without blocking (a FIFO with no writer would hold a worker
+ * forever), then refuses FIFOs and sockets: only files and devices, whose
+ * reads and writes finish, are handled. */
+static int fs_open(const char* path, int flags, int* fd_out) {
+    int fd = open(path, flags | O_NONBLOCK | O_CLOEXEC, 0644);
+    if (fd < 0) return errno == ENXIO ? EINVAL : errno;
     struct stat info;
-    if (fstat(fd, &info) == 0 && S_ISDIR(info.st_mode)) { close(fd); return EISDIR; }
+    if (fstat(fd, &info) != 0) { int error = errno; close(fd); return error; }
+    if (S_ISFIFO(info.st_mode) || S_ISSOCK(info.st_mode)) { close(fd); return EINVAL; }
+    if (S_ISDIR(info.st_mode)) { close(fd); return EISDIR; }
+    int current = fcntl(fd, F_GETFL);
+    if (current >= 0) (void)fcntl(fd, F_SETFL, current & ~O_NONBLOCK);
+    *fd_out = fd;
+    return 0;
+}
+
+static int fs_read_file(FsJob* job) {
+    int fd = -1;
+    int opened = fs_open(job->path, O_RDONLY, &fd);
+    if (opened) return opened;
+    struct stat info;
+    if (fstat(fd, &info) != 0) { int error = errno; close(fd); return error; }
     size_t capacity = info.st_size > 0 && info.st_size < job->limit ? (size_t)info.st_size + 1 : 65536;
     char* data = malloc(capacity + 1);
     if (!data) { close(fd); return ENOMEM; }
@@ -90,10 +108,13 @@ static int fs_write_all(int fd, const char* data, size_t size) {
 
 /* flags: 0 replace, 1 append, 2 create only (fails if the file exists). */
 static int fs_write_file(FsJob* job) {
-    int mode = O_WRONLY | O_CREAT | O_CLOEXEC;
-    if (job->flags == 1) mode |= O_APPEND; else if (job->flags == 2) mode |= O_EXCL; else mode |= O_TRUNC;
-    int fd = open(job->path, mode, 0644);
-    if (fd < 0) return errno;
+    int mode = O_WRONLY | O_CREAT;
+    if (job->flags == 1) mode |= O_APPEND; else if (job->flags == 2) mode |= O_EXCL;
+    int fd = -1;
+    int opened = fs_open(job->path, mode, &fd);
+    if (opened) return opened;
+    /* Truncate only once the target is known to be a file or device. */
+    if (job->flags == 0 && ftruncate(fd, 0) != 0 && errno != EINVAL) { int error = errno; close(fd); return error; }
     int error = fs_write_all(fd, job->input, job->input_size);
     if (close(fd) != 0 && !error) error = errno;
     job->values[5] = (int64_t)job->input_size;
@@ -104,13 +125,23 @@ static int fs_write_file(FsJob* job) {
  * the target, so readers see the old or the new contents, never a mixture. */
 static int fs_write_atomic(FsJob* job) {
     size_t length = strlen(job->path);
-    char* temporary = malloc(length + 16);
+    char* temporary = malloc(length + 32);
     if (!temporary) return ENOMEM;
-    snprintf(temporary, length + 16, "%s.tmp.XXXXXX", job->path);
-    int fd = mkstemp(temporary);
+    /* The temporary file is created like a new file (0666 less the umask);
+     * replacing an existing file keeps that file's permissions. */
+    int fd = -1;
+    for (int attempt = 0; attempt < 16 && fd < 0; attempt++) {
+        uint64_t suffix = rt_random_entropy();
+        snprintf(temporary, length + 32, "%s.tmp.%016llx", job->path, (unsigned long long)suffix);
+        fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0666);
+        if (fd < 0 && errno != EEXIST) break;
+    }
     if (fd < 0) { int error = errno; free(temporary); return error; }
-    (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
-    (void)fchmod(fd, 0644);
+    struct stat existing;
+    if (stat(job->path, &existing) == 0) {
+        if (!S_ISREG(existing.st_mode)) { close(fd); unlink(temporary); free(temporary); return EINVAL; }
+        (void)fchmod(fd, existing.st_mode & 07777);
+    }
     int error = fs_write_all(fd, job->input, job->input_size);
     if (!error && fsync(fd) != 0) error = errno;
     if (close(fd) != 0 && !error) error = errno;
