@@ -1,0 +1,5 @@
+2026-10-04T12:30:05.125Z INFO  server started port=8080
+2026-10-04T12:30:05.125Z WARN  [db] slow query sql="select * from t" ms=1200
+2026-10-04T12:30:05.125Z ERROR multi\nline empty="" quote="say \"hi\""
+{"time":"2026-10-04T12:30:05.125Z","level":"debug","logger":"net","message":"sent","bytes":"12"}
+false true
