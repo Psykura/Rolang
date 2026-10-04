@@ -11,6 +11,7 @@
 #if defined(__unix__) || defined(__APPLE__)
 #include <dlfcn.h>
 #include <signal.h>
+#include <pthread.h>
 #ifdef __linux__
 #include <sys/auxv.h>
 #endif
@@ -71,7 +72,7 @@ static struct {
     void (*ERR_clear_error)(void);
 } tls;
 
-static char tls_failure[512];
+static RL_TLS char tls_failure[512];
 
 static void tls_fail(const char* message) {
     snprintf(tls_failure, sizeof(tls_failure), "%s", message);
@@ -105,9 +106,25 @@ static const char* tls_library_override(void) {
     return path;
 }
 
+static pthread_mutex_t tls_load_lock = PTHREAD_MUTEX_INITIALIZER;
+static int tls_load_locked(void);
+
+/* Loads once; threads that arrive meanwhile wait. A failure is remembered
+ * process-wide, but its message is copied into each caller's buffer. */
+static char tls_load_message[512];
 static int tls_load(void) {
-    if (tls.state) return tls.state > 0;
-    tls.state = -1;
+    if (__atomic_load_n(&tls.state, __ATOMIC_ACQUIRE)) {
+        if (tls.state < 0) snprintf(tls_failure, sizeof(tls_failure), "%s", tls_load_message);
+        return tls.state > 0;
+    }
+    pthread_mutex_lock(&tls_load_lock);
+    int loaded = tls.state ? tls.state > 0 : tls_load_locked();
+    if (!loaded) snprintf(tls_failure, sizeof(tls_failure), "%s", tls_load_message);
+    pthread_mutex_unlock(&tls_load_lock);
+    return loaded;
+}
+
+static int tls_load_locked(void) {
     /* macOS searches the working directory for bare library names, so only
      * absolute paths are tried there. */
     const char* candidates[] = {
@@ -125,12 +142,12 @@ static int tls_load(void) {
     for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]) && !library; i++)
         if (candidates[i] && candidates[i][0]) library = dlopen(candidates[i], RTLD_NOW | RTLD_LOCAL);
     if (!library) {
-        tls_fail("TLS needs OpenSSL 3 (libssl), which was not found; install it or set ROLANG_LIBSSL to the library's absolute path");
+        snprintf(tls_load_message, sizeof(tls_load_message), "%s", "TLS needs OpenSSL 3 (libssl), which was not found; install it or set ROLANG_LIBSSL to the library's absolute path"); __atomic_store_n(&tls.state, -1, __ATOMIC_RELEASE);
         return 0;
     }
 #define TLS_SYMBOL(name) \
     if (!(*(void**)&tls.name = dlsym(library, #name))) { \
-        tls_fail("the OpenSSL library lacks " #name "; TLS needs OpenSSL 1.1.1 or later"); return 0; }
+        snprintf(tls_load_message, sizeof(tls_load_message), "%s", "the OpenSSL library lacks " #name "; TLS needs OpenSSL 1.1.1 or later"); __atomic_store_n(&tls.state, -1, __ATOMIC_RELEASE); return 0; }
     TLS_SYMBOL(TLS_client_method) TLS_SYMBOL(TLS_server_method)
     TLS_SYMBOL(SSL_CTX_new) TLS_SYMBOL(SSL_CTX_free) TLS_SYMBOL(SSL_CTX_ctrl)
     TLS_SYMBOL(SSL_CTX_set_options) TLS_SYMBOL(SSL_CTX_set_verify)
@@ -152,7 +169,7 @@ static int tls_load(void) {
      * connection; macOS sockets already set SO_NOSIGPIPE. */
     signal(SIGPIPE, SIG_IGN);
 #endif
-    tls.state = 1;
+    __atomic_store_n(&tls.state, 1, __ATOMIC_RELEASE);
     return 1;
 }
 
@@ -224,7 +241,7 @@ static int tls_alpn(TlsContext* context, const char* names) {
 
 /* Clients with default settings share one context: loading the system's
  * trusted certificates takes milliseconds. */
-static TlsContext* tls_default_client;
+static RL_TLS TlsContext* tls_default_client;
 
 void* rt_tls_context_new(int32_t server, int32_t verify, void* ca_file, void* certificate, void* key, void* alpn) {
     if (!tls_load()) return NULL;

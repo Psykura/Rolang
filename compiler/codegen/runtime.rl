@@ -34,18 +34,16 @@ done:
 }
 
 
-// Bins and header/global offsets match runtime/abi.h and runtime/memory.c.
-// Only fully written payloads may use this no-init allocator. GC skips the
-// newly linked head while the caller has not yet installed its payload.
+// Bins and header offsets match runtime/abi.h; @rl_hot mirrors RlHotState in
+// runtime/memory.c (the thread's free lists, object list, allocation counter,
+// collection trigger and running flag). Only fully written payloads may use
+// this no-init allocator. GC skips the newly linked head while the caller has
+// not yet installed its payload.
 pub def llvm_alloc_helper() -> String {
-    """@pool_free_lists = external global [6 x ptr]
-@gc_object_list = external global ptr
-@gc_alloc_counter = external global i64
-@gc_trigger_at = external global i64
-@gc_running = external global i32
+    """@rl_hot = external thread_local global { [6 x ptr], ptr, i64, i64, i32 }
 define internal ptr @"__rolang_obj_alloc_fast"(i64 %size, i64 %align, i64 %type_id, i64 %bin) alwaysinline {
 entry:
-  %slot = getelementptr [6 x ptr], ptr @pool_free_lists, i64 0, i64 %bin
+  %slot = getelementptr { [6 x ptr], ptr, i64, i64, i32 }, ptr @rl_hot, i32 0, i32 0, i64 %bin
   %node = load ptr, ptr %slot, align 8
   %empty = icmp eq ptr %node, null
   br i1 %empty, label %slow, label %fast
@@ -57,7 +55,8 @@ fast:
   store i64 %type_id, ptr %tid, align 8
   %prev = getelementptr i8, ptr %node, i64 16
   store ptr null, ptr %prev, align 8
-  %head = load ptr, ptr @gc_object_list, align 8
+  %list = getelementptr { [6 x ptr], ptr, i64, i64, i32 }, ptr @rl_hot, i32 0, i32 1
+  %head = load ptr, ptr %list, align 8
   %next = getelementptr i8, ptr %node, i64 24
   store ptr %head, ptr %next, align 8
   %head_null = icmp eq ptr %head, null
@@ -67,15 +66,19 @@ set_prev:
   store ptr %node, ptr %head_prev, align 8
   br label %linked
 linked:
-  store ptr %node, ptr @gc_object_list, align 8
-  %count = load i64, ptr @gc_alloc_counter, align 8
+  %list_head = getelementptr { [6 x ptr], ptr, i64, i64, i32 }, ptr @rl_hot, i32 0, i32 1
+  store ptr %node, ptr %list_head, align 8
+  %counter = getelementptr { [6 x ptr], ptr, i64, i64, i32 }, ptr @rl_hot, i32 0, i32 2
+  %count = load i64, ptr %counter, align 8
   %increment = add i64 %count, 1
-  store i64 %increment, ptr @gc_alloc_counter, align 8
-  %trigger = load i64, ptr @gc_trigger_at, align 8
+  store i64 %increment, ptr %counter, align 8
+  %trigger_at = getelementptr { [6 x ptr], ptr, i64, i64, i32 }, ptr @rl_hot, i32 0, i32 3
+  %trigger = load i64, ptr %trigger_at, align 8
   %due = icmp sge i64 %increment, %trigger
   br i1 %due, label %poll, label %done
 poll:
-  %running = load i32, ptr @gc_running, align 4
+  %running_flag = getelementptr { [6 x ptr], ptr, i64, i64, i32 }, ptr @rl_hot, i32 0, i32 4
+  %running = load i32, ptr %running_flag, align 4
   %busy = icmp ne i32 %running, 0
   br i1 %busy, label %done, label %collect
 collect:

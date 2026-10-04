@@ -51,7 +51,7 @@ typedef struct {
     int32_t depth;
 } RxParser;
 
-static char regex_failure[256];
+static RL_TLS char regex_failure[256];
 
 void* rt_regex_failure(void) {
     size_t size = strlen(regex_failure);

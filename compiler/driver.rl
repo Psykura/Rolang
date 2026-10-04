@@ -354,7 +354,7 @@ pub struct CompilationDriver {
             let compile = self.tool_args(self.cc); compile.push("-c"); compile.push(absolute_path(self.options.runtime));
             compile.push("-o"); compile.push(runtime_obj);
             var runtime_opt = 0; if self.options.opt_level >= 1 { runtime_opt = 3; }
-            compile.push("-O" + runtime_opt.to_string()); compile.push("-DROLANG_SINGLE_THREADED");
+            compile.push("-O" + runtime_opt.to_string()); compile.push("-DROLANG_SINGLE_THREADED"); compile.push("-DROLANG_THREADED");
             if self.options.debug_info { compile.push("-g"); }
             if runtime_opt >= 1 {
                 // Mach-O has no symbol interposition to disable; clang warns about the flag there.

@@ -1,6 +1,17 @@
 #ifndef ROLANG_RUNTIME_PLATFORM_H
 #define ROLANG_RUNTIME_PLATFORM_H
 
+/* ROLANG_THREADED (set by the compiler driver) gives each worker thread its
+ * own scheduler, cycle collector and allocation pools: objects never cross
+ * threads, so reference counts stay non-atomic. Without it (a runtime built
+ * by an older compiler) the state is process-wide, as generated code from
+ * such a compiler expects. */
+#if defined(ROLANG_THREADED)
+#define RL_TLS __thread
+#else
+#define RL_TLS
+#endif
+
 
 #include <stdlib.h>
 #include <string.h>

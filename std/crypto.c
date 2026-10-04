@@ -7,7 +7,7 @@
  * through the libssl that std.tls loads (see tls.c). Functions returning a
  * string handle return NULL on failure, with the reason in rt_crypto_failure. */
 
-static char crypto_failure[256];
+static RL_TLS char crypto_failure[256];
 
 static void crypto_fail(const char* message) {
     snprintf(crypto_failure, sizeof(crypto_failure), "%s", message);
@@ -84,12 +84,22 @@ static struct {
     int (*EVP_DecryptFinal_ex)(void*, unsigned char*, int*);
 } crypto;
 
+static pthread_mutex_t crypto_load_lock = PTHREAD_MUTEX_INITIALIZER;
+static int crypto_load_locked(void);
+
 static int crypto_load(void) {
-    if (crypto.state) return crypto.state > 0;
     if (!tls_load()) { crypto_fail(tls_failure); return 0; }
-    crypto.state = -1;
+    int state = __atomic_load_n(&crypto.state, __ATOMIC_ACQUIRE);
+    if (state) { if (state < 0) crypto_fail("the OpenSSL library lacks a required libcrypto function"); return state > 0; }
+    pthread_mutex_lock(&crypto_load_lock);
+    int loaded = crypto.state ? crypto.state > 0 : crypto_load_locked();
+    pthread_mutex_unlock(&crypto_load_lock);
+    return loaded;
+}
+
+static int crypto_load_locked(void) {
 #define CRYPTO_SYMBOL(name) \
-    if (!(*(void**)&crypto.name = dlsym(tls.library, #name))) { crypto_fail("the OpenSSL library lacks " #name); return 0; }
+    if (!(*(void**)&crypto.name = dlsym(tls.library, #name))) { crypto_fail("the OpenSSL library lacks " #name); __atomic_store_n(&crypto.state, -1, __ATOMIC_RELEASE); return 0; }
     CRYPTO_SYMBOL(EVP_get_digestbyname) CRYPTO_SYMBOL(EVP_get_cipherbyname)
     CRYPTO_SYMBOL(EVP_MD_CTX_new) CRYPTO_SYMBOL(EVP_MD_CTX_free)
     CRYPTO_SYMBOL(EVP_DigestInit_ex) CRYPTO_SYMBOL(EVP_DigestUpdate) CRYPTO_SYMBOL(EVP_DigestFinal_ex)
@@ -98,7 +108,7 @@ static int crypto_load(void) {
     CRYPTO_SYMBOL(EVP_EncryptInit_ex) CRYPTO_SYMBOL(EVP_EncryptUpdate) CRYPTO_SYMBOL(EVP_EncryptFinal_ex)
     CRYPTO_SYMBOL(EVP_DecryptInit_ex) CRYPTO_SYMBOL(EVP_DecryptUpdate) CRYPTO_SYMBOL(EVP_DecryptFinal_ex)
 #undef CRYPTO_SYMBOL
-    crypto.state = 1;
+    __atomic_store_n(&crypto.state, 1, __ATOMIC_RELEASE);
     return 1;
 }
 

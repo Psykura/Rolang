@@ -6,7 +6,7 @@
  * loaded with dlopen on first use (it ships with macOS and practically every
  * Linux). Failures return NULL with the reason in rt_compress_failure. */
 
-static char compress_failure[256];
+static RL_TLS char compress_failure[256];
 
 static void compress_fail(const char* message) {
     snprintf(compress_failure, sizeof(compress_failure), "%s", message);
@@ -22,6 +22,7 @@ void* rt_compress_failure(void) {
 
 #if defined(__unix__) || defined(__APPLE__)
 #include <dlfcn.h>
+#include <pthread.h>
 
 /* zlib's z_stream, whose layout is part of its stable ABI. */
 typedef struct {
@@ -45,9 +46,23 @@ static struct {
     unsigned long (*crc32)(unsigned long, const unsigned char*, unsigned int);
 } zlib;
 
+static pthread_mutex_t zlib_load_lock = PTHREAD_MUTEX_INITIALIZER;
+static char zlib_load_message[256];
+static int zlib_load_locked(void);
+
 static int zlib_load(void) {
-    if (zlib.state) return zlib.state > 0;
-    zlib.state = -1;
+    int state = __atomic_load_n(&zlib.state, __ATOMIC_ACQUIRE);
+    if (!state) {
+        pthread_mutex_lock(&zlib_load_lock);
+        if (!zlib.state) zlib_load_locked();
+        state = zlib.state;
+        pthread_mutex_unlock(&zlib_load_lock);
+    }
+    if (state < 0) compress_fail(zlib_load_message);
+    return state > 0;
+}
+
+static int zlib_load_locked(void) {
     const char* candidates[] = {
 #ifdef __APPLE__
         "/usr/lib/libz.1.dylib",
@@ -57,13 +72,13 @@ static int zlib_load(void) {
     };
     void* library = NULL;
     for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]) && !library; i++) library = dlopen(candidates[i], RTLD_NOW | RTLD_LOCAL);
-    if (!library) { compress_fail("compression needs zlib (libz), which was not found"); return 0; }
+    if (!library) { snprintf(zlib_load_message, sizeof(zlib_load_message), "%s", "compression needs zlib (libz), which was not found"); __atomic_store_n(&zlib.state, -1, __ATOMIC_RELEASE); return 0; }
 #define ZLIB_SYMBOL(name) \
-    if (!(*(void**)&zlib.name = dlsym(library, #name))) { compress_fail("the zlib library lacks " #name); return 0; }
+    if (!(*(void**)&zlib.name = dlsym(library, #name))) { snprintf(zlib_load_message, sizeof(zlib_load_message), "%s", "the zlib library lacks " #name); __atomic_store_n(&zlib.state, -1, __ATOMIC_RELEASE); return 0; }
     ZLIB_SYMBOL(deflateInit2_) ZLIB_SYMBOL(deflate) ZLIB_SYMBOL(deflateEnd)
     ZLIB_SYMBOL(inflateInit2_) ZLIB_SYMBOL(inflate) ZLIB_SYMBOL(inflateEnd) ZLIB_SYMBOL(crc32)
 #undef ZLIB_SYMBOL
-    zlib.state = 1;
+    __atomic_store_n(&zlib.state, 1, __ATOMIC_RELEASE);
     return 1;
 }
 

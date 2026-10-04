@@ -22,10 +22,32 @@
 static const size_t pool_bin_sizes[POOL_BIN_COUNT] = {48, 64, 96, 128, 192, 256};
 
 typedef struct PoolNode { struct PoolNode* __volatile next; } PoolNode;
-/* NOT static: the codegen-emitted inline allocation fast path (see
- * llvm_alloc_helper in compiler/codegen/runtime.rl) links directly
- * against these. Hidden visibility keeps them out of the dylib ABI. */
+/* The state the codegen-emitted inline allocation fast path (llvm_alloc_helper
+ * in compiler/codegen/runtime.rl) reads and writes. Threaded runtimes keep it
+ * in one thread-local struct, whose layout the generated code mirrors, so the
+ * fast path computes one thread-local address; the names below then refer to
+ * its fields. Older generated code links against the separate globals. */
+#if defined(ROLANG_THREADED)
+typedef struct RlHotState {
+    PoolNode* volatile pool_free_lists[POOL_BIN_COUNT];  /* offset 0 */
+    ObjHeader* gc_object_list;                           /* offset 48 */
+    int64_t gc_alloc_counter;                            /* offset 56 */
+    int64_t gc_trigger_at;                               /* offset 64 */
+    volatile int gc_running;                             /* offset 72 */
+    /* Not read by generated code; here so freeing an object computes one
+     * thread-local address. */
+    ObjHeader* gc_old_head;
+} RlHotState;
+__thread RlHotState rl_hot = { .gc_trigger_at = 10000 };
+#define pool_free_lists (rl_hot.pool_free_lists)
+#define gc_object_list (rl_hot.gc_object_list)
+#define gc_alloc_counter (rl_hot.gc_alloc_counter)
+#define gc_trigger_at (rl_hot.gc_trigger_at)
+#define gc_running (rl_hot.gc_running)
+#define gc_old_head (rl_hot.gc_old_head)
+#else
 PoolNode* volatile pool_free_lists[POOL_BIN_COUNT];
+#endif
 
 static int pool_bin_for_size(size_t total_size) {
     for (int i = 0; i < POOL_BIN_COUNT; i++) {
@@ -217,7 +239,9 @@ int32_t RT_TYPE_FIELD_DESCRIPTOR_COUNT = 0;
  * Singly-linked list of all live typed objects.  Protected by a spinlock.
  * ============================================================================ */
 
+#if !defined(ROLANG_THREADED)
 ObjHeader* gc_object_list = NULL;  /* non-static: see inline alloc fast path */
+#endif
 static atomic_flag gc_list_lock = ATOMIC_FLAG_INIT;
 
 /* Generational boundary into gc_object_list (youngest at head):
@@ -229,13 +253,17 @@ static atomic_flag gc_list_lock = ATOMIC_FLAG_INIT;
  * pass. Encoding the generation as list position avoids needing a per-object
  * field (the 32-byte ObjHeader is full). NULL means "all objects are young"
  * (forces a major). gc_list_remove maintains this boundary in O(1). */
+#if !defined(ROLANG_THREADED)
 static ObjHeader* gc_old_head = NULL;
-static int        gc_minor_count = 0;
+#endif
+static RL_TLS int        gc_minor_count = 0;
 #define GC_MAJOR_EVERY 8
 
+#if !defined(ROLANG_THREADED)
 int64_t gc_alloc_counter = 0;          /* non-static: inline alloc fast path */
-int64_t gc_last_collect_count = 0;     /* non-static: inline alloc fast path */
-static int64_t gc_cycle_count = 0;
+#endif
+RL_TLS int64_t gc_last_collect_count = 0;
+static RL_TLS int64_t gc_cycle_count = 0;
 
 /* Adaptive cycle-GC threshold. Instead of a fixed gap between collections,
  * scale the gap with the live set that survives each pass: a program with a
@@ -245,11 +273,13 @@ static int64_t gc_cycle_count = 0;
 #define GC_MIN_GAP   10000
 #define GC_MAX_GAP   2000000
 #define GC_GROWTH    2
-int64_t gc_next_gap = GC_MIN_GAP;      /* non-static: inline alloc fast path */
+RL_TLS int64_t gc_next_gap = GC_MIN_GAP;
 /* Precomputed trigger threshold: gc_last_collect_count + gc_next_gap. The
  * per-allocation poll is then one load + one compare against the counter.
  * Every site that updates the clock or the gap must refresh it. */
+#if !defined(ROLANG_THREADED)
 int64_t gc_trigger_at = GC_MIN_GAP;    /* non-static: inline alloc fast path */
+#endif
 
 /* ---- GC list lock helpers ---- */
 
@@ -368,8 +398,10 @@ static inline FieldDescriptor* rt_get_field_descriptors(const TypeDescriptor* de
     return &RT_TYPE_FIELD_DESCRIPTORS[desc->fields_start];
 }
 
+#if !defined(ROLANG_THREADED)
 volatile int gc_running = 0;  /* Set to 1 during rt_gc_collect; non-static:
                                * inline alloc fast path reads it */
+#endif
 
 /* Defined below. rt_obj_alloc polls it once the alloc counter crosses the gap,
  * so the GC trigger lives at the one site allocations happen rather than being
@@ -836,18 +868,18 @@ typedef struct {
 
 #define GC_INITIAL_CAPACITY 4096
 
-static GCCandidate* gc_candidates = NULL;
-static int32_t gc_candidates_capacity = 0;
-static int32_t gc_candidate_count = 0;
-static ObjHeader** gc_worklist = NULL;
-static int32_t gc_worklist_capacity = 0;
+static RL_TLS GCCandidate* gc_candidates = NULL;
+static RL_TLS int32_t gc_candidates_capacity = 0;
+static RL_TLS int32_t gc_candidate_count = 0;
+static RL_TLS ObjHeader** gc_worklist = NULL;
+static RL_TLS int32_t gc_worklist_capacity = 0;
 
 /* Survivor count at the end of the previous pass. Approximates the live
  * count of the old (tenured) region so a minor pass can derive a total live
  * figure for gap adaptation without walking the old region. Old objects
  * freed by refcounting between passes make this stale-high, which only
  * inflates the next gap slightly; every major pass recomputes it exactly. */
-static int64_t gc_old_live_count = 0;
+static RL_TLS int64_t gc_old_live_count = 0;
 
 static int gc_buffers_ensure(int32_t needed) {
     /* Ensure the candidate / worklist buffers can hold at least `needed`
