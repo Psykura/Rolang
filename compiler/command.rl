@@ -53,6 +53,7 @@ def command_line() -> CommandLine {
     emit.preset(["-c", "--compile-only"], "obj", "emit an object file (--emit obj)");
     cli.option("opt-level", "N", "optimization level (default: 2)", short: "O", choices: ["0", "1", "2", "3"]);
     cli.option("lto", "MODE", "link-time optimization (default: none)", choices: ["full", "thin", "none"], implicit: "full").preset(["--no-lto"], "none");
+    cli.option("jobs", "N", "compile a large program's code in N parts at once (default: one per processor)", short: "j");
     cli.option("include-path", "ROOT", "add a source root", short: "I");
     cli.option("stdlib", "ROOT", "use the standard library under ROOT");
     cli.option("runtime", "FILE", "use this runtime C source");
@@ -111,6 +112,7 @@ pub def run_compiler_cli() -> i32 {
     options.cache_context = args.value("cache-context") ?? "";
     options.verbose = args.has("verbose");
     options.debug_info = args.has("debug");
+    options.jobs = (args.value("jobs") ?? "0").to_i32();
     if args.has("no-cache") { options.cache_dir = ""; }
     var mode = "";
     if let pass = args.value("inspect") { mode = "--" + pass; }

@@ -15,6 +15,8 @@ import "../mir_utils.rl"
 pub struct LlvmResult {
     pub let text: String;
     pub let errors: Vec<String>;
+    // With partitions: modules to compile separately and link together (text is the first).
+    pub let modules: Vec<String>;
     pub def has_errors() -> Bool { self.errors.len() > 0 }
 }
 struct LlvmFieldDescriptor { let offset: i64; let type_id: i64; let tag: i32; }
@@ -47,7 +49,16 @@ struct LlvmModuleEmitter {
     var debug_unit: i32;
     var debug_signature: i32;
     var debug_declare: Bool;
-    static def new(result: MirPostResult, owner: String) -> LlvmModuleEmitter {
+    // Partitioned output: the most modules to emit, the function text each
+    // needs at least, and where each body sits in `bodies` (kind 0 inline
+    // helper copied into every module, 1 function, 2 first module only).
+    var partitions: i32;
+    var partition_bytes: i64;
+    let chunk_starts: Vec<i64>;
+    let chunk_ends: Vec<i64>;
+    let chunk_names: Vec<String>;
+    let chunk_kinds: Vec<i32>;
+    static def new(result: MirPostResult, owner: String, partitions: i32 = 1) -> LlvmModuleEmitter {
         let emitter = LlvmModuleEmitter { result, cache: LlvmTypeCache.new(result.type_table, result.program),
             signatures: Dict<String, LlvmSignature>.with_capacity(16, 1), signature_order: Vec<String>.new(),
             function_names: Vec<String>.new(), symbol_names: Dict<i32, String>.with_capacity(16, 0),
@@ -56,7 +67,8 @@ struct LlvmModuleEmitter {
             alloc_helpers: false, char_helpers: false, frem_helpers: false, collection_metadata: false,
             owner, linkages: Dict<String, String>.with_capacity(16, 1),
             debug: false, debug_lines: StringBuilder.new(), next_meta: 16, debug_files: Dict<String, i32>.new(),
-            debug_types: Dict<i32, i32>.new(), debug_unit: -1, debug_signature: -1, debug_declare: false };
+            debug_types: Dict<i32, i32>.new(), debug_unit: -1, debug_signature: -1, debug_declare: false,
+            partitions, partition_bytes: 0, chunk_starts: Vec<i64>.new(), chunk_ends: Vec<i64>.new(), chunk_names: Vec<String>.new(), chunk_kinds: Vec<i32>.new() };
         if owner.len() > 0 { emitter.cache.symbols = result.symbol_table; }
         emitter.reserve_functions(); emitter
     }
@@ -106,7 +118,10 @@ struct LlvmModuleEmitter {
             } else if !name.equals("__rolang_user_main") {
                 // A whole program keeps its functions to itself, so one named like a C
                 // library function (`rename`, `free`) cannot replace it for the runtime.
+                // Split into modules, a function may be called from another module, so
+                // it gets a name no C symbol has.
                 linkage = "internal ";
+                if self.partitions > 1 { name = "rl." + name; }
             }
             self.linkages[name] = linkage;
             self.function_names.push(name);
@@ -135,7 +150,7 @@ struct LlvmModuleEmitter {
                 for kind in ["digit", "alpha", "alnum", "space"] {
                     self.signature(LlvmSignature { name: "__rolang_char_is_" + kind, result: "i32", params: ["i32"], defined: true });
                 }
-                self.bodies.append(llvm_char_helpers());
+                self.add_body("", llvm_char_helpers(), 0);
             }
             return self.call(builder, "__rolang_" + name.substring(3, (name.len() - 3) as i32), result, values);
         }
@@ -145,7 +160,7 @@ struct LlvmModuleEmitter {
             self.signature(LlvmSignature { name: "fmod", result: "double", params: ["double", "double"], defined: false });
             for intrinsic in ["llvm.fabs.f64", "llvm.trunc.f64"] { self.signature(LlvmSignature { name: intrinsic, result: "double", params: ["double"], defined: false }); }
             self.signature(LlvmSignature { name: "llvm.fma.f64", result: "double", params: ["double", "double", "double"], defined: false });
-            self.bodies.append(llvm_frem_helper());
+            self.add_body("", llvm_frem_helper(), 0);
         }
         if name.equals("rt_obj_retain") || name.equals("rt_obj_release") {
             if !self.arc_helpers {
@@ -153,7 +168,7 @@ struct LlvmModuleEmitter {
                 self.signature(LlvmSignature { name: "__rolang_obj_retain", result: "void", params: ["ptr"], defined: true });
                 self.signature(LlvmSignature { name: "__rolang_obj_release", result: "void", params: ["ptr"], defined: true });
                 self.signature(LlvmSignature { name: "rt_obj_release_slow", result: "void", params: ["ptr"], defined: false });
-                self.bodies.append(llvm_arc_helpers());
+                self.add_body("", llvm_arc_helpers(), 0);
             }
             var helper = "__rolang_obj_retain"; if name.equals("rt_obj_release") { helper = "__rolang_obj_release"; }
             return self.call(builder, helper, result, values);
@@ -183,7 +198,7 @@ struct LlvmModuleEmitter {
                     self.signature(LlvmSignature { name: "__rolang_obj_alloc_fast", result: "ptr", params: ["i64", "i64", "i64", "i64"], defined: true });
                     self.signature(LlvmSignature { name: "rt_obj_alloc_noinit", result: "ptr", params: ["i64", "i64", "i64"], defined: false });
                     self.signature(LlvmSignature { name: "rt_gc_collect", result: "void", params: Vec<String>.new(), defined: false });
-                    self.bodies.append(llvm_alloc_helper());
+                    self.add_body("", llvm_alloc_helper(), 0);
                 }
                 let bins = [48, 64, 96, 128, 192, 256]; var bin = 0;
                 while (bins[bin] as i64) < size + 32 { bin += 1; }
@@ -307,7 +322,7 @@ struct LlvmModuleEmitter {
                     let args = [receiver]; for i in 0..<requirement.params.len() { args.push(LlvmValue { type: params[i+1], text: f"%arg{i}" }); }
                     let returned = self.call(builder, target, result, args);
                     if result.equals("void") { builder.line("  ret void"); } else { builder.line("  ret " + returned.typed()); }
-                    builder.line("}"); self.bodies.append(builder.output.to_string()); entries.push("ptr " + llvm_global(thunk_name));
+                    builder.line("}"); self.add_body(thunk_name, builder.output.to_string(), 1); entries.push("ptr " + llvm_global(thunk_name));
                 }
                 let initializer = StringBuilder.new(); for i in 0..<entries.len() { if i > 0 { initializer.append(", "); } initializer.append(entries[i]); }
                 var linkage = ""; if self.owner.len() > 0 { linkage = "internal "; }
@@ -337,7 +352,7 @@ struct LlvmModuleEmitter {
         }
         builder.line("  ret void"); builder.line("}");
         self.signature(LlvmSignature { name, result: "void", params: ["ptr"], defined: true });
-        self.bodies.append(builder.output.to_string()); llvm_global(name)
+        self.add_body(name, builder.output.to_string(), 1); llvm_global(name)
     }
     def emit_descriptors() -> Void {
         let descriptors = Vec<String>.new(); let field_lists = Vec<Vec<LlvmFieldDescriptor>>.new();
@@ -439,11 +454,17 @@ struct LlvmModuleEmitter {
         self.globals.append_line(f"@.rl.type.keys = private constant [{count} x ptr] [" + keys.to_string() + "]");
         self.globals.append_line("@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] [{ i32, ptr, ptr } { i32 65535, ptr @__rl_register_types, ptr null }]");
         self.signature(LlvmSignature { name: "rt_register_module_types", result: "void", params: ["ptr", "i32", "ptr", "i32", "ptr"], defined: false });
+        let register = self.bodies.len();
         self.bodies.append_line("define internal void @__rl_register_types() {"); self.bodies.append_line("entry:");
         self.bodies.append_line(f"  call void @rt_register_module_types(ptr @RT_TYPE_DESCRIPTORS, i32 {count}, ptr @RT_TYPE_FIELD_DESCRIPTORS, i32 {field_count}, ptr @.rl.type.keys)");
         self.signature(LlvmSignature { name: "rt_register_module_hash_functions", result: "void", params: ["ptr", "ptr", "i32"], defined: false });
         self.bodies.append_line(f"  call void @rt_register_module_hash_functions(ptr @RT_TYPE_DESCRIPTORS, ptr @RT_TYPE_HASH_FUNCTIONS, i32 {count})");
         self.bodies.append_line("  ret void"); self.bodies.append_line("}");
+        self.chunk_starts.push(register); self.chunk_ends.push(self.bodies.len()); self.chunk_names.push("__rl_register_types"); self.chunk_kinds.push(2);
+    }
+    def add_body(name: String, text: String, kind: i32) -> Void {
+        self.chunk_starts.push(self.bodies.len()); self.bodies.append(text);
+        self.chunk_ends.push(self.bodies.len()); self.chunk_names.push(name); self.chunk_kinds.push(kind);
     }
     def emit(arena: AstArena) -> LlvmResult {
         // Hooks are runtime callbacks, including on structs never allocated
@@ -463,7 +484,7 @@ struct LlvmModuleEmitter {
         for func in self.result.program.functions { for local in func.locals {
             if self.result.type_table.is_error(local.type_id) { self.errors.push("Cannot emit LLVM for unresolved MIR type in " + func.name + ": " + local.name); }
         } }
-        if self.errors.len() > 0 { return LlvmResult { text: "", errors: self.errors }; }
+        if self.errors.len() > 0 { return LlvmResult { text: "", errors: self.errors, modules: Vec<String>.new() }; }
         // Preserve source type names in opaque-pointer LLVM dumps.
         for item in self.result.program.structs { self.globals.append_line("; struct " + item.name + ": payload " + self.cache.payload_size(item.type_id).to_string() + " bytes"); }
         for item in self.result.program.enums { self.globals.append_line("; enum " + item.name + ": payload " + self.cache.payload_size(item.type_id).to_string() + " bytes"); }
@@ -471,9 +492,13 @@ struct LlvmModuleEmitter {
         for i in 0..<self.result.program.functions.len() {
             let func = self.result.program.functions[i]; let name = self.function_names[i];
             if let signature = self.signatures[name] { if !signature.defined { continue; } }
-            let emitter = LlvmFunctionEmitter.new(self, func, name); emitter.emit(); self.bodies.append(emitter.ir.output.to_string());
+            let emitter = LlvmFunctionEmitter.new(self, func, name); emitter.emit(); self.add_body(name, emitter.ir.output.to_string(), 1);
         }
         self.emit_descriptors();
+        if self.partitions > 1 && self.debug_unit < 0 {
+            let modules = self.partition();
+            if modules.len() > 1 { return LlvmResult { text: modules[0], errors: self.errors, modules }; }
+        }
         let output = StringBuilder.new(); output.append_line("; Rolang full MIR backend: LLVM text, 64-bit pointers, 32-byte ARC header");
         output.append(self.globals.to_string());
         for name in self.signature_order { if let signature = self.signatures[name] { if !signature.defined { output.append_line(signature.declaration()); } } }
@@ -486,7 +511,74 @@ struct LlvmModuleEmitter {
             output.append_line(f"!llvm.module.flags = !{{!{version}, !{format}}}");
             output.append(self.debug_lines.to_string());
         }
-        LlvmResult { text: output.to_string(), errors: self.errors }
+        LlvmResult { text: output.to_string(), errors: self.errors, modules: Vec<String>.new() }
+    }
+    // Splits the program into modules clang compiles in parallel. Functions
+    // are spread in order, balanced by size; inline helpers are copied into
+    // every module; a function called from another module becomes hidden
+    // (whole-program functions are named `rl.*` then). Private constants are
+    // copied; other globals are defined in the first module and declared in
+    // the others. Returns one module when the program is too small to split.
+    def partition() -> Vec<String> {
+        let bodies = self.bodies.to_string();
+        var total: i64 = 0;
+        for i in 0..<self.chunk_kinds.len() { if self.chunk_kinds[i] == 1 { total += self.chunk_ends[i] - self.chunk_starts[i]; } }
+        var count = self.partitions;
+        if self.partition_bytes > 0 && (total / self.partition_bytes) < (count as i64) { count = (total / self.partition_bytes) as i32; }
+        if count < 2 { return Vec<String>.new(); }
+        // Modules by size, in order; functions by their quoted LLVM names.
+        let module_of = Vec<i32>.new(); let defined_in = Dict<String, i32>.with_capacity(16, 1); let raw_names = Dict<String, String>.with_capacity(16, 1);
+        let share = total / (count as i64) + 1; var current = 0; var filled: i64 = 0;
+        for i in 0..<self.chunk_kinds.len() {
+            var module = 0;
+            if self.chunk_kinds[i] == 1 {
+                if filled >= share * ((current + 1) as i64) && current < count - 1 { current += 1; }
+                module = current; filled += self.chunk_ends[i] - self.chunk_starts[i];
+                let quoted = llvm_global(self.chunk_names[i]); defined_in[quoted] = module; raw_names[quoted] = self.chunk_names[i];
+            }
+            module_of.push(module);
+        }
+        // Functions each module calls from another one.
+        let exported = Dict<String, Bool>.with_capacity(16, 1); let imports = Vec<Dict<String, Bool>>.new();
+        for m in 0..<count { imports.push(Dict<String, Bool>.with_capacity(16, 1)); }
+        for i in 0..<self.chunk_kinds.len() {
+            if self.chunk_kinds[i] == 0 { continue; }
+            llvm_note_imports(bodies, self.chunk_starts[i] as i32, self.chunk_ends[i] as i32, module_of[i], defined_in, exported, imports[module_of[i]]);
+        }
+        let globals = self.globals.to_string();
+        llvm_note_imports(globals, 0, globals.len() as i32, 0, defined_in, exported, imports[0]);
+        // What every module but the first needs of the globals.
+        let shared = StringBuilder.new();
+        for line in globals.split("\n") {
+            if line.len() == 0 || line.starts_with(";") || line.starts_with("@llvm.") { continue; }
+            if line.starts_with("!") || line.contains(" = private ") || line.contains(" = external ") { shared.append_line(line); continue; }
+            if let declaration = llvm_global_declaration(line) { shared.append_line(declaration); }
+        }
+        let externs = StringBuilder.new();
+        for name in self.signature_order { if let signature = self.signatures[name] { if !signature.defined { externs.append_line(signature.declaration()); } } }
+        let helpers = StringBuilder.new();
+        for i in 0..<self.chunk_kinds.len() { if self.chunk_kinds[i] == 0 { helpers.append(bodies.substring(self.chunk_starts[i] as i32, (self.chunk_ends[i] - self.chunk_starts[i]) as i32)); } }
+        let modules = Vec<String>.new();
+        for m in 0..<count {
+            let output = StringBuilder.new(); output.append_line(f"; Rolang full MIR backend: LLVM text, 64-bit pointers, 32-byte ARC header (module {m + 1} of {count})");
+            if m == 0 { output.append(globals); } else { output.append(shared.to_string()); }
+            output.append(externs.to_string());
+            for quoted in imports[m].keys() {
+                if let name = raw_names[quoted] { if let signature = self.signatures[name] { output.append_line(signature.declaration()); } }
+            }
+            output.append(helpers.to_string());
+            for i in 0..<self.chunk_kinds.len() {
+                if self.chunk_kinds[i] == 0 || module_of[i] != m { continue; }
+                var text = bodies.substring(self.chunk_starts[i] as i32, (self.chunk_ends[i] - self.chunk_starts[i]) as i32);
+                if exported.contains(llvm_global(self.chunk_names[i])) {
+                    let at = text.find("define internal ");
+                    if at >= 0 { text = text.substring(0, at) + "define hidden " + text.substring(at + 16, text.len() as i32 - at - 16); }
+                }
+                output.append(text);
+            }
+            modules.push(output.to_string());
+        }
+        modules
     }
     def meta(text: String, distinct: Bool = false) -> i32 {
         let id = self.next_meta; self.next_meta += 1;
@@ -1144,6 +1236,47 @@ struct LlvmFunctionEmitter {
     }
 }
 
-pub def compile_to_llvm(result: MirPostResult, arena: AstArena, owner: String = "", debug: Bool = false) -> LlvmResult {
-    let emitter = LlvmModuleEmitter.new(result, owner); emitter.debug = debug; emitter.emit(arena)
+// Up to `partitions` modules, each with at least `partition_bytes` of function text (whole programs without -g).
+pub def compile_to_llvm(result: MirPostResult, arena: AstArena, owner: String = "", debug: Bool = false, partitions: i32 = 1, partition_bytes: i64 = 0) -> LlvmResult {
+    var count = partitions; if owner.len() > 0 || debug { count = 1; }
+    let emitter = LlvmModuleEmitter.new(result, owner, count); emitter.debug = debug; emitter.partition_bytes = partition_bytes; emitter.emit(arena)
+}
+
+// Records the functions defined in another module that text[start..<end] (in `module`) refers to.
+def llvm_note_imports(text: String, start: i32, end: i32, module: i32, defined_in: Dict<String, i32>, exported: Dict<String, Bool>, imports: Dict<String, Bool>) -> Void {
+    var at = text.find_from("@\"", start);
+    while at >= 0 && at < end {
+        let close = text.find_from("\"", at + 2);
+        if close < 0 { return; }
+        let quoted = text.substring(at, close + 1 - at);
+        if let owner = defined_in[quoted] { if owner != module { exported[quoted] = true; imports[quoted] = true; } }
+        at = text.find_from("@\"", close + 1);
+    }
+}
+
+// `@name = external constant T` for a global defined as `@name = [linkage] constant|global T value`.
+def llvm_global_declaration(line: String) -> String? {
+    let equals = line.find(" = ");
+    if equals < 0 { return nil; }
+    var at = -1; var kind = "";
+    for candidate in ["constant ", "global "] {
+        let found = line.find_from(candidate, equals);
+        if found >= 0 && (at < 0 || found < at) { at = found; kind = candidate; }
+    }
+    if at < 0 { return nil; }
+    let start = at + kind.len() as i32; var end = start;
+    let first = line.byte_at(start);
+    if first == 91 || first == 123 {
+        // A bracketed type: up to the matching bracket.
+        var depth = 0;
+        while end < line.len() as i32 {
+            let byte = line.byte_at(end);
+            if byte == 91 || byte == 123 { depth += 1; }
+            if byte == 93 || byte == 125 { depth -= 1; if depth == 0 { end += 1; break; } }
+            end += 1;
+        }
+    } else {
+        while end < line.len() as i32 && line.byte_at(end) != 32 { end += 1; }
+    }
+    line.substring(0, equals) + " = external " + kind + line.substring(start, end - start)
 }

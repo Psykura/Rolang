@@ -16,7 +16,9 @@ mkdir -p "$ROOT/build" "$ROOT/bin"
 OUTPUT="$ROOT/build/rolangc.$$"
 trap 'rm -f "$OUTPUT" "$ROOT/bin/rolangc.new"' EXIT HUP INT TERM
 echo "Building Rolang with Genesis Compiler"
-"$GENESIS" --stdlib "$ROOT" --runtime "$ROOT/runtime/rolang_rt.c" \
+# One LLVM module: the released compiler keeps cross-module inlining
+# (a compiler split for parallel compilation runs about 4% slower).
+ROLANG_JOBS=1 "$GENESIS" --stdlib "$ROOT" --runtime "$ROOT/runtime/rolang_rt.c" \
     --clang "$CLANG" --cc "$CC" -O3 "$ROOT/compiler/main.rl" -o "$OUTPUT"
 cp "$OUTPUT" "$ROOT/bin/rolangc.new"
 chmod 755 "$ROOT/bin/rolangc.new"

@@ -108,6 +108,16 @@ The format uses bounded, byte-length-prefixed records and SHA-256 validation:
 and dependency conflicts are checked. Rebuild dependencies when compiler
 module or runtime ABI versions change.
 
+## Parallel compilation
+
+An executable whose LLVM is large (more than 2 MiB of function text per part)
+is split into up to one module per processor; clang compiles the modules at
+the same time, and the runtime alongside them. `-j N` (or `ROLANG_JOBS`) sets
+the number of modules and splits even small programs; `-j 1` keeps one module.
+Calls between modules cannot be inlined, so a split program can run a few
+percent slower (the released compiler is built with `-j 1`). Debug builds,
+LTO builds, objects and modules are never split. The output is deterministic.
+
 ## LTO
 
 --lto/--lto=full and --lto=thin are opt-in. --no-lto disables it. The LLVM and

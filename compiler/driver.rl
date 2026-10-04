@@ -29,10 +29,12 @@ pub struct CompileOptions {
     pub var verbose: Bool = false;
     // -g: DWARF line tables and variables; on Darwin a .dSYM beside the executable.
     pub var debug_info: Bool = false;
+    // Parts of a large program compiled at once (-j); 0: ROLANG_JOBS, else one per processor.
+    pub var jobs: i32 = 0;
     pub let include_roots: Vec<String>;
     pub static def new() -> CompileOptions {
         CompileOptions { emit: "exe", opt_level: 2, output: "", target: "", runtime: "", stdlib: "", clang: "", cc: "",
-            lto: "none", linker: "", cache_dir: "", cache_context: "", verbose: false, include_roots: Vec<String>.new() }
+            lto: "none", linker: "", cache_dir: "", cache_context: "", verbose: false, jobs: 0, include_roots: Vec<String>.new() }
     }
 }
 pub struct CompileResult {
@@ -115,12 +117,43 @@ pub struct CompilationDriver {
         if options.runtime.len() == 0 { options.runtime = env_get("ROLANG_RUNTIME"); }
         if options.runtime.len() == 0 && standard.len() > 0 { options.runtime = path_join(standard, "runtime/rolang_rt.c"); }
     }
-    def command(args: Vec<String>, stage: String) -> Bool {
-        if self.options.verbose {
-            let command = StringBuilder.new();
-            for arg in args { if command.len() > 0 { command.append(" "); } command.append(llvm_quote(arg)); }
-            eprintln(stage + ": " + command.to_string());
+    def show_command(args: Vec<String>, stage: String) -> Void {
+        let command = StringBuilder.new();
+        for arg in args { if command.len() > 0 { command.append(" "); } command.append(llvm_quote(arg)); }
+        eprintln(stage + ": " + command.to_string());
+    }
+    // How many modules a whole program's LLVM may be split into for parallel compilation.
+    def partitions() -> i32 {
+        if !self.options.emit.equals("exe") || !self.options.lto.equals("none") || self.options.debug_info { return 1; }
+        var jobs = self.options.jobs;
+        if jobs <= 0 { jobs = env_get("ROLANG_JOBS").to_i32(); }
+        if jobs <= 0 { jobs = cpu_count(); }
+        if jobs > 32 { jobs = 32; }
+        jobs
+    }
+    // Function text per module below which a program is not split further; any
+    // size when the number of jobs is given.
+    def partition_bytes() -> i64 {
+        if self.options.jobs > 0 || env_get("ROLANG_JOBS").to_i32() > 0 { return 1; }
+        2097152
+    }
+    // Waits for the parallel LLVM compilations; false (reported) if one failed.
+    def wait_parts(pids: Vec<i64>, logs: Vec<String>) -> Bool {
+        var ok = true;
+        for k in 0..<pids.len() {
+            let status = wait_started(pids[k]);
+            let report = fs_read_text(logs[k], 4194304) ?? "";
+            if status != 0 {
+                var message = f"LLVM compilation failed (exit {status})";
+                if report.len() > 0 { message += ":\n" + report; }
+                if ok { self.error(message); }
+                ok = false;
+            } else if report.len() > 0 { eprintln(report); }
         }
+        ok
+    }
+    def command(args: Vec<String>, stage: String) -> Bool {
+        if self.options.verbose { self.show_command(args, stage); }
         let log = path_join(self.temporary, "tool.log");
         let status = run_argv_log(args, log);
         if status != 0 {
@@ -286,7 +319,7 @@ pub struct CompilationDriver {
         if emit.equals("module") { frontend.symbol_table.separate_modules = true; }
         frontend.debug_info = self.options.debug_info;
         frontend.load(entry); frontend.resolve_modules();
-        var content = "";
+        var content = ""; var modules = Vec<String>.new();
         if emit.equals("mir") {
             if let mir = frontend.build_mir_modules() { content = format_mir(mir.program, mir.type_table); }
         } else {
@@ -298,7 +331,8 @@ pub struct CompilationDriver {
                     if emit.equals("module") { for func in post.program.functions {
                         if func.name.equals("main") { return self.fail("A library module cannot define main"); }
                     } }
-                    let llvm = compile_to_llvm(post, frontend.arena, owner, self.options.debug_info);
+                    let llvm = compile_to_llvm(post, frontend.arena, owner, self.options.debug_info, self.partitions(), self.partition_bytes());
+                    modules = llvm.modules;
                     // Code generation reports compiler defects, except for the release/trace hook ABI check.
                     for error in llvm.errors {
                         if error.contains(" has an invalid signature; ") { self.error(error); } else { self.error(internal_compiler_error(error)); }
@@ -327,6 +361,21 @@ pub struct CompilationDriver {
         }
         if emit.equals("llvm") || emit.equals("mir") || emit.equals("mir-opt") { return self.emit_text(content, output); }
         let ir = path_join(self.temporary, "input.ll"); let artifact = path_join(self.temporary, "artifact");
+        // A large program's modules compile in parallel with each other and the runtime.
+        let objects = Vec<String>.new(); let pids = Vec<i64>.new(); let logs = Vec<String>.new();
+        if modules.len() > 1 {
+            for k in 0..<modules.len() {
+                let part = path_join(self.temporary, f"input_{k}.ll"); let part_object = path_join(self.temporary, f"program_{k}.o");
+                if !fs_write_atomic(part, modules[k]) { self.wait_parts(pids, logs); return self.fail("Cannot write temporary LLVM IR"); }
+                let part_args = self.tool_args(self.clang);
+                for arg in ["-Wno-override-module", "-O" + self.options.opt_level.to_string(), "-c", "-fno-lto", part, "-o", part_object] { part_args.push(arg); }
+                if self.options.verbose { self.show_command(part_args, "LLVM compilation"); }
+                let log = path_join(self.temporary, f"tool_{k}.log");
+                pids.push(start_argv_log(part_args, log)); logs.push(log); objects.push(part_object);
+            }
+        }
+        var object = artifact; if emit.equals("exe") || emit.equals("module") { object = path_join(self.temporary, "program.o"); }
+        if modules.len() <= 1 {
         if !fs_write_atomic(ir, content) { return self.fail("Cannot write temporary LLVM IR"); }
         let args = self.tool_args(self.clang);
         args.push("-Wno-override-module"); args.push("-O" + self.options.opt_level.to_string());
@@ -338,12 +387,13 @@ pub struct CompilationDriver {
             else { args.push("-flto=" + self.options.lto); }
         }
         args.push(ir); args.push("-o");
-        var object = artifact; if emit.equals("exe") || emit.equals("module") { object = path_join(self.temporary, "program.o"); }
         args.push(object);
         if !self.command(args, "LLVM compilation") { return self.fail(); }
         if !self.options.lto.equals("none") && (emit.equals("exe") || emit.equals("obj") || emit.equals("module")) {
             guard let data = fs_read_text(object, 134217728) else { return self.fail("Cannot read LTO object"); }
             if !is_llvm_bitcode(data) { return self.fail("LTO requires LLVM bitcode from --clang"); }
+        }
+        objects.push(object);
         }
         if emit.equals("asm") || emit.equals("llvm-opt") {
             guard let text = fs_read_text(artifact) else { return self.fail("Cannot read backend text output"); }
@@ -379,12 +429,13 @@ pub struct CompilationDriver {
                     if !self.watch_runtime_dependencies(data, frontend) { frontend.cache_inputs_stable = false; }
                 } else { frontend.cache_inputs_stable = false; }
             }
-            if !self.command(compile, "Runtime compilation") { return self.fail(); }
+            let runtime_built = self.command(compile, "Runtime compilation");
+            if !self.wait_parts(pids, logs) || !runtime_built { return self.fail(); }
             if !self.options.lto.equals("none") {
                 guard let data = fs_read_text(runtime_obj, 134217728) else { return self.fail("Cannot read LTO runtime object"); }
                 if !is_llvm_bitcode(data) { return self.fail("LTO requires LLVM bitcode from the C compiler; use --cc with a clang compatible with --clang"); }
             }
-            let link = self.tool_args(self.cc); link.push(object); link.push(runtime_obj); link.push("-lm"); link.push("-o"); link.push(artifact);
+            let link = self.tool_args(self.cc); for part in objects { link.push(part); } link.push(runtime_obj); link.push("-lm"); link.push("-o"); link.push(artifact);
             // std.tls loads OpenSSL with dlopen, which glibc before 2.34 keeps in libdl.
             var link_target = self.options.target; if link_target.len() == 0 { link_target = host_target(); }
             if link_target.contains("linux") { link.push("-ldl"); }

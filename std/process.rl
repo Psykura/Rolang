@@ -10,6 +10,9 @@ pub extern "C" def rt_env_set_string(name: String, value: String) -> i32;
 pub extern "C" def rt_process_system_string(cmd: String) -> i32;
 pub extern "C" def rt_process_run_argv(args: RawPtr) -> i32;
 pub extern "C" def rt_process_run_argv_log(args: RawPtr, log: String) -> i32;
+pub extern "C" def rt_process_start_argv_log(args: RawPtr, log: String) -> i64;
+pub extern "C" def rt_process_wait_started(pid: i64) -> i32;
+pub extern "C" def rt_process_cpu_count() -> i32;
 pub extern "C" def rt_process_executable_handle() -> RawPtr;
 pub extern "C" def rt_process_host_target_handle() -> RawPtr;
 pub extern "C" def rt_exit(code: i32) -> Void;
@@ -61,6 +64,15 @@ pub def run_argv_log(args: Vec<String>, log: String) -> i32 {
     if args.len() == 0 { return -1; }
     unsafe { return rt_process_run_argv_log(args.raw_handle(), log); }
 }
+// Starts a program like run_argv_log without waiting: its process id, or -1.
+pub def start_argv_log(args: Vec<String>, log: String) -> i64 {
+    if args.len() == 0 { return -1; }
+    unsafe { return rt_process_start_argv_log(args.raw_handle(), log); }
+}
+// Waits for a program start_argv_log started: its exit code, or -1.
+pub def wait_started(pid: i64) -> i32 { unsafe { return rt_process_wait_started(pid); } }
+// Processors available to this process.
+pub def cpu_count() -> i32 { unsafe { return rt_process_cpu_count(); } }
 pub def executable_path() -> String? {
     unsafe {
         let handle = rt_process_executable_handle();

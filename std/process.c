@@ -135,7 +135,7 @@ int32_t rt_process_system(StringVal cmd) {
  * Vec<String>'s handle; we walk it via the gvec ABI.
  *
  * Returns the child's exit code, or -1 on launch failure. */
-static int32_t rt_process_run_argv_impl(void* argv_vec, const char* log_path) {
+static int64_t rt_process_start_argv_impl(void* argv_vec, const char* log_path) {
 #if defined(__linux__) || defined(__APPLE__)
     if (argv_vec == NULL) return -1;
     GVecHeader* h = (GVecHeader*)argv_vec;
@@ -192,23 +192,34 @@ static int32_t rt_process_run_argv_impl(void* argv_vec, const char* log_path) {
         /* If execvp returns, it failed. */
         _exit(127);
     }
-    int status = 0;
-    pid_t waited;
-    do { waited = waitpid(pid, &status, 0); } while (waited < 0 && errno == EINTR);
-    if (waited < 0) {
-        for (int i = 0; i < n; i++) free(argv[i]);
-        free(argv);
-        return -1;
-    }
     for (int i = 0; i < n; i++) free(argv[i]);
     free(argv);
-    if (WIFEXITED(status)) return WEXITSTATUS(status);
-    if (WIFSIGNALED(status)) return -1;
-    return status;
+    return (int64_t)pid;
 #else
     (void)argv_vec; (void)log_path;
     return -1;
 #endif
+}
+
+/* The exit code of a started process, or -1 (killed by a signal, or not started). */
+int32_t rt_process_wait_started(int64_t pid) {
+#if defined(__linux__) || defined(__APPLE__)
+    if (pid <= 0) return -1;
+    int status = 0;
+    pid_t waited;
+    do { waited = waitpid((pid_t)pid, &status, 0); } while (waited < 0 && errno == EINTR);
+    if (waited < 0) return -1;
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return -1;
+    return status;
+#else
+    (void)pid;
+    return -1;
+#endif
+}
+
+static int32_t rt_process_run_argv_impl(void* argv_vec, const char* log_path) {
+    return rt_process_wait_started(rt_process_start_argv_impl(argv_vec, log_path));
 }
 
 int32_t rt_process_run_argv(void* argv_vec) {
@@ -219,6 +230,22 @@ int32_t rt_process_run_argv_log(void* argv_vec, void* log_obj) {
     StringVal log = rt_string_obj_value(log_obj);
     if (!log.data || log.len <= 0 || memchr(log.data, 0, (size_t)log.len)) return -1;
     return rt_process_run_argv_impl(argv_vec, log.data);
+}
+
+/* Starts a program with both output streams in a log file; the process id, or -1. */
+int64_t rt_process_start_argv_log(void* argv_vec, void* log_obj) {
+    StringVal log = rt_string_obj_value(log_obj);
+    if (!log.data || log.len <= 0 || memchr(log.data, 0, (size_t)log.len)) return -1;
+    return rt_process_start_argv_impl(argv_vec, log.data);
+}
+
+int32_t rt_process_cpu_count(void) {
+#if defined(__linux__) || defined(__APPLE__)
+    long count = sysconf(_SC_NPROCESSORS_ONLN);
+    return count > 0 ? (int32_t)count : 1;
+#else
+    return 1;
+#endif
 }
 
 __attribute__((noreturn))

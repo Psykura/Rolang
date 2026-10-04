@@ -13,6 +13,9 @@ int32_t rt_env_set(StringVal name, StringVal value);
 int32_t rt_process_system(StringVal cmd);
 int32_t rt_process_run_argv(void* argv_vec);
 int32_t rt_process_run_argv_log(void* argv_vec, void* log_obj);
+int64_t rt_process_start_argv_log(void* argv_vec, void* log_obj);
+int32_t rt_process_wait_started(int64_t pid);
+int32_t rt_process_cpu_count(void);
 __attribute__((noreturn))
 void rt_exit(int32_t code);
 StringVal rt_stdin_read_line(void);

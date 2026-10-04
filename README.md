@@ -78,6 +78,7 @@ to PATH when using the installed command.
 | `rolangc --emit mir-opt program.rl` | Lowered MIR with ownership/optimization passes |
 | `rolangc --emit module library.rl -o library.rlm` | Compiled library |
 | `rolangc --lto=thin -O3 program.rl` | ThinLTO; --lto selects full LTO |
+| `rolangc -j 1 program.rl` | One LLVM module (large programs otherwise compile in parallel parts) |
 | `rolangc -I dependencies program.rl` | Add an import root |
 | `rolangc --cache-dir build/cache program.rl` | Enable content cache |
 
