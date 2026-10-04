@@ -70,12 +70,18 @@ pub struct GenericInference {
     // Bounds a type parameter gains from the enclosing method's where clause.
     pub var extra_bounds: ((String) -> Vec<TypeId>)?;
     let members: MemberResolver;
+    // Method declaration -> the struct, enum or extension declaring it, built
+    // from the symbols on first use and again when a lookup misses after
+    // symbols were added.
+    let method_owners: Dict<i32, NodeId>;
+    var owners_indexed: i64;
     pub def set_infer_expression(callback: ((NodeId, TypeId?) -> TypeId)?) -> Void { self.infer_expression = callback; }
     pub static def new(arena: AstArena, types: TypeTable, symbols: SymbolTable, resolver: TypeResolver,
                        expr_types: Dict<i32, TypeId>, infer_expression: ((NodeId, TypeId?) -> TypeId)? = nil,
                        error_reporter: ((TypeErrorKind, String) -> Void)? = nil) -> GenericInference {
         GenericInference { arena, type_table: types, symbol_table: symbols, type_resolver: resolver,
-            expr_types, infer_expression, error_reporter, extra_bounds: nil, members: MemberResolver.new(arena, types, symbols) }
+            expr_types, infer_expression, error_reporter, extra_bounds: nil, members: MemberResolver.new(arena, types, symbols),
+            method_owners: Dict<i32, NodeId>.with_capacity(16, 0), owners_indexed: -1 }
     }
     pub def make_generic_param_type_args(params: Vec<NodeId>) -> Vec<TypeId> {
         let args = Vec<TypeId>.new();
@@ -131,6 +137,9 @@ pub struct GenericInference {
         self.expr_types[id.id] ?? self.type_table.error_type
     }
     def find_method_owner(method: NodeId) -> NodeId? {
+        if let owner = self.method_owners[method.id] { return owner; }
+        if self.owners_indexed == self.symbol_table.symbols.len() { return nil; }
+        self.owners_indexed = self.symbol_table.symbols.len();
         for entry in self.symbol_table.symbols.entries() {
             if let id = entry.value.decl_node {
                 if let node = self.arena.get(id) {
@@ -141,11 +150,11 @@ pub struct GenericInference {
                         case .extension_decl(let data): members = data.members;
                         default: {}
                     }
-                    if let children = members { for child in children { if child == method { return id; } } }
+                    if let children = members { for child in children { if !self.method_owners.contains(child.id) { self.method_owners[child.id] = id; } } }
                 }
             }
         }
-        nil
+        self.method_owners[method.id]
     }
     pub def infer_generic_call_args(callee: SymbolId, call_id: NodeId, expected: TypeId? = nil) -> Dict<String, TypeId> {
         let inferred = Dict<String, TypeId>.with_capacity(16, 1);

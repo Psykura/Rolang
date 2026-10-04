@@ -4,9 +4,10 @@ def mir_next_local(func: MirFunction) -> i32 { var next = 0; for local in func.l
 def mir_scalar(type_id: TypeId, types: TypeTable) -> Bool { types.is_integer(type_id) || types.is_float(type_id) || types.is_bool(type_id) }
 def mir_scalar_structs(program: MirProgram, types: TypeTable) -> Dict<i32, MirStruct> {
     let out = Dict<i32, MirStruct>.with_capacity(16, 0);
+    let names = Dict<String, Bool>.with_capacity(16, 1); for func in program.functions { names[func.name] = true; }
     for item in program.structs { var qualifies = false; if let info = types.get_type(item.type_id) { switch info.data { case .struct_type: qualifies = item.fields.len() > 0; default: {} } }
         for field in item.fields { if !mir_scalar(field.type_id, types) { qualifies = false; } }
-        for func in program.functions { if func.name.equals(item.name+"___release__") || func.name.equals(item.name+"___gc_trace__") { qualifies = false; } }
+        if names.contains(item.name+"___release__") || names.contains(item.name+"___gc_trace__") { qualifies = false; }
         if qualifies { out[item.type_id.id] = item; }
     } out
 }

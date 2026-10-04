@@ -84,6 +84,8 @@ pub struct SymbolTable {
     pub let module_type_keys: Dict<i32, String>;
     pub var separate_modules: Bool;
     let type_index: Dict<String, SymbolId>;
+    // The first specialization recorded per original and type arguments.
+    let specialization_index: Dict<String, i32>;
 
     pub static def new() -> SymbolTable {
         let table = SymbolTable {
@@ -91,7 +93,8 @@ pub struct SymbolTable {
             symbols: Dict<i32, Symbol>.with_capacity(16, 0), builtins: Dict<String, SymbolId>.with_capacity(16, 1), specialization_origin: Dict<i32, SpecializationOrigin>.with_capacity(16, 0),
             node_to_symbol: Dict<i32, SymbolId>.with_capacity(16, 0), type_index: Dict<String, SymbolId>.with_capacity(16, 1),
             abi_nodes: Dict<i32, String>.with_capacity(16, 0), abi_owners: Dict<i32, String>.with_capacity(16, 0),
-            module_type_keys: Dict<i32, String>.with_capacity(16, 0), separate_modules: false
+            module_type_keys: Dict<i32, String>.with_capacity(16, 0), separate_modules: false,
+            specialization_index: Dict<String, i32>.with_capacity(16, 1)
         };
         // Allocate builtin protocols before other builtin symbols.
         for name in ["Iterator", "Iterable"] {
@@ -134,8 +137,17 @@ pub struct SymbolTable {
         self.specialization_origin[specialized_id.id] = SpecializationOrigin {
             original_id, type_args: FrozenVec<TypeId>.new(type_args)
         };
+        let key = specialization_key(original_id, type_args);
+        if !self.specialization_index.contains(key) { self.specialization_index[key] = specialized_id.id; }
     }
     pub def find_specialization(original_id: SymbolId, type_args: Vec<TypeId>) -> SymbolId? {
+        guard let candidate = self.specialization_index[specialization_key(original_id, type_args)] else { return nil; }
+        if let origin = self.specialization_origin[candidate] {
+            var matches = origin.original_id == original_id && origin.type_args.len() == type_args.len();
+            if matches { for i in 0..<type_args.len() { if origin.type_args.get(i) != type_args[i] { matches = false; break; } } }
+            if matches { return SymbolId { id: candidate }; }
+        }
+        // The indexed specialization was recorded again for other arguments: search them all.
         for entry in self.specialization_origin.entries() {
             let origin = entry.value;
             if origin.original_id != original_id || origin.type_args.len() != type_args.len() { continue; }
@@ -147,6 +159,12 @@ pub struct SymbolTable {
         }
         nil
     }
+}
+
+def specialization_key(original_id: SymbolId, type_args: Vec<TypeId>) -> String {
+    var key = original_id.id.to_string();
+    for arg in type_args { key += ":" + arg.id.to_string(); }
+    key
 }
 
 pub enum ResolutionErrorKind {

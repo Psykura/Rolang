@@ -58,6 +58,9 @@ struct LlvmModuleEmitter {
     let chunk_ends: Vec<i64>;
     let chunk_names: Vec<String>;
     let chunk_kinds: Vec<i32>;
+    // "type id:original method name" -> index of the first function taking that type as self.
+    let self_methods: Dict<String, i32>;
+    var self_methods_built: Bool;
     static def new(result: MirPostResult, owner: String, partitions: i32 = 1) -> LlvmModuleEmitter {
         let emitter = LlvmModuleEmitter { result, cache: LlvmTypeCache.new(result.type_table, result.program),
             signatures: Dict<String, LlvmSignature>.with_capacity(16, 1), signature_order: Vec<String>.new(),
@@ -68,7 +71,8 @@ struct LlvmModuleEmitter {
             owner, linkages: Dict<String, String>.with_capacity(16, 1),
             debug: false, debug_lines: StringBuilder.new(), next_meta: 16, debug_files: Dict<String, i32>.new(),
             debug_types: Dict<i32, i32>.new(), debug_unit: -1, debug_signature: -1, debug_declare: false,
-            partitions, partition_bytes: 0, chunk_starts: Vec<i64>.new(), chunk_ends: Vec<i64>.new(), chunk_names: Vec<String>.new(), chunk_kinds: Vec<i32>.new() };
+            partitions, partition_bytes: 0, chunk_starts: Vec<i64>.new(), chunk_ends: Vec<i64>.new(), chunk_names: Vec<String>.new(), chunk_kinds: Vec<i32>.new(),
+            self_methods: Dict<String, i32>.with_capacity(16, 1), self_methods_built: false };
         if owner.len() > 0 { emitter.cache.symbols = result.symbol_table; }
         emitter.reserve_functions(); emitter
     }
@@ -262,14 +266,21 @@ struct LlvmModuleEmitter {
         }
         // Generic extension methods are instantiated under their own names; find
         // the instance whose self is `type_id` and whose original is `method`.
-        for i in 0..<self.result.program.functions.len() {
-            let func = self.result.program.functions[i];
-            if func.args.len() == 0 || func.args[0].type_id != type_id || !func.args[0].name.equals("self") { continue; }
-            guard let symbol = func.symbol_id else { continue; }
-            var original = symbol;
-            while true { if let origin = self.result.symbol_table.specialization_origin[original.id] { original = origin.original_id; } else { break; } }
-            if let source = self.result.symbol_table.get_symbol(original) { if source.name.equals(method) { return self.function_names[i]; } }
+        if !self.self_methods_built {
+            self.self_methods_built = true;
+            for i in 0..<self.result.program.functions.len() {
+                let func = self.result.program.functions[i];
+                if func.args.len() == 0 || !func.args[0].name.equals("self") { continue; }
+                guard let symbol = func.symbol_id else { continue; }
+                var original = symbol;
+                while true { if let origin = self.result.symbol_table.specialization_origin[original.id] { original = origin.original_id; } else { break; } }
+                if let source = self.result.symbol_table.get_symbol(original) {
+                    let key = func.args[0].type_id.id.to_string() + ":" + source.name;
+                    if !self.self_methods.contains(key) { self.self_methods[key] = i; }
+                }
+            }
         }
+        if let index = self.self_methods[type_id.id.to_string() + ":" + method] { return self.function_names[index]; }
         nil
     }
     def emit_witnesses(arena: AstArena) -> Void {
