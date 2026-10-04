@@ -1,0 +1,10 @@
+24000 -> true true
+24000 -> true true
+24000 -> true true
+true the compression level must be 0 to 9
+3421780262
+from gzip
+one two
+true decompressed data exceeds the 1000000-byte limit
+invalid compressed data: incorrect header check
+the compressed data is truncated

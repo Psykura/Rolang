@@ -27,4 +27,5 @@
 #include "../std/crypto.c"
 #include "../std/regex.c"
 #include "../std/log.c"
+#include "../std/compress.c"
 #include "entry.c"
