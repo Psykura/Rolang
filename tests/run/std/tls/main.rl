@@ -139,7 +139,8 @@ def main() async -> i32 {
     // https through std.http.
     guard let https = HttpServer.bind("127.0.0.1", 0, server_config).ok_value() else { return 4; }
     let base = f"https://localhost:{https.port()}";
-    let http_serving = spawn https.serve(handle, 3);
+    // The client's two requests share a connection; the default client's fails in the handshake.
+    let http_serving = spawn https.serve(handle, 2);
     let client = HttpClient.new();
     client.tls = trusting;
     switch await client.get(base + "/hello") {

@@ -23,8 +23,9 @@ def chunked_server(listener: AsyncListener) async -> Void {
 def main() async -> i32 {
     guard let server = HttpServer.bind("127.0.0.1", 0).ok_value() else { return 1; }
     let base = f"http://127.0.0.1:{server.port()}";
-    // Six connections: four requests, a redirect's second request and one keep-alive connection.
-    let serving = spawn server.serve(handle, 6);
+    // Five connections: four requests (a redirect's second request reuses its
+    // client's connection) and one keep-alive connection.
+    let serving = spawn server.serve(handle, 5);
     switch await http_get(base + "/hello?name=ro%20lang") {
         case .ok(let r): println(f"{r.status} {r.reason} {r.headers.get("content-type") ?? "?"} {r.body}");
         case .err(let e): println(e.to_string());

@@ -1,0 +1,6 @@
+GET /item/0 0; GET /item/1 0; GET /item/2 0; GET /item/3 0; GET /item/4 0; idle 1
+POST /upload 1000
+GET /after-idle 0
+bye idle 0
+GET /one 0 idle 0
+server accepted 3 connections

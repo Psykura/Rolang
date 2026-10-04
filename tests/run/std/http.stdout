@@ -3,7 +3,7 @@
 200 hello moved
 404 false
 keep-alive 2 true
-served 6 connections
+served 5 connections
 chunked hello, world
 cannot connect to 127.0.0.1:1: Connection refused
 example.com 8080 /a/b?x=1 http://example.com:8080/c?y=2 http://example.com:8080/d

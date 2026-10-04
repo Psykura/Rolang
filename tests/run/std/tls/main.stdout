@@ -16,4 +16,4 @@ cannot load private key ca.pem: unsupported
 200 hello over https
 200 300000 bytes
 TLS with localhost:PORT failed: certificate verification failed: unable to get local issuer certificate
-served 3 connections
+served 2 connections

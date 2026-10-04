@@ -358,6 +358,9 @@ struct HttpConnection {
     }
 }
 
+// An idle kept-alive connection and when it became idle.
+struct PooledConnection { let reader: HttpReader; let since: Instant; }
+
 // Bytes read from a connection, consumed as lines, fixed-size blocks or until EOF.
 struct HttpReader {
     let stream: HttpConnection;
@@ -515,12 +518,59 @@ pub struct HttpClient {
     // TLS settings for https, such as trusted certificates; nil verifies
     // servers against the system's trusted certificates.
     pub var tls: TlsConfig?;
+    // Reuses connections for later requests to the same server.
+    pub var keep_alive: Bool;
+    // Idle connections kept per server, and how long each may wait.
+    pub var max_idle_per_host: i32;
+    pub var idle_timeout: Duration;
+    let pool: Dict<String, Vec<PooledConnection>>;
 
     pub static def new() -> HttpClient {
         let headers = HttpHeaders.new();
         headers.set("User-Agent", "Rolang");
         headers.set("Accept", "*/*");
-        HttpClient { follow_redirects: true, max_body: 67108864, timeout: Duration.seconds(30), headers, tls: nil }
+        HttpClient { follow_redirects: true, max_body: 67108864, timeout: Duration.seconds(30), headers, tls: nil,
+            keep_alive: true, max_idle_per_host: 4, idle_timeout: Duration.seconds(30), pool: Dict<String, Vec<PooledConnection>>.new() }
+    }
+
+    // Closes the idle connections.
+    pub def close_idle() -> Void { self.pool.clear(); }
+    // Idle connections currently kept, across servers.
+    pub def idle_connections() -> i32 {
+        var count = 0;
+        for entry in self.pool.entries() { count += entry.value.len() as i32; }
+        count
+    }
+
+    // An idle connection to `key` that has not waited too long.
+    def take_idle(key: String) -> HttpReader? {
+        guard let idle = self.pool[key] else { return nil; }
+        while idle.len() > 0 {
+            let pooled = idle.pop();
+            if pooled.since.elapsed() < self.idle_timeout { return pooled.reader; }
+        }
+        nil
+    }
+    def put_idle(key: String, reader: HttpReader) -> Void {
+        if !self.pool.contains(key) { self.pool[key] = Vec<PooledConnection>.new(); }
+        guard let idle = self.pool[key] else { return; }
+        if (idle.len() as i32) < self.max_idle_per_host { idle.push(PooledConnection { reader, since: Instant.now() }); }
+    }
+    def open(url: Url) async -> Result<HttpConnection, HttpError> {
+        var stream: AsyncStream? = nil;
+        switch await AsyncStream.connect(url.host, url.port) {
+            case .ok(let connected): stream = connected;
+            case .err(let code): return http_error(f"cannot connect to {url.authority()}: {os_error_message(code)}");
+        }
+        guard let socket = stream else { return http_error("connection failed"); }
+        var secure: TlsStream? = nil;
+        if url.scheme.equals("https") {
+            switch await TlsStream.client(socket, url.host, self.tls) {
+                case .ok(let established): secure = established;
+                case .err(let error): return http_error(f"TLS with {url.authority()} failed: {error.message}");
+            }
+        }
+        Result<HttpConnection, HttpError>.ok(value: HttpConnection { plain: socket, secure })
     }
 
     pub def get(url: String) async -> Result<HttpResponse, HttpError> { await self.send(HttpRequest.new("GET"), url) }
@@ -562,71 +612,89 @@ pub struct HttpClient {
         http_error("unreachable")
     }
 
+    // One request and its response. A kept-alive connection the server closed
+    // while idle fails before any byte of the response; the request is then
+    // sent once more on a new connection.
     def exchange(method: String, url: Url, extra: HttpHeaders, body: String) async -> Result<HttpResponse, HttpError> {
-        var stream: AsyncStream? = nil;
-        switch await AsyncStream.connect(url.host, url.port) {
-            case .ok(let connected): stream = connected;
-            case .err(let code): return http_error(f"cannot connect to {url.authority()}: {os_error_message(code)}");
-        }
-        guard let socket = stream else { return http_error("connection failed"); }
-        var secure: TlsStream? = nil;
-        if url.scheme.equals("https") {
-            switch await TlsStream.client(socket, url.host, self.tls) {
-                case .ok(let established): secure = established;
-                case .err(let error): return http_error(f"TLS with {url.authority()} failed: {error.message}");
-            }
-        }
-        let connection = HttpConnection { plain: socket, secure };
+        let key = url.scheme + "://" + url.authority();
         let headers = HttpHeaders.new();
         headers.set("Host", url.authority());
         for field in self.headers.entries() { if !extra.contains(field.name) { headers.add(field.name, field.value); } }
         for field in extra.entries() { headers.add(field.name, field.value); }
-        headers.set("Connection", "close");
+        if self.keep_alive { headers.set("Connection", "keep-alive"); } else { headers.set("Connection", "close"); }
         if !headers.contains("Accept-Encoding") && compression_available() { headers.set("Accept-Encoding", "gzip, deflate"); }
         if body.len() > 0 || method.equals("POST") || method.equals("PUT") || method.equals("PATCH") { headers.set("Content-Length", body.len().to_string()); }
-        switch await connection.write(write_message(f"{method} {url.target()} HTTP/1.1", headers, body)) {
-            case .ok(let count): {}
-            case .err(let message): return http_error(f"write failed: {message}");
-        }
-        let reader = HttpReader { stream: connection, buffer: "", eof: false, max_body: self.max_body };
-        while true {
-            var head = "";
-            switch await reader.head() {
-                case .ok(let block): if let text = block { head = text; } else { return http_error("connection closed before a response"); }
-                case .err(let error): return Result<HttpResponse, HttpError>.err(error: error);
+        let message = write_message(f"{method} {url.target()} HTTP/1.1", headers, body);
+        var attempt = 0;
+        while attempt < 2 {
+            attempt += 1;
+            var reused = false;
+            var current: HttpReader? = nil;
+            if self.keep_alive && attempt == 1 { if let idle = self.take_idle(key) { current = idle; reused = true; } }
+            if current == nil {
+                switch await self.open(url) {
+                    case .ok(let connection): current = HttpReader { stream: connection, buffer: "", eof: false, max_body: self.max_body };
+                    case .err(let error): return Result<HttpResponse, HttpError>.err(error: error);
+                }
             }
-            let lines = head.split("\r\n");
-            let status_line = lines[0];
-            let parts = status_line.split(" ");
-            if parts.len() < 2 || !parts[0].starts_with("HTTP/1.") { return http_error(f"invalid status line '{status_line}'"); }
-            let status = parts[1].to_i32();
-            var reason = "";
-            let space = status_line.find(" ");
-            let second = status_line.substring(space + 1, (status_line.len() as i32) - space - 1).find(" ");
-            if second >= 0 { reason = status_line.substring(space + 2 + second, (status_line.len() as i32) - space - 2 - second); }
-            guard let fields = parse_header_lines(lines, 1) else { return http_error("invalid response header"); }
-            // Informational responses precede the real one.
-            if status >= 100 && status < 200 { continue; }
-            let response = HttpResponse { status, reason, headers: fields, body: "" };
-            if method.equals("HEAD") || status == 204 || status == 304 { return Result<HttpResponse, HttpError>.ok(value: response); }
-            switch await reader.body(fields, true) {
-                case .ok(let data):
-                    response.body = data;
-                    let encoding = (fields.get("Content-Encoding") ?? "").trim().lowercased();
-                    if encoding.equals("gzip") || encoding.equals("x-gzip") || encoding.equals("deflate") {
-                        switch decode_body(data, encoding, self.max_body) {
-                            case .ok(let plain):
-                                response.body = plain;
-                                response.headers.remove("Content-Encoding");
-                                response.headers.remove("Content-Length");
-                            case .err(let message): return http_error(f"cannot decode the {encoding} body: {message}");
-                        }
+            guard let reader = current else { return http_error("connection failed"); }
+            switch await reader.stream.write(message) {
+                case .ok(let count): {}
+                case .err(let problem): if reused { continue; } return http_error(f"write failed: {problem}");
+            }
+            var retry = false;
+            while true {
+                var head = "";
+                switch await reader.head() {
+                    case .ok(let block):
+                        if let text = block { head = text; }
+                        else { if reused { retry = true; break; } return http_error("connection closed before a response"); }
+                    case .err(let error):
+                        if reused && reader.buffer.len() == 0 { retry = true; break; }
+                        return Result<HttpResponse, HttpError>.err(error: error);
+                }
+                let lines = head.split("\r\n");
+                let status_line = lines[0];
+                let parts = status_line.split(" ");
+                if parts.len() < 2 || !parts[0].starts_with("HTTP/1.") { return http_error(f"invalid status line '{status_line}'"); }
+                let status = parts[1].to_i32();
+                var reason = "";
+                let space = status_line.find(" ");
+                let second = status_line.substring(space + 1, (status_line.len() as i32) - space - 1).find(" ");
+                if second >= 0 { reason = status_line.substring(space + 2 + second, (status_line.len() as i32) - space - 2 - second); }
+                guard let fields = parse_header_lines(lines, 1) else { return http_error("invalid response header"); }
+                // Informational responses precede the real one.
+                if status >= 100 && status < 200 { continue; }
+                let response = HttpResponse { status, reason, headers: fields, body: "" };
+                // A body framed by its length (or absent) leaves the connection ready for another request.
+                var framed = method.equals("HEAD") || status == 204 || status == 304 || fields.contains("Content-Length")
+                    || (fields.get("Transfer-Encoding") ?? "").lowercased().contains("chunked");
+                if !(method.equals("HEAD") || status == 204 || status == 304) {
+                    switch await reader.body(fields, true) {
+                        case .ok(let data):
+                            response.body = data;
+                            let encoding = (fields.get("Content-Encoding") ?? "").trim().lowercased();
+                            if encoding.equals("gzip") || encoding.equals("x-gzip") || encoding.equals("deflate") {
+                                switch decode_body(data, encoding, self.max_body) {
+                                    case .ok(let plain):
+                                        response.body = plain;
+                                        response.headers.remove("Content-Encoding");
+                                        response.headers.remove("Content-Length");
+                                    case .err(let problem): return http_error(f"cannot decode the {encoding} body: {problem}");
+                                }
+                            }
+                        case .err(let error): return Result<HttpResponse, HttpError>.err(error: error);
                     }
-                case .err(let error): return Result<HttpResponse, HttpError>.err(error: error);
+                }
+                let closing = (fields.get("Connection") ?? "").lowercased().contains("close");
+                if self.keep_alive && framed && !closing && parts[0].equals("HTTP/1.1") && reader.buffer.len() == 0 && !reader.eof && !reader.stream.truncated {
+                    self.put_idle(key, reader);
+                }
+                return Result<HttpResponse, HttpError>.ok(value: response);
             }
-            return Result<HttpResponse, HttpError>.ok(value: response);
+            if !retry { break; }
         }
-        http_error("unreachable")
+        http_error(f"no response from {url.authority()}")
     }
 }
 
@@ -980,8 +1048,10 @@ def serve_connection(socket: AsyncStream, handler: (HttpRequest) async -> HttpRe
         let keep_alive = (request.version.equals("HTTP/1.1") && !connection.equals("close")) || connection.equals("keep-alive");
         let response = await handler(request);
         let accepts = gzip && (headers.get("Accept-Encoding") ?? "").lowercased().contains("gzip");
-        if !(await respond(stream, response, keep_alive, request.method.equals("HEAD"), accepts)) { break; }
-        if !keep_alive { break; }
+        // A handler that sets `Connection: close` ends the connection after its response.
+        let keep = keep_alive && !(response.headers.get("Connection") ?? "").lowercased().contains("close");
+        if !(await respond(stream, response, keep, request.method.equals("HEAD"), accepts)) { break; }
+        if !keep { break; }
     }
     await stream.finish();
 }
