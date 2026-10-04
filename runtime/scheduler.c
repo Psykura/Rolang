@@ -149,7 +149,7 @@ static void task_poll_events(int may_block) {
     for (TaskHandle* t = task_head; t; t = t->next) {
         if (t->completed || t->running || t->native_kind < 2) continue;
         tasks[i] = t; fds[i].fd = t->stream->fd;
-        fds[i].events = (t->native_kind == 2 || t->native_kind == 5 || t->native_kind == 7 || t->native_kind == 8 || t->native_kind == 9) ? POLLIN : POLLOUT; i++;
+        fds[i].events = (t->native_kind == 2 || t->native_kind == 5 || t->native_kind == 7 || t->native_kind == 8 || t->native_kind == 9 || t->native_kind == 11) ? POLLIN : POLLOUT; i++;
     }
     int n = poll(fds, (nfds_t)count, timeout);
     if (n < 0 && errno != EINTR) rt_panic("async poll failed");

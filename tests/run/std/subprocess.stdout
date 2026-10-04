@@ -1,0 +1,9 @@
+[hello world] exit code 0 true
+[out] [err] exit code 3
+cannot run no-such-program-xyz: No such file or directory
+apple,fig,pear,
+hi-
+/
+true true
+signal 15 false false
+1000000 300000

@@ -22,4 +22,5 @@
 #include "../std/task.c"
 #include "../std/async_io.c"
 #include "../std/tls.c"
+#include "../std/subprocess.c"
 #include "entry.c"

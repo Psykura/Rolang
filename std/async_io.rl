@@ -3,6 +3,7 @@ import "string.rl"
 import "result.rl"
 import "vec.rl"
 import "range.rl"
+import "string_builder.rl"
 
 pub extern "C" def rt_async_stream_pair(other: RawPtr) -> RawPtr;
 pub extern "C" def rt_async_stream_adopt(fd: i32) -> RawPtr;
@@ -129,6 +130,22 @@ pub struct AsyncStream {
 
     // The runtime's stream object, for native code layered over the stream.
     pub unsafe def raw_handle() -> RawPtr { return self.handle; }
+    // Takes ownership of a runtime stream object, as returned by native code.
+    pub unsafe static def from_raw_handle(handle: RawPtr) -> AsyncStream { return AsyncStream { handle: handle }; }
+
+    // Reads until the end of the stream.
+    pub def read_to_end(limit: i32 = 65536) async -> Result<String, i32> {
+        let out = StringBuilder.new();
+        while true {
+            switch await self.read(limit) {
+                case .ok(let data):
+                    if data.len() == 0 { return Result<String, i32>.ok(value: out.to_string()); }
+                    out.append(data);
+                case .err(let code): return Result<String, i32>.err(error: code);
+            }
+        }
+        Result<String, i32>.ok(value: out.to_string())
+    }
 }
 
 pub struct AsyncPipe {
