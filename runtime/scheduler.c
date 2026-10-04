@@ -2,6 +2,7 @@
 #include "api.h"
 #include "../std/task.h"
 #include "../std/async_io.h"
+#include "../std/async_fs.h"
 
 /* Async scheduler: ready tasks rotate FIFO; suspended tasks are parked on
  * dependencies, monotonic deadlines, or socket readiness. No worker threads. */
@@ -68,6 +69,7 @@ void rl_task_release(TaskHandle* task) {
     if (task->result_kind == RT_TASK_RESULT_BOX) free(task->result);
     else if (task->result_kind == RT_TASK_RESULT_HEAP_REF) rt_obj_release(task->result);
     if (task->native_kind == 8) rl_resolve_release(task);
+    if (task->native_kind == 12) rl_fs_release(task);
     rl_stream_release(task->stream);
     rl_stream_release(task->result_stream);
     free(task->buffer);
@@ -149,7 +151,7 @@ static void task_poll_events(int may_block) {
     for (TaskHandle* t = task_head; t; t = t->next) {
         if (t->completed || t->running || t->native_kind < 2) continue;
         tasks[i] = t; fds[i].fd = t->stream->fd;
-        fds[i].events = (t->native_kind == 2 || t->native_kind == 5 || t->native_kind == 7 || t->native_kind == 8 || t->native_kind == 9 || t->native_kind == 11) ? POLLIN : POLLOUT; i++;
+        fds[i].events = (t->native_kind == 2 || t->native_kind == 5 || t->native_kind == 7 || t->native_kind == 8 || t->native_kind == 9 || t->native_kind == 11 || t->native_kind == 12) ? POLLIN : POLLOUT; i++;
     }
     int n = poll(fds, (nfds_t)count, timeout);
     if (n < 0 && errno != EINTR) rt_panic("async poll failed");

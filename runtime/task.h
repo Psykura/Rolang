@@ -11,7 +11,7 @@ typedef struct TaskHandle {
     void* result;
     int refs, cancelled, running, owns_dependency;
     struct TaskHandle *dependency, *next;
-    int native_kind; /* 0 frame, 1 timer, 2 read, 3 write, 4 connect, 5 accept, 6 send to, 7 receive from, 8 resolve, 9 readable, 10 writable, 11 child exit */
+    int native_kind; /* 0 frame, 1 timer, 2 read, 3 write, 4 connect, 5 accept, 6 send to, 7 receive from, 8 resolve, 9 readable, 10 writable, 11 child exit, 12 file operation */
     int64_t deadline;
     AsyncStream* stream;
     AsyncStream* result_stream;

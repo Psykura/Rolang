@@ -29,4 +29,5 @@
 #include "../std/log.c"
 #include "../std/compress.c"
 #include "../std/websocket.c"
+#include "../std/async_fs.c"
 #include "entry.c"

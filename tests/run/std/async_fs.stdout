@@ -1,0 +1,19 @@
+6
+6
+hello|world|
+File exists
+2
+true File exists
+a.txt b.json x 
+12 true 420 true
+true false
+true 12
+No such file or directory
+file too large for the read limit
+Is a directory
+Invalid argument
+Directory not empty
+50000000 true
+50000000 true
+90 54
+false
