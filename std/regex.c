@@ -14,6 +14,11 @@ enum { RX_BOL, RX_EOL, RX_BOT, RX_EOT, RX_WORD, RX_NOT_WORD };
 enum { RX_IGNORE_CASE = 1, RX_MULTILINE = 2, RX_DOT_ALL = 4 };
 #define RX_MAX_PROGRAM 50000
 #define RX_MAX_REPEAT 1000
+/* Nesting of groups and repetitions, which bounds the parser's and compiler's recursion. */
+#define RX_MAX_DEPTH 200
+#define RX_MAX_GROUPS 1000
+/* Instructions times capture slots: the VM's per-search thread storage. */
+#define RX_MAX_SLOTS (4 * 1024 * 1024)
 
 typedef struct { int32_t op, x, y; } RxInst;
 typedef struct { int32_t lo, hi; } RxRange;
@@ -40,6 +45,7 @@ typedef struct {
     Regex* re; int32_t flags;
     char error[200];
     RxNode** nodes; int32_t node_count, node_capacity;
+    int32_t depth;
 } RxParser;
 
 static char regex_failure[256];
@@ -248,6 +254,7 @@ static int rx_flags(RxParser* p, int32_t* flags) {
 static RxNode* rx_atom(RxParser* p) {
     int c = p->pattern[p->at];
     if (c == '(') {
+        if (++p->depth > RX_MAX_DEPTH) { rx_fail(p, "groups nested too deeply"); return NULL; }
         p->at++;
         int32_t group = -1;
         int32_t saved = p->flags;
@@ -261,6 +268,7 @@ static RxNode* rx_atom(RxParser* p) {
                 int64_t start = p->at;
                 while (p->at < p->length && (isalnum(p->pattern[p->at]) || p->pattern[p->at] == '_')) p->at++;
                 if (p->at == start || rx_peek(p) != '>') { rx_fail(p, "invalid group name"); return NULL; }
+                if (p->re->groups >= RX_MAX_GROUPS) { rx_fail(p, "too many groups"); return NULL; }
                 group = ++p->re->groups;
                 p->re->names = realloc(p->re->names, sizeof(char*) * (size_t)(group + 1));
                 if (!p->re->names) rt_panic("regex allocation failed");
@@ -277,12 +285,14 @@ static RxNode* rx_atom(RxParser* p) {
                 p->flags = flags;
             }
         } else {
+            if (p->re->groups >= RX_MAX_GROUPS) { rx_fail(p, "too many groups"); return NULL; }
             group = ++p->re->groups;
             p->re->names = realloc(p->re->names, sizeof(char*) * (size_t)(group + 1));
             if (!p->re->names) rt_panic("regex allocation failed");
             p->re->names[0] = NULL; p->re->names[group] = NULL;
         }
         RxNode* inner = rx_alternation(p);
+        p->depth--;
         p->flags = saved;
         if (!inner) return NULL;
         if (rx_peek(p) != ')') { rx_fail(p, "unclosed group"); return NULL; }
@@ -335,6 +345,7 @@ static int rx_number(RxParser* p, int32_t* out) {
 static RxNode* rx_repeat(RxParser* p) {
     RxNode* atom = rx_atom(p);
     if (!atom) return NULL;
+    int32_t wrapped = 0;
     while (p->at < p->length) {
         int c = p->pattern[p->at];
         int32_t min, max;
@@ -351,6 +362,7 @@ static RxNode* rx_repeat(RxParser* p) {
             if (max >= 0 && max < min) { rx_fail(p, "repetition maximum below minimum"); return NULL; }
         } else break;
         if (atom->kind == RN_ASSERT || atom->kind == RN_EMPTY) { rx_fail(p, "repetition of an assertion"); return NULL; }
+        if (p->depth + ++wrapped > RX_MAX_DEPTH) { rx_fail(p, "repetitions nested too deeply"); return NULL; }
         RxNode* node = rx_node(p, RN_REPEAT);
         node->min = min; node->max = max;
         if (rx_peek(p) == '?') { node->greedy = 0; p->at++; }
@@ -405,15 +417,16 @@ static int rx_compile(Regex* re, RxNode* node) {
             for (int32_t i = 0; i < node->count; i++) if (!rx_compile(re, node->children[i])) return 0;
             return 1;
         case RN_ALT: {
-            int32_t jumps[node->count];
+            int32_t* jumps = rx_alloc(sizeof(int32_t) * (size_t)node->count);
             for (int32_t i = 0; i < node->count; i++) {
                 int32_t split = -1;
-                if (i + 1 < node->count) { split = rx_emit(re, RX_SPLIT, 0, 0); if (split < 0) return 0; re->code[split].x = re->length; }
-                if (!rx_compile(re, node->children[i])) return 0;
+                if (i + 1 < node->count) { split = rx_emit(re, RX_SPLIT, 0, 0); if (split < 0) { free(jumps); return 0; } re->code[split].x = re->length; }
+                if (!rx_compile(re, node->children[i])) { free(jumps); return 0; }
                 jumps[i] = -1;
-                if (i + 1 < node->count) { jumps[i] = rx_emit(re, RX_JMP, 0, 0); if (jumps[i] < 0) return 0; re->code[split].y = re->length; }
+                if (i + 1 < node->count) { jumps[i] = rx_emit(re, RX_JMP, 0, 0); if (jumps[i] < 0) { free(jumps); return 0; } re->code[split].y = re->length; }
             }
             for (int32_t i = 0; i + 1 < node->count; i++) re->code[jumps[i]].x = re->length;
+            free(jumps);
             return 1;
         }
         case RN_GROUP:
@@ -439,14 +452,15 @@ static int rx_compile(Regex* re, RxNode* node) {
                 return 1;
             }
             int32_t optional = node->max - node->min;
-            int32_t splits[optional > 0 ? optional : 1];
+            int32_t* splits = rx_alloc(sizeof(int32_t) * (size_t)(optional > 0 ? optional : 1));
             for (int32_t i = 0; i < optional; i++) {
-                splits[i] = rx_emit(re, RX_SPLIT, 0, 0); if (splits[i] < 0) return 0;
+                splits[i] = rx_emit(re, RX_SPLIT, 0, 0); if (splits[i] < 0) { free(splits); return 0; }
                 int32_t start = re->length;
-                if (!rx_compile(re, body)) return 0;
+                if (!rx_compile(re, body)) { free(splits); return 0; }
                 if (node->greedy) re->code[splits[i]].x = start; else re->code[splits[i]].y = start;
             }
             for (int32_t i = 0; i < optional; i++) { if (node->greedy) re->code[splits[i]].y = re->length; else re->code[splits[i]].x = re->length; }
+            free(splits);
             return 1;
         }
     }
@@ -479,6 +493,9 @@ void* rt_regex_compile(void* pattern_string, int32_t flags) {
     if (ok) {
         ok = rx_emit(re, RX_SAVE, 0, 0) >= 0 && rx_compile(re, tree) && rx_emit(re, RX_SAVE, 1, 0) >= 0 && rx_emit(re, RX_MATCH, 0, 0) >= 0;
         if (!ok) snprintf(parser.error, sizeof(parser.error), "pattern too large");
+        else if ((int64_t)re->length * (int64_t)(2 * (re->groups + 1) + re->loops) > RX_MAX_SLOTS) {
+            ok = 0; snprintf(parser.error, sizeof(parser.error), "pattern too complex (too many groups and repetitions)");
+        }
     }
     for (int32_t i = 0; i < parser.node_count; i++) { free(parser.nodes[i]->children); free(parser.nodes[i]); }
     free(parser.nodes);
@@ -542,46 +559,57 @@ static int rx_class_matches(RxClass* c, int32_t value) {
 }
 
 /* Follows jumps, splits, saves and assertions from `pc` at `at`, adding the
- * threads that consume input (or match) to `list` in priority order. */
+ * threads that consume input (or match) to `list` in priority order. An
+ * explicit stack replaces recursion: a frame either explores an instruction
+ * or restores a slot that a SAVE changed for the frames above it. Each
+ * instruction is explored once per generation, so the stack holds at most
+ * three frames per instruction. */
+typedef struct { int32_t pc, slot; int64_t value; } RxFrame;
+
 static void rx_add(Regex* re, RxList* list, int32_t* marks, int32_t generation, int32_t pc, int64_t* slots,
-                   int32_t nslots, const unsigned char* text, int64_t length, int64_t at) {
-    if (marks[pc] == generation) return;
-    marks[pc] = generation;
-    RxInst* inst = &re->code[pc];
-    switch (inst->op) {
-        case RX_JMP: rx_add(re, list, marks, generation, inst->x, slots, nslots, text, length, at); return;
-        case RX_SPLIT:
-            rx_add(re, list, marks, generation, inst->x, slots, nslots, text, length, at);
-            rx_add(re, list, marks, generation, inst->y, slots, nslots, text, length, at);
-            return;
-        case RX_ASSERT:
-            if (rx_assert(inst->x, inst->y, text, length, at)) rx_add(re, list, marks, generation, pc + 1, slots, nslots, text, length, at);
-            return;
-        case RX_SAVE: {
-            int32_t slot = inst->x >= 0 ? inst->x : 2 * (re->groups + 1) + (-1 - inst->x);
-            int64_t saved = slots[slot];
-            slots[slot] = at;
-            rx_add(re, list, marks, generation, pc + 1, slots, nslots, text, length, at);
-            slots[slot] = saved;
-            return;
-        }
-        case RX_LOOP: {
-            /* After the body: repeat unless this iteration matched nothing. */
-            int32_t slot = 2 * (re->groups + 1) + inst->x;
-            if (slots[slot] == at) {
+                   int32_t nslots, const unsigned char* text, int64_t length, int64_t at, RxFrame* stack) {
+    int32_t top = 0;
+    stack[top++] = (RxFrame){ pc, -1, 0 };
+    while (top > 0) {
+        RxFrame frame = stack[--top];
+        if (frame.slot >= 0) { slots[frame.slot] = frame.value; continue; }
+        pc = frame.pc;
+        if (marks[pc] == generation) continue;
+        marks[pc] = generation;
+        RxInst* inst = &re->code[pc];
+        switch (inst->op) {
+            case RX_JMP: stack[top++] = (RxFrame){ inst->x, -1, 0 }; break;
+            case RX_SPLIT:
+                /* Last pushed runs first: x has priority over y. */
+                stack[top++] = (RxFrame){ inst->y, -1, 0 };
+                stack[top++] = (RxFrame){ inst->x, -1, 0 };
+                break;
+            case RX_ASSERT:
+                if (rx_assert(inst->x, inst->y, text, length, at)) stack[top++] = (RxFrame){ pc + 1, -1, 0 };
+                break;
+            case RX_SAVE: {
+                int32_t slot = inst->x >= 0 ? inst->x : 2 * (re->groups + 1) + (-1 - inst->x);
+                stack[top++] = (RxFrame){ 0, slot, slots[slot] };
+                slots[slot] = at;
+                stack[top++] = (RxFrame){ pc + 1, -1, 0 };
+                break;
+            }
+            case RX_LOOP: {
+                /* After the body: repeat unless this iteration matched nothing. */
+                int32_t slot = 2 * (re->groups + 1) + inst->x;
                 RxInst* split = &re->code[inst->y];
                 /* The split's targets are the body (right after it) and the exit. */
                 int32_t exit = split->x == inst->y + 1 ? split->y : split->x;
-                rx_add(re, list, marks, generation, exit, slots, nslots, text, length, at);
-            } else rx_add(re, list, marks, generation, inst->y, slots, nslots, text, length, at);
-            return;
-        }
-        default: {
-            RxThread* thread = &list->threads[list->count];
-            thread->pc = pc;
-            thread->slots = list->slot_store + (size_t)list->count * (size_t)nslots;
-            memcpy(thread->slots, slots, sizeof(int64_t) * (size_t)nslots);
-            list->count++;
+                stack[top++] = (RxFrame){ slots[slot] == at ? exit : inst->y, -1, 0 };
+                break;
+            }
+            default: {
+                RxThread* thread = &list->threads[list->count];
+                thread->pc = pc;
+                thread->slots = list->slot_store + (size_t)list->count * (size_t)nslots;
+                memcpy(thread->slots, slots, sizeof(int64_t) * (size_t)nslots);
+                list->count++;
+            }
         }
     }
 }
@@ -603,6 +631,7 @@ int32_t rt_regex_search(void* pointer, void* text_string, int64_t start) {
         lists[i].count = 0;
     }
     int32_t* marks = rx_alloc(sizeof(int32_t) * (size_t)size);
+    RxFrame* stack = rx_alloc(sizeof(RxFrame) * (size_t)(3 * size + 1));
     for (int32_t i = 0; i < size; i++) marks[i] = -1;
     int64_t* scratch = rx_alloc(sizeof(int64_t) * (size_t)nslots);
     int64_t* best = rx_alloc(sizeof(int64_t) * (size_t)nslots);
@@ -614,7 +643,7 @@ int32_t rt_regex_search(void* pointer, void* text_string, int64_t start) {
         /* A new thread starts at each position until a match is found (leftmost). */
         if (!matched) {
             for (int32_t i = 0; i < nslots; i++) scratch[i] = -1;
-            rx_add(re, current, marks, generation, 0, scratch, nslots, text, length, at);
+            rx_add(re, current, marks, generation, 0, scratch, nslots, text, length, at, stack);
         }
         /* No live thread: done once matched; otherwise try the next start position. */
         if (current->count == 0 && matched) break;
@@ -637,7 +666,7 @@ int32_t rt_regex_search(void* pointer, void* text_string, int64_t start) {
                 case RX_ANY_NL: advance = c >= 0; break;
                 case RX_CLASS: advance = c >= 0 && rx_class_matches(&re->classes[inst->x], c); break;
             }
-            if (advance) rx_add(re, next, marks, generation, thread->pc + 1, thread->slots, nslots, text, length, at + width);
+            if (advance) rx_add(re, next, marks, generation, thread->pc + 1, thread->slots, nslots, text, length, at + width, stack);
         }
         RxList* swap = current; current = next; next = swap;
         if (at >= length) {
@@ -655,7 +684,7 @@ int32_t rt_regex_search(void* pointer, void* text_string, int64_t start) {
     }
     if (matched) memcpy(re->captures, best, sizeof(int64_t) * (size_t)captured);
     for (int i = 0; i < 2; i++) { free(lists[i].threads); free(lists[i].slot_store); }
-    free(marks); free(scratch); free(best);
+    free(marks); free(stack); free(scratch); free(best);
     return matched;
 }
 
