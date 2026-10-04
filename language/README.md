@@ -631,9 +631,22 @@ awaits abort the process.
 ## Async, tasks, cancellation and socket I/O
 
 Async functions lower to heap frames and resume state machines.
-One cooperative scheduler runs ready work; timers and POSIX poll readiness
-suspend tasks without busy-spinning. CPU-bound work must yield explicitly
-to let other tasks run.
+One cooperative scheduler per thread runs ready work; timers and POSIX poll
+readiness suspend tasks without busy-spinning. CPU-bound work must yield
+explicitly to let other tasks run.
+
+A `parallel def` function runs on a pool of worker threads (one per
+processor, or `ROLANG_WORKERS`), each with its own scheduler; calls stay
+`await f(x)` and `spawn f(x)`, the latter running in parallel. Threads share
+no objects: a parallel function's parameters and result must be `Sendable`
+(numbers, Bool, String, Vec, Dict, optionals, Result, and structs or enums
+declaring `: Sendable`, which derives the copy) and are copied between
+threads. See docs/parallelism.md.
+
+~~~rolang
+parallel def checksum(data: Vec<u8>) async -> u64 { ... }
+let sums = [spawn checksum(a), spawn checksum(b)];   // two cores
+~~~
 
 <!-- example: async -->
 ~~~rolang

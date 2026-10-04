@@ -33,7 +33,7 @@ pub struct DeriveRequest {
 
 pub def derivable_protocol(name: String) -> Bool {
     name.equals("Equatable") || name.equals("Hashable") || name.equals("Comparable") ||
-        name.equals("Encodable") || name.equals("Decodable") || name.equals("Codable")
+        name.equals("Encodable") || name.equals("Decodable") || name.equals("Codable") || name.equals("Sendable")
 }
 
 // Source of an extension declaring the conformances, with the methods the type lacks.
@@ -58,6 +58,8 @@ pub def derive_source(request: DeriveRequest) -> String {
     if wants("Comparable") && !has("__lt__") && !request.is_enum { body.append(derive.less()); }
     if wants("Encodable") && !has("to_json") { body.append(derive.encode()); }
     if wants("Decodable") && !has("from_json") { body.append(derive.decode()); }
+    if wants("Sendable") && !has("send_encode") { body.append(derive.send_encode()); }
+    if wants("Sendable") && !has("send_decode") { body.append(derive.send_decode()); }
     // The extension also declares the conformances, also when the type defines every method.
     var header = "extension " + request.name;
     if request.generic_names.len() > 0 {
@@ -162,6 +164,64 @@ struct DeriveWriter {
             out.append(f"        if other.{field.name} < self.{field.name} {{ return false; }}\n");
         }
         out.append("        false\n    }\n");
+        out.to_string()
+    }
+
+    // std.parallel: fields (or the case number and its payload) in order.
+    def send_encode() -> String {
+        let out = StringBuilder.new();
+        out.append(f"    pub def send_encode(out: SendWriter) -> Void{self.bounds("Sendable")} {{\n        out.enter();\n");
+        if !self.request.is_enum {
+            for field in self.request.fields { out.append(f"        send_encode_value(self.{field.name}, out);\n"); }
+        } else {
+            out.append("        switch self {\n");
+            var number = 0;
+            for entry in self.request.cases {
+                let count = entry.types.len();
+                out.append(f"            case .{entry.name}{self.bindings("a", count)}:\n                out.put_int({number});\n");
+                for index in 0..<count { out.append(f"                send_encode_value(a{index}, out);\n"); }
+                number += 1;
+            }
+            out.append("        }\n");
+        }
+        out.append("        out.leave();\n    }\n");
+        out.to_string()
+    }
+    def send_decode() -> String {
+        let out = StringBuilder.new();
+        let type = self.self_type();
+        out.append(f"    pub static def send_decode(input: SendReader) -> {type}{self.bounds("Sendable")} {{\n");
+        if !self.request.is_enum {
+            var arguments = "";
+            for index in 0..<self.request.fields.len() {
+                let field = self.request.fields[index];
+                out.append(f"        let decoded{index}: {field.type_text} = send_decode_value<{field.type_text} >(input);\n");
+                if index > 0 { arguments += ", "; }
+                arguments += f"{field.name}: decoded{index}";
+            }
+            out.append(f"        {type} {{ {arguments} }}\n    }}\n");
+            return out.to_string();
+        }
+        out.append("        let number = input.int();\n");
+        var position = 0;
+        let last = self.request.cases.len() - 1;
+        for entry in self.request.cases {
+            let count = entry.types.len();
+            // The last case takes every remaining number (the buffer comes from this program).
+            let inner = position < last;
+            var indent = "        ";
+            if inner { out.append(f"        if number == {position} {{\n"); indent = "            "; }
+            var arguments = "";
+            for index in 0..<count {
+                out.append(f"{indent}let value{index}: {entry.types[index]} = send_decode_value<{entry.types[index]} >(input);\n");
+                if index > 0 { arguments += ", "; }
+                if let label = entry.labels[index] { arguments += f"{label}: value{index}"; } else { arguments += f"value{index}"; }
+            }
+            var made = f"{type}.{entry.name}"; if count > 0 { made = f"{type}.{entry.name}({arguments})"; }
+            if inner { out.append(f"{indent}return {made};\n        }}\n"); } else { out.append(f"{indent}{made}\n"); }
+            position += 1;
+        }
+        out.append("    }\n");
         out.to_string()
     }
 

@@ -1,0 +1,8 @@
+b! 2 20 3 true
+circle 20
+rect 1x2
+empty
+10
+0 1 7 2 5 8 16 3 19 6 14 9 9 17 17 4 12 20 20 7 7 15 15 10 23 10 111 18 18 
+42 negative
+true false

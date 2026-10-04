@@ -30,4 +30,5 @@
 #include "../std/compress.c"
 #include "../std/websocket.c"
 #include "../std/async_fs.c"
+#include "../std/parallel.c"
 #include "entry.c"

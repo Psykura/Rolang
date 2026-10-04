@@ -1,0 +1,7 @@
+0:100:0:job 0:true
+1:101:2:job 1:true
+2:102:4:job 2:true
+3:103:6:job 3:true
+churned 800000
+mixed results 2
+10000 jobs sum 50005000

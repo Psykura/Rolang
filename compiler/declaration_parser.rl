@@ -2,6 +2,7 @@
 // function bodies and parameter defaults.
 pub import "statement_parser.rl"
 import std.collections
+import std.string_builder
 import "derive.rl"
 
 pub struct DeclarationParseResult {
@@ -276,7 +277,7 @@ struct DeclarationCursor {
             var span = current ?? start;
             for index in 0..<fields.len() {
                 let name = fields[index].name;
-                if line.contains(f"self.{name} ") || line.contains(f"self.{name}.") || line.contains(f"\"{name}\"") || line.contains(f"decoded{index}:") {
+                if line.contains(f"self.{name} ") || line.contains(f"self.{name}.") || line.contains(f"self.{name},") || line.contains(f"\"{name}\"") || line.contains(f"decoded{index}:") {
                     span = field_spans[index];
                 }
             }
@@ -334,10 +335,14 @@ struct DeclarationCursor {
             internal_name = self.take();
         }
         if !self.expect(":") { return nil; }
+        let type_start = self.index;
         guard let type_annotation = self.parse_type() else { return nil; }
+        self.texts[type_annotation.id] = self.text_from(type_start);
         var default_value: NodeId? = nil;
         if self.match_text("=") {
+            let value_start = self.index;
             guard let value = self.parse_expression() else { return nil; }
+            self.texts[value.id] = self.text_from(value_start);
             default_value = value;
         }
         self.make(NodeForm.param(ParamAst {
@@ -403,6 +408,7 @@ struct DeclarationCursor {
     def parse_func() -> NodeId? {
         let start = self.current().span;
         let visibility = self.visibility();
+        if self.spelling().equals("parallel") { self.fail("a method (parallel functions are top-level functions)"); return nil; }
         let is_unsafe = self.match_text("unsafe");
         let is_static = self.match_text("static");
         if !self.expect("def") { return nil; }
@@ -413,7 +419,9 @@ struct DeclarationCursor {
         let is_async = self.match_text("async");
         var return_type: NodeId? = nil;
         if self.match_text("->") {
+            let type_start = self.index;
             guard let result = self.parse_type() else { return nil; }
+            self.texts[result.id] = self.text_from(type_start);
             return_type = result;
         }
         guard let constraints = self.parse_constraints() else { return nil; }
@@ -441,6 +449,90 @@ struct DeclarationCursor {
             visibility, name, generic_params, params, return_type, constraints, body,
             is_async, is_static, is_unsafe
         }), start)
+    }
+    // `parallel def name(params) async -> R { body }` runs on a worker thread.
+    // The body becomes `__parallel_body_name`; `name` encodes the arguments,
+    // runs `__parallel_run_name` on a worker (started by `__parallel_start_name`)
+    // and decodes the result. Parameters and the result must be Sendable.
+    def parse_parallel_func() -> NodeId? {
+        let start = self.current().span;
+        let visibility = self.visibility();
+        if !self.expect("parallel") { return nil; }
+        if !self.spelling().equals("def") { self.fail("'def' (`parallel` marks a top-level async function)"); return nil; }
+        guard let id = self.parse_func() else { return nil; }
+        guard let node = self.arena.get(id) else { return nil; }
+        var data: FuncDeclAst? = nil;
+        switch node.form { case .func_decl(let func): data = func; default: {} }
+        guard let func = data else { return nil; }
+        if !func.is_async { self.error = SyntaxError { message: f"parallel function '{func.name}' must be async", span: start }; return nil; }
+        if func.generic_params.len() > 0 { self.error = SyntaxError { message: f"parallel function '{func.name}' cannot be generic", span: start }; return nil; }
+        let name = func.name;
+        let body_name = "__parallel_body_" + name;
+        node.form = NodeForm.func_decl(FuncDeclAst { visibility: "internal", name: body_name, generic_params: func.generic_params,
+            params: func.params, return_type: func.return_type, constraints: func.constraints, body: func.body,
+            is_async: true, is_static: false, is_unsafe: func.is_unsafe });
+        var result = "Void";
+        var result_span = start;
+        if let ref = func.return_type { result = self.texts[ref.id] ?? "Void"; if let typed = self.arena.get(ref) { result_span = typed.span ?? start; } }
+        let returns = !result.trim().equals("Void");
+        let declared = StringBuilder.new(); let encode = StringBuilder.new(); let decode = StringBuilder.new(); let call = StringBuilder.new();
+        let param_names = Vec<String>.new(); let param_spans = Vec<Span>.new();
+        for index in 0..<func.params.len() { if let param_node = self.arena.get(func.params[index]) { switch param_node.form {
+            case .param(let param):
+                let type_text = self.texts[param.type_annotation?.id ?? -1] ?? "";
+                if index > 0 { declared.append(", "); call.append(", "); }
+                if let label = param.external_name { declared.append(label + " "); call.append(label + ": "); }
+                else { call.append(param.internal_name + ": "); }
+                declared.append(f"{param.internal_name}: {type_text}");
+                if let value = param.default_value { declared.append(" = " + (self.texts[value.id] ?? "")); }
+                encode.append(f"    send_encode_value({param.internal_name}, __parallel_out);\n");
+                decode.append(f"    let {param.internal_name}: {type_text} = send_decode_value<{type_text} >(__parallel_input);\n");
+                call.append(param.internal_name);
+                param_names.push(param.internal_name); param_spans.push(param_node.span ?? start);
+            default: {}
+        } } }
+        let source = StringBuilder.new();
+        source.append(f"{visibility} def {name}({declared.to_string()}) async -> {result} {{\n    let __parallel_out = SendWriter.new();\n");
+        source.append(encode.to_string());
+        if returns { source.append(f"    let __parallel_input = await __parallel_call(__parallel_start_{name}, __parallel_out);\n    send_decode_value<{result} >(__parallel_input)\n}}\n"); }
+        else { source.append(f"    await __parallel_call(__parallel_start_{name}, __parallel_out);\n}}\n"); }
+        source.append(f"def __parallel_start_{name}(job: RawPtr) -> Void {{ __parallel_start(spawn __parallel_run_{name}(job)); }}\n");
+        source.append(f"def __parallel_run_{name}(job: RawPtr) async -> Void {{\n    let __parallel_input = __parallel_arguments(job);\n");
+        source.append(decode.to_string());
+        if returns { source.append(f"    let __parallel_result = await {body_name}({call.to_string()});\n    let __parallel_out = SendWriter.new();\n    send_encode_value(__parallel_result, __parallel_out);\n    __parallel_finish(job, __parallel_out);\n}}\n"); }
+        else { source.append(f"    await {body_name}({call.to_string()});\n    __parallel_finish(job, SendWriter.new());\n}}\n"); }
+        let text = source.to_string();
+        let lexed = tokenize(text);
+        if let problem = lexed.error { self.error = SyntaxError { message: f"cannot expand parallel function '{name}': {problem.message}", span: start }; return nil; }
+        let first = self.arena.len();
+        let generated = Vec<NodeId>.new();
+        var at = 0;
+        while at < lexed.tokens.len() - 1 {
+            let parsed = parse_declaration_prefix(lexed.tokens, self.arena, at);
+            if let problem = parsed.error { self.error = SyntaxError { message: f"cannot expand parallel function '{name}': {problem.message}", span: start }; return nil; }
+            guard let declaration = parsed.declaration else { break; }
+            generated.push(declaration);
+            if parsed.next_index <= at { break; }
+            at = parsed.next_index;
+        }
+        // Errors in the generated code point at the parameter or result a line handles.
+        let line_spans = Vec<Span>.new();
+        for line in text.split("\n") {
+            var span = start;
+            for index in 0..<param_names.len() {
+                let param = param_names[index];
+                if line.contains(f"send_encode_value({param},") || line.contains(f"let {param}:") { span = param_spans[index]; }
+            }
+            if line.contains("__parallel_result") || line.contains(f"send_decode_value<{result} >") { span = result_span; }
+            line_spans.push(span);
+        }
+        for index in first..<self.arena.len() { if let generated_node = self.arena.get(NodeId { id: index }) {
+            var span = start;
+            if let position = generated_node.span { if position.line >= 1 && position.line <= line_spans.len() { span = line_spans[position.line - 1]; } }
+            generated_node.span = span;
+        } }
+        for declaration in generated { self.extra.push(declaration); }
+        id
     }
     def parse_extern_func() -> NodeId? {
         let start = self.current().span;
@@ -778,6 +870,7 @@ struct DeclarationCursor {
         if word.equals("enum") || next.equals("enum") { return self.parse_enum(); }
         if word.equals("protocol") || next.equals("protocol") { return self.parse_protocol(); }
         if word.equals("extension") || next.equals("extension") { return self.parse_extension(); }
+        if word.equals("parallel") || next.equals("parallel") { return self.parse_parallel_func(); }
         if word.equals("def") || word.equals("unsafe") || word.equals("static") ||
            next.equals("def") || next.equals("unsafe") || next.equals("static") {
             return self.parse_func();

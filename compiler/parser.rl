@@ -19,7 +19,7 @@ def declaration_starts(tokens: Vec<LexToken>, index: i32) -> Bool {
                 let next = tokens[index + 1].text;
                 return next.equals("def") || next.equals("static");
             }
-        case "static":
+        case "static", "parallel":
             if index + 1 < tokens.len() { return tokens[index + 1].text.equals("def"); }
         default: {}
     }

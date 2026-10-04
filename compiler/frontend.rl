@@ -204,7 +204,20 @@ pub struct Frontend {
                     }
                 }
                 let items = Vec<NodeId>.new();
-                for name in ["vec.rl", "dict.rl", "string.rl", "range.rl", "cell.rl", "compare.rl"] {
+                let core = ["vec.rl", "dict.rl", "string.rl", "range.rl", "cell.rl", "compare.rl"];
+                // `parallel def` and `: Sendable` need std.parallel.
+                var parallel = false;
+                for id in data.items { if let item = self.arena.get(id) { switch item.form {
+                    case .func_decl(let func): if func.name.starts_with("__parallel_start_") { parallel = true; }
+                    case .extension_decl(let extension):
+                        for conformance in extension.conformances { if let named = self.arena.get(conformance) { switch named.form {
+                            case .named_type(let type): if type.name.equals("Sendable") { parallel = true; }
+                            default: {}
+                        } } }
+                    default: {}
+                } } }
+                if parallel { core.push("parallel.rl"); }
+                for name in core {
                     if !existing.contains(name) {
                         let implicit = self.arena.add(NodeForm.import_decl(ImportDeclAst {
                             visibility: "internal", path: path_join(standard, name), module: Vec<String>.new(), alias: nil
