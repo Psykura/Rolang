@@ -8,11 +8,18 @@
 //
 // Instant is monotonic and only meaningful within one process. DateTime is a
 // proleptic Gregorian date and time with a fixed UTC offset; leap seconds are
-// not represented.
+// not represented. TimeZone reads the IANA time zone database:
+//
+//     guard let tokyo = TimeZone.load("Asia/Tokyo").ok_value() else { return 1; }
+//     println(DateTime.now().in_zone(tokyo).to_string());   // "2026-10-05T04:39:30.25+09:00"
+//     let meeting = TimeZone.load("Europe/Berlin").ok_value()?.instant(2026, 3, 29, 2, 30);
 import "string.rl"
 import "vec.rl"
 import "range.rl"
 import "task.rl"
+import "result.rl"
+import "fs.rl"
+import "process.rl"
 
 pub extern "C" def rt_time_monotonic_ns() -> i64;
 pub extern "C" def rt_time_unix_ns() -> i64;
@@ -363,4 +370,300 @@ def weekday_name(day: i32) -> String {
 def month_name(month: i32) -> String {
     ["January", "February", "March", "April", "May", "June", "July", "August",
      "September", "October", "November", "December"][month - 1]
+}
+
+// ---- Time zones ----
+
+pub struct TimeZoneError {
+    pub let message: String;
+    pub def to_string() -> String { self.message }
+}
+
+// One kind of local time: its UTC offset, whether it is daylight saving time, and its abbreviation.
+struct ZoneType { let offset: i32; let dst: Bool; let abbreviation: String; }
+
+// A day in a POSIX TZ rule: `Jn` (kind 0, Feb 29 never counted), `n` (kind 1,
+// from 0) or `Mm.w.d` (kind 2: weekday d of week w, 5 meaning the last).
+struct ZoneDate { let kind: i32; let number: i32; let month: i32; let week: i32; let weekday: i32; }
+
+// The rule after the last listed transition, such as "CET-1CEST,M3.5.0,M10.5.0/3".
+struct ZoneRule {
+    let standard: ZoneType;
+    let daylight: ZoneType?;
+    let start: ZoneDate; let start_time: i32;
+    let end: ZoneDate; let end_time: i32;
+}
+
+// A time zone from the IANA database (or a POSIX TZ rule): the UTC offset in
+// effect at each moment, with daylight saving time and historical changes.
+pub struct TimeZone {
+    pub let name: String;
+    let transitions: Vec<i64>;
+    let indices: Vec<i32>;
+    let types: Vec<ZoneType>;
+    let rule: ZoneRule?;
+
+    pub static def utc() -> TimeZone {
+        TimeZone { name: "UTC", transitions: Vec<i64>.new(), indices: Vec<i32>.new(), types: [ZoneType { offset: 0, dst: false, abbreviation: "UTC" }], rule: nil }
+    }
+
+    // Loads a zone such as "America/New_York" from TZDIR or /usr/share/zoneinfo.
+    pub static def load(name: String) -> Result<TimeZone, TimeZoneError> {
+        if name.equals("UTC") || name.equals("Z") { return Result<TimeZone, TimeZoneError>.ok(value: TimeZone.utc()); }
+        if !zone_name_valid(name) { return zone_error(f"invalid time zone name '{name}'"); }
+        var directory = try_env_get("TZDIR") ?? "/usr/share/zoneinfo";
+        if directory.len() == 0 { directory = "/usr/share/zoneinfo"; }
+        guard let data = fs_read_text(directory + "/" + name, 1048576) else { return zone_error(f"unknown time zone '{name}'"); }
+        TimeZone.from_tzif(name, data)
+    }
+
+    // The system's zone: TZ (a zone name, ":name", a file path or a POSIX
+    // rule), else /etc/localtime, else UTC.
+    pub static def local() -> TimeZone {
+        if let setting = try_env_get("TZ") {
+            var name = setting; if name.starts_with(":") { name = name.substring(1, (name.len() as i32) - 1); }
+            if name.starts_with("/") { if let data = fs_read_text(name, 1048576) { if let zone = TimeZone.from_tzif(name, data).ok_value() { return zone; } } }
+            else if name.len() > 0 {
+                if let zone = TimeZone.load(name).ok_value() { return zone; }
+                if let rule = parse_zone_rule(name) { return TimeZone { name, transitions: Vec<i64>.new(), indices: Vec<i32>.new(), types: [rule.standard], rule }; }
+            }
+        }
+        if let data = fs_read_text("/etc/localtime", 1048576) { if let zone = TimeZone.from_tzif("localtime", data).ok_value() { return zone; } }
+        TimeZone.utc()
+    }
+
+    // A zone from the bytes of a TZif file (RFC 8536).
+    pub static def from_tzif(name: String, data: String) -> Result<TimeZone, TimeZoneError> {
+        if data.len() < 44 || !data.substring(0, 4).equals("TZif") { return zone_error(f"{name} is not a TZif file"); }
+        let version = data.byte_at(4);
+        var at = 0;
+        var wide = false;
+        if version >= 50 {
+            // Skip the 32-bit block: version 2 and later repeat the data with 64-bit times.
+            at = 44 + tzif_block_size(data, 0, false);
+            if (data.len() as i32) < at + 44 || !data.substring(at, 4).equals("TZif") { return zone_error(f"{name}: truncated TZif file"); }
+            wide = true;
+        }
+        let isut = tzif_u32(data, at + 20); let isstd = tzif_u32(data, at + 24); let leap = tzif_u32(data, at + 28);
+        let count = tzif_u32(data, at + 32); let type_count = tzif_u32(data, at + 36); let chars = tzif_u32(data, at + 40);
+        var width = 4; if wide { width = 8; }
+        if type_count == 0 || (data.len() as i32) < at + 44 + tzif_block_size(data, at, wide) { return zone_error(f"{name}: truncated TZif file"); }
+        var cursor = at + 44;
+        let transitions = Vec<i64>.new();
+        for index in 0..<count {
+            if wide { transitions.push(tzif_i64(data, cursor)); } else { transitions.push(tzif_u32(data, cursor) as i64); if transitions[index] >= 2147483648 { transitions[index] = transitions[index] - 4294967296; } }
+            cursor += width;
+        }
+        let indices = Vec<i32>.new();
+        for index in 0..<count {
+            let kind = data.byte_at(cursor + index);
+            if kind >= type_count { return zone_error(f"{name}: invalid transition type"); }
+            indices.push(kind);
+        }
+        cursor += count;
+        let abbreviations_at = cursor + type_count * 6;
+        let types = Vec<ZoneType>.new();
+        for index in 0..<type_count {
+            var offset = tzif_u32(data, cursor) as i64; if offset >= 2147483648 { offset -= 4294967296; }
+            let start = data.byte_at(cursor + 5);
+            var end = start;
+            while end < chars && data.byte_at(abbreviations_at + end) != 0 { end += 1; }
+            types.push(ZoneType { offset: offset as i32, dst: data.byte_at(cursor + 4) != 0, abbreviation: data.substring(abbreviations_at + start, end - start) });
+            cursor += 6;
+        }
+        cursor = abbreviations_at + chars + leap * (width + 4) + isstd + isut;
+        var rule: ZoneRule? = nil;
+        if wide && cursor < data.len() as i32 && data.byte_at(cursor) == 10 {
+            let close = data.find_from("\n", cursor + 1);
+            if close > cursor + 1 { rule = parse_zone_rule(data.substring(cursor + 1, close - cursor - 1)); }
+        }
+        Result<TimeZone, TimeZoneError>.ok(value: TimeZone { name, transitions, indices, types, rule })
+    }
+
+    // Seconds east of UTC at the instant `unix_seconds`.
+    pub def offset_at(unix_seconds: i64) -> i32 { self.type_at(unix_seconds).offset }
+    pub def abbreviation_at(unix_seconds: i64) -> String { self.type_at(unix_seconds).abbreviation }
+    pub def is_dst_at(unix_seconds: i64) -> Bool { self.type_at(unix_seconds).dst }
+
+    def type_at(unix_seconds: i64) -> ZoneType {
+        let count = self.transitions.len() as i32;
+        if count == 0 || unix_seconds >= self.transitions[count - 1] {
+            if let rule = self.rule { return rule_type_at(rule, unix_seconds); }
+            if count == 0 { return self.types[0]; }
+            return self.types[self.indices[count - 1]];
+        }
+        if unix_seconds < self.transitions[0] { return self.types[0]; }
+        // The last transition at or before the instant.
+        var low = 0; var high = count - 1;
+        while low < high {
+            let middle = (low + high + 1) / 2;
+            if self.transitions[middle] <= unix_seconds { low = middle; } else { high = middle - 1; }
+        }
+        self.types[self.indices[low]]
+    }
+
+    // The instant at a local date and time in this zone. A time skipped when
+    // clocks go forward is read with the offset before the change (02:30 on
+    // a spring-forward night becomes 03:30); a time that occurs twice when
+    // clocks go back is the earlier one. Nil for an invalid date.
+    pub def instant(year: i32, month: i32, day: i32, hour: i32 = 0, minute: i32 = 0, second: i32 = 0, nanosecond: i32 = 0) -> DateTime? {
+        guard let wall = DateTime.from_parts(year, month, day, hour, minute, second, nanosecond) else { return nil; }
+        let local = wall.unix_seconds();
+        // Offsets in effect a day either side cover any change near this time.
+        let before = self.offset_at(local - 86400);
+        let after = self.offset_at(local + 86400);
+        var chosen = before;
+        if self.offset_at(local - (before as i64)) != before {
+            if self.offset_at(local - (after as i64)) == after { chosen = after; }
+        }
+        DateTime.from_unix_nanos((local - (chosen as i64)) * 1000000000 + (nanosecond as i64), self.offset_at(local - (chosen as i64)))
+    }
+}
+
+pub extension DateTime {
+    // The same instant as local time in `zone`.
+    pub def in_zone(zone: TimeZone) -> DateTime { self.with_offset(zone.offset_at(self.unix_seconds())) }
+}
+
+def zone_error(message: String) -> Result<TimeZone, TimeZoneError> {
+    Result<TimeZone, TimeZoneError>.err(error: TimeZoneError { message })
+}
+
+// Names are paths below the zone directory: letters, digits, `_`, `-`, `+` and `/`, without `..`.
+def zone_name_valid(name: String) -> Bool {
+    if name.len() == 0 || name.len() > 128 || name.starts_with("/") || name.contains("..") { return false; }
+    for index in 0..<(name.len() as i32) {
+        let byte = name.byte_at(index);
+        let ok = (byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122) || (byte >= 48 && byte <= 57) || byte == 95 || byte == 45 || byte == 43 || byte == 47;
+        if !ok { return false; }
+    }
+    true
+}
+
+def tzif_u32(data: String, at: i32) -> i32 {
+    // Counts and offsets fit in i32 for valid files; offsets are reinterpreted by callers.
+    let value = ((data.byte_at(at) as i64) << 24) | ((data.byte_at(at + 1) as i64) << 16) | ((data.byte_at(at + 2) as i64) << 8) | (data.byte_at(at + 3) as i64);
+    if value > 2147483647 { return (value - 4294967296) as i32; }
+    value as i32
+}
+
+def tzif_i64(data: String, at: i32) -> i64 {
+    var value: i64 = 0;
+    for index in 0..<8 { value = (value << 8) | (data.byte_at(at + index) as i64); }
+    value
+}
+
+// Bytes of the data block after the header at `at`.
+def tzif_block_size(data: String, at: i32, wide: Bool) -> i32 {
+    var width = 4; if wide { width = 8; }
+    let isut = tzif_u32(data, at + 20); let isstd = tzif_u32(data, at + 24); let leap = tzif_u32(data, at + 28);
+    let count = tzif_u32(data, at + 32); let types = tzif_u32(data, at + 36); let chars = tzif_u32(data, at + 40);
+    if isut < 0 || isstd < 0 || leap < 0 || count < 0 || types < 0 || chars < 0 || count > 100000 || types > 256 || chars > 10000 || leap > 10000 { return 2147483647 - 44 - at; }
+    count * width + count + types * 6 + chars + leap * (width + 4) + isstd + isut
+}
+
+// A POSIX TZ rule, e.g. "EST5EDT,M3.2.0,M11.1.0" or "<+08>-8"; nil when malformed.
+def parse_zone_rule(text: String) -> ZoneRule? {
+    let cursor = ZoneRuleCursor { text, at: 0 };
+    guard let standard_name = cursor.name() else { return nil; }
+    guard let standard_offset = cursor.offset() else { return nil; }
+    let standard = ZoneType { offset: -standard_offset, dst: false, abbreviation: standard_name };
+    let none = ZoneDate { kind: 1, number: 0, month: 0, week: 0, weekday: 0 };
+    if cursor.done() { return ZoneRule { standard, daylight: nil, start: none, start_time: 0, end: none, end_time: 0 }; }
+    guard let daylight_name = cursor.name() else { return nil; }
+    var daylight_offset = standard_offset - 3600;
+    if !cursor.done() && !cursor.peek(",") { guard let explicit = cursor.offset() else { return nil; } daylight_offset = explicit; }
+    let daylight = ZoneType { offset: -daylight_offset, dst: true, abbreviation: daylight_name };
+    // Without dates, the US rule of 1987-2006 is the POSIX default; zone files always give dates.
+    if !cursor.take(",") { return nil; }
+    guard let start = cursor.date() else { return nil; }
+    var start_time = 7200; if cursor.take("/") { guard let time = cursor.offset() else { return nil; } start_time = time; }
+    if !cursor.take(",") { return nil; }
+    guard let end = cursor.date() else { return nil; }
+    var end_time = 7200; if cursor.take("/") { guard let time = cursor.offset() else { return nil; } end_time = time; }
+    if !cursor.done() { return nil; }
+    ZoneRule { standard, daylight, start, start_time, end, end_time }
+}
+
+struct ZoneRuleCursor {
+    let text: String;
+    var at: i32;
+    def done() -> Bool { self.at >= self.text.len() as i32 }
+    def peek(token: String) -> Bool { !self.done() && self.text.substring(self.at, 1).equals(token) }
+    def take(token: String) -> Bool { if self.peek(token) { self.at += 1; return true; } false }
+    // An abbreviation: three or more letters, or `<...>` (which may hold digits and signs).
+    def name() -> String? {
+        if self.take("<") {
+            let close = self.text.find_from(">", self.at);
+            if close < 0 { return nil; }
+            let value = self.text.substring(self.at, close - self.at);
+            self.at = close + 1;
+            return value;
+        }
+        let start = self.at;
+        while !self.done() { let byte = self.text.byte_at(self.at); if (byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122) { self.at += 1; } else { break; } }
+        if self.at - start < 3 { return nil; }
+        self.text.substring(start, self.at - start)
+    }
+    def number() -> i32? {
+        let start = self.at; var value = 0;
+        while !self.done() && is_ascii_digit(self.text.byte_at(self.at)) && self.at - start < 4 { value = value * 10 + self.text.byte_at(self.at) - 48; self.at += 1; }
+        if self.at == start { return nil; }
+        value
+    }
+    // [+-]hh[:mm[:ss]] in seconds (POSIX offsets count west of UTC as positive).
+    def offset() -> i32? {
+        var sign = 1;
+        if self.take("-") { sign = -1; } else { self.take("+"); }
+        guard let hours = self.number() else { return nil; }
+        var seconds = hours * 3600;
+        if self.take(":") { guard let minutes = self.number() else { return nil; } seconds += minutes * 60;
+            if self.take(":") { guard let extra = self.number() else { return nil; } seconds += extra; } }
+        sign * seconds
+    }
+    def date() -> ZoneDate? {
+        if self.take("J") { guard let day = self.number() else { return nil; } if day < 1 || day > 365 { return nil; } return ZoneDate { kind: 0, number: day, month: 0, week: 0, weekday: 0 }; }
+        if self.take("M") {
+            guard let month = self.number() else { return nil; }
+            if !self.take(".") { return nil; }
+            guard let week = self.number() else { return nil; }
+            if !self.take(".") { return nil; }
+            guard let weekday = self.number() else { return nil; }
+            if month < 1 || month > 12 || week < 1 || week > 5 || weekday > 6 { return nil; }
+            return ZoneDate { kind: 2, number: 0, month, week, weekday };
+        }
+        guard let day = self.number() else { return nil; }
+        if day > 365 { return nil; }
+        ZoneDate { kind: 1, number: day, month: 0, week: 0, weekday: 0 }
+    }
+}
+
+// Days since 1970-01-01 of a rule date in `year`.
+def zone_rule_day(date: ZoneDate, year: i32) -> i64 {
+    let january = days_from_civil(year, 1, 1);
+    if date.kind == 0 {
+        var day = (date.number - 1) as i64;
+        if is_leap_year(year) && date.number >= 60 { day += 1; }
+        return january + day;
+    }
+    if date.kind == 1 { return january + (date.number as i64); }
+    let first = days_from_civil(year, date.month, 1);
+    // 1970-01-01 was a Thursday (weekday 4, counting Sunday as 0).
+    let first_weekday = ((first % 7 + 7 + 4) % 7) as i32;
+    var day = 1 + (date.weekday - first_weekday + 7) % 7 + (date.week - 1) * 7;
+    while day > days_in_month(year, date.month) { day -= 7; }
+    first + ((day - 1) as i64)
+}
+
+def rule_type_at(rule: ZoneRule, unix_seconds: i64) -> ZoneType {
+    guard let daylight = rule.daylight else { return rule.standard; }
+    let (year, month, day) = civil_from_days(floor_div(unix_seconds + (rule.standard.offset as i64), 86400));
+    // Daylight time starts at a standard-time wall clock and ends at a daylight one.
+    let start = zone_rule_day(rule.start, year) * 86400 + (rule.start_time as i64) - (rule.standard.offset as i64);
+    let end = zone_rule_day(rule.end, year) * 86400 + (rule.end_time as i64) - (daylight.offset as i64);
+    var in_daylight = false;
+    if start < end { in_daylight = unix_seconds >= start && unix_seconds < end; }
+    else { in_daylight = !(unix_seconds >= end && unix_seconds < start); }
+    if in_daylight { return daylight; }
+    rule.standard
 }
