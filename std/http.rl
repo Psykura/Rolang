@@ -12,7 +12,9 @@
 //     });
 //
 // Bodies are binary-safe strings. Requests and responses carry their length
-// (or use chunked encoding); clients follow up to five redirects. https uses
+// (or use chunked encoding); clients follow up to five redirects and decode
+// gzip and deflate responses; a server with `gzip` set compresses large text
+// responses for clients that accept it. https uses
 // std.tls: clients verify servers against the system's trusted certificates
 // (`client.tls` changes that), and `HttpServer.bind(..., tls: config)` serves
 // https.
@@ -25,6 +27,7 @@ import "task.rl"
 import "string_builder.rl"
 import "async_io.rl"
 import "tls.rl"
+import "compress.rl"
 import "json.rl"
 import "time.rl"
 
@@ -575,6 +578,7 @@ pub struct HttpClient {
         for field in self.headers.entries() { if !extra.contains(field.name) { headers.add(field.name, field.value); } }
         for field in extra.entries() { headers.add(field.name, field.value); }
         headers.set("Connection", "close");
+        if !headers.contains("Accept-Encoding") && compression_available() { headers.set("Accept-Encoding", "gzip, deflate"); }
         if body.len() > 0 || method.equals("POST") || method.equals("PUT") || method.equals("PATCH") { headers.set("Content-Length", body.len().to_string()); }
         switch await connection.write(write_message(f"{method} {url.target()} HTTP/1.1", headers, body)) {
             case .ok(let count): {}
@@ -602,12 +606,39 @@ pub struct HttpClient {
             let response = HttpResponse { status, reason, headers: fields, body: "" };
             if method.equals("HEAD") || status == 204 || status == 304 { return Result<HttpResponse, HttpError>.ok(value: response); }
             switch await reader.body(fields, true) {
-                case .ok(let data): response.body = data;
+                case .ok(let data):
+                    response.body = data;
+                    let encoding = (fields.get("Content-Encoding") ?? "").trim().lowercased();
+                    if encoding.equals("gzip") || encoding.equals("x-gzip") || encoding.equals("deflate") {
+                        switch decode_body(data, encoding, self.max_body) {
+                            case .ok(let plain):
+                                response.body = plain;
+                                response.headers.remove("Content-Encoding");
+                                response.headers.remove("Content-Length");
+                            case .err(let message): return http_error(f"cannot decode the {encoding} body: {message}");
+                        }
+                    }
                 case .err(let error): return Result<HttpResponse, HttpError>.err(error: error);
             }
             return Result<HttpResponse, HttpError>.ok(value: response);
         }
         http_error("unreachable")
+    }
+}
+
+def compression_available() -> Bool { crc32("") != nil }
+
+// A gzip or deflate body; "deflate" is a zlib stream, but some servers send raw deflate.
+def decode_body(data: String, encoding: String, limit: i32) -> Result<String, String> {
+    var format = CompressFormat.gzip;
+    if encoding.equals("deflate") { format = CompressFormat.zlib; }
+    switch decompress(data, format, limit as i64) {
+        case .ok(let plain): return Result<String, String>.ok(value: plain);
+        case .err(let error):
+            if encoding.equals("deflate") {
+                if let raw = decompress(data, CompressFormat.deflate, limit as i64).ok_value() { return Result<String, String>.ok(value: raw); }
+            }
+            return Result<String, String>.err(error: error.message);
     }
 }
 
@@ -626,12 +657,14 @@ pub struct HttpServer {
     pub var idle_timeout: Duration;
     // Serves https with this certificate when set.
     pub var tls: TlsConfig?;
+    // Compresses text responses of 1 KiB or more for clients that accept gzip.
+    pub var gzip: Bool;
 
     // Listens on a numeric address; port zero picks a free port. With
     // `tls` (from TlsConfig.server), connections use https.
     pub static def bind(address: String, port: i32, tls: TlsConfig? = nil) -> Result<HttpServer, HttpError> {
         switch AsyncListener.bind(address, port, 128) {
-            case .ok(let listener): return Result<HttpServer, HttpError>.ok(value: HttpServer { listener, max_body: 16777216, idle_timeout: Duration.seconds(60), tls });
+            case .ok(let listener): return Result<HttpServer, HttpError>.ok(value: HttpServer { listener, max_body: 16777216, idle_timeout: Duration.seconds(60), tls, gzip: false });
             case .err(let code): return http_error(f"cannot listen on {address}:{port}: {os_error_message(code)}");
         }
     }
@@ -647,7 +680,7 @@ pub struct HttpServer {
             switch await self.listener.accept() {
                 case .ok(let stream):
                     accepted += 1;
-                    running.push(spawn serve_connection(stream, handler, self.max_body, self.idle_timeout, self.tls));
+                    running.push(spawn serve_connection(stream, handler, self.max_body, self.idle_timeout, self.tls, self.gzip));
                 case .err(let code): return http_error(f"accept failed: {os_error_message(code)}");
             }
         }
@@ -656,7 +689,7 @@ pub struct HttpServer {
     }
 }
 
-def serve_connection(socket: AsyncStream, handler: (HttpRequest) async -> HttpResponse, max_body: i32, idle: Duration, tls: TlsConfig?) async -> Void {
+def serve_connection(socket: AsyncStream, handler: (HttpRequest) async -> HttpResponse, max_body: i32, idle: Duration, tls: TlsConfig?, gzip: Bool = false) async -> Void {
     var secure: TlsStream? = nil;
     if let config = tls {
         // A client that fails the handshake, or stalls in it, is dropped.
@@ -692,20 +725,35 @@ def serve_connection(socket: AsyncStream, handler: (HttpRequest) async -> HttpRe
         let connection = (headers.get("Connection") ?? "").lowercased();
         let keep_alive = (request.version.equals("HTTP/1.1") && !connection.equals("close")) || connection.equals("keep-alive");
         let response = await handler(request);
-        if !(await respond(stream, response, keep_alive, request.method.equals("HEAD"))) { break; }
+        let accepts = gzip && (headers.get("Accept-Encoding") ?? "").lowercased().contains("gzip");
+        if !(await respond(stream, response, keep_alive, request.method.equals("HEAD"), accepts)) { break; }
         if !keep_alive { break; }
     }
     await stream.finish();
 }
 
-def respond(stream: HttpConnection, response: HttpResponse, keep_alive: Bool, head_only: Bool = false) async -> Bool {
+// Text formats that compress well; images and archives are compressed already.
+def compressible(content_type: String) -> Bool {
+    let kind = content_type.lowercased();
+    kind.starts_with("text/") || kind.contains("json") || kind.contains("javascript") || kind.contains("xml") || kind.contains("svg")
+}
+
+def respond(stream: HttpConnection, response: HttpResponse, keep_alive: Bool, head_only: Bool = false, accepts_gzip: Bool = false) async -> Bool {
     let headers = HttpHeaders.new();
     for field in response.headers.entries() { headers.add(field.name, field.value); }
     if !headers.contains("Server") { headers.set("Server", "Rolang"); }
-    headers.set("Content-Length", response.body.len().to_string());
+    var content = response.body;
+    if accepts_gzip && content.len() >= 1024 && !headers.contains("Content-Encoding") && compressible(headers.get("Content-Type") ?? "") {
+        if let packed = gzip(content).ok_value() {
+            content = packed;
+            headers.set("Content-Encoding", "gzip");
+            headers.set("Vary", "Accept-Encoding");
+        }
+    }
+    headers.set("Content-Length", content.len().to_string());
     if keep_alive { headers.set("Connection", "keep-alive"); } else { headers.set("Connection", "close"); }
     var reason = response.reason; if reason.len() == 0 { reason = status_reason(response.status); }
-    var body = response.body; if head_only { body = ""; }
+    var body = content; if head_only { body = ""; }
     switch await stream.write(write_message(f"HTTP/1.1 {response.status} {reason}", headers, body)) {
         case .ok(let count): return true;
         case .err(let message): return false;
