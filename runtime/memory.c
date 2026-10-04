@@ -257,7 +257,9 @@ static atomic_flag gc_list_lock = ATOMIC_FLAG_INIT;
 static ObjHeader* gc_old_head = NULL;
 #endif
 static RL_TLS int        gc_minor_count = 0;
+#ifndef GC_MAJOR_EVERY
 #define GC_MAJOR_EVERY 8
+#endif
 
 #if !defined(ROLANG_THREADED)
 int64_t gc_alloc_counter = 0;          /* non-static: inline alloc fast path */
@@ -270,9 +272,15 @@ static RL_TLS int64_t gc_cycle_count = 0;
  * large persistent heap then amortizes each O(live) cycle scan over a
  * proportional number of subsequent allocations instead of rescanning every
  * GC_MIN_GAP allocations. Bounded by a floor and a cap. */
+#ifndef GC_MIN_GAP
 #define GC_MIN_GAP   10000
-#define GC_MAX_GAP   2000000
+#endif
+#ifndef GC_MAX_GAP
+#define GC_MAX_GAP   8000000
+#endif
+#ifndef GC_GROWTH
 #define GC_GROWTH    2
+#endif
 RL_TLS int64_t gc_next_gap = GC_MIN_GAP;
 /* Precomputed trigger threshold: gc_last_collect_count + gc_next_gap. The
  * per-allocation poll is then one load + one compare against the counter.
@@ -1406,6 +1414,8 @@ void rt_gc_collect(void) {
      * candidates) still count toward the heap size the gap is amortized
      * against — the allocation counter that drives the gap counts them too. */
     int64_t survivors = (int64_t)live_count - (int64_t)collected_count;
+    /* The next minor scans only the young region and adds this to it. */
+    gc_old_live_count = survivors;
     int64_t gap = survivors * GC_GROWTH;
     if (gap < GC_MIN_GAP) gap = GC_MIN_GAP;
     if (gap > GC_MAX_GAP) gap = GC_MAX_GAP;
