@@ -74,6 +74,10 @@ jobs.close();
 - `close()` ends sending; values already sent can still be received.
   `len()` and `is_closed()` report the state.
 - Only the waiting task waits: other tasks on its thread keep running.
+- A channel lives while any thread holds it or a value queued in a live
+  channel refers to it. Channels that only refer to each other through
+  queued values (a channel sent into itself, two channels holding each
+  other) are freed together.
 
 ## Rules
 
@@ -108,6 +112,12 @@ jobs.close();
   awaits; a send or receive hands the first waiter of the other side to its
   thread's inbox, and the woken task tries again. A wake that reaches a
   cancelled task passes to the next waiter.
+- An encoded channel is an index into its buffer's list of channel
+  references, so a buffer freed before decoding releases them. Each channel
+  counts the references held by values queued in channels; when a release
+  leaves only those, the runtime checks whether the channels reachable from
+  it through queued values are referenced only by each other (trial
+  deletion) and frees them if so.
 - The scheduler keeps runnable tasks on a ready queue, waiting tasks on the
   waiters list of the task they await, native tasks on their own list and
   finished tasks on a retire queue, so a step costs time in its own work

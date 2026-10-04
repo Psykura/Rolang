@@ -19,6 +19,10 @@ typedef struct SendBuffer {
     unsigned char* data;
     size_t size, capacity, read_at;
     int depth;
+    /* Channel references the encoded bytes hold (by index), released if the
+     * buffer is freed before they are decoded. */
+    void** channels;
+    int32_t channel_count, channel_capacity;
 } SendBuffer;
 
 void* rt_send_buffer_new(void) {
@@ -30,6 +34,10 @@ void* rt_send_buffer_new(void) {
 void rt_send_buffer_free(void* pointer) {
     SendBuffer* buffer = pointer;
     if (!buffer) return;
+    for (int32_t i = 0; i < buffer->channel_count; i++) {
+        if (buffer->channels[i]) rt_channel_release(buffer->channels[i]);
+    }
+    free(buffer->channels);
     free(buffer->data);
     free(buffer);
 }
@@ -66,6 +74,20 @@ void rt_send_put_string(void* pointer, void* string) {
     buffer->size += (size_t)value.len;
 }
 
+/* A channel handle: the buffer owns a reference until it is decoded. */
+void rt_send_put_channel(void* pointer, void* channel) {
+    SendBuffer* buffer = pointer;
+    if (buffer->channel_count == buffer->channel_capacity) {
+        int32_t capacity = buffer->channel_capacity ? buffer->channel_capacity * 2 : 4;
+        void** grown = realloc(buffer->channels, (size_t)capacity * sizeof(void*));
+        if (!grown) rt_panic("send buffer allocation failed");
+        buffer->channels = grown; buffer->channel_capacity = capacity;
+    }
+    rt_channel_retain(channel);
+    buffer->channels[buffer->channel_count] = channel;
+    rt_send_put_i64(buffer, buffer->channel_count++);
+}
+
 /* Nesting of encoded values: a value graph with a cycle would otherwise encode forever. */
 void rt_send_enter(void* pointer) {
     SendBuffer* buffer = pointer;
@@ -91,6 +113,16 @@ double rt_send_get_f64(void* pointer) {
     double value; memcpy(&value, buffer->data + buffer->read_at, 8);
     buffer->read_at += 8;
     return value;
+}
+
+/* The channel handle, with the buffer's reference. */
+void* rt_send_get_channel(void* pointer) {
+    SendBuffer* buffer = pointer;
+    int64_t index = rt_send_get_i64(buffer);
+    if (index < 0 || index >= buffer->channel_count || !buffer->channels[index]) rt_panic("malformed send buffer");
+    void* channel = buffer->channels[index];
+    buffer->channels[index] = NULL;
+    return channel;
 }
 
 void* rt_send_get_string(void* pointer) {
@@ -374,7 +406,15 @@ void* rt_parallel_result(TaskHandle* task) {
  * A task that finds it full (sending) or empty (receiving) registers a
  * ChannelWait and awaits a native task (kind 14); a change wakes one waiter
  * of the other side through its thread's inbox, and the woken task tries
- * again, so a spurious wake costs only a retry. Closing wakes everyone. */
+ * again, so a spurious wake costs only a retry. Closing wakes everyone.
+ *
+ * Values in a channel may hold other channels (or the channel itself), so
+ * channels can form cycles that counting alone never frees. `internal`
+ * counts a channel's references held by values queued in channels; when a
+ * release leaves only such references, channel_collect checks whether the
+ * channels reachable from it are referenced only by each other and frees
+ * them if so. Moving a value holding channels into or out of a queue, and
+ * the check, take channel_graph first, then channel locks. */
 
 typedef struct ChannelWait {
     int owners;                    /* the waiting task, and the channel's list or an inbox */
@@ -395,7 +435,60 @@ typedef struct ParallelChannel {
     int64_t head, count, slots;
     int closed;
     ChannelWait *receivers, *receivers_tail, *senders, *senders_tail;
+    int internal;                  /* references from queued values; changed under channel_graph */
+    unsigned mark;                 /* channel_collect's bookkeeping, under channel_graph */
+    int incoming;
 } ParallelChannel;
+
+static pthread_mutex_t channel_graph = PTHREAD_MUTEX_INITIALIZER;
+static int64_t channels_live;   /* for tests: channels not yet freed */
+
+int64_t rt_channel_live_count(void) { return __atomic_load_n(&channels_live, __ATOMIC_ACQUIRE); }
+static unsigned channel_epoch;
+
+/* Under channel_graph: values holding channels entered (+1) or left (-1) a queue. */
+static void channel_count_internal(SendBuffer* item, int delta) {
+    for (int32_t i = 0; i < item->channel_count; i++) {
+        ParallelChannel* target = item->channels[i];
+        if (target) __atomic_add_fetch(&target->internal, delta, __ATOMIC_RELEASE);
+    }
+}
+
+/* Takes every queued value out of a channel (under its lock). */
+static SendBuffer** channel_take_items(ParallelChannel* channel, int64_t* count) {
+    *count = channel->count;
+    if (!channel->count) return NULL;
+    SendBuffer** items = malloc((size_t)channel->count * sizeof(*items));
+    if (!items) rt_panic("channel allocation failed");
+    for (int64_t i = 0; i < channel->count; i++) items[i] = channel->items[(channel->head + i) % channel->slots];
+    channel->head = 0; channel->count = 0;
+    return items;
+}
+
+/* Frees values taken out of queues, after uncounting their references. */
+static void channel_free_items(SendBuffer** items, int64_t count) {
+    int holding = 0;
+    for (int64_t i = 0; i < count && !holding; i++) holding = items[i]->channel_count > 0;
+    if (holding) {
+        pthread_mutex_lock(&channel_graph);
+        for (int64_t i = 0; i < count; i++) channel_count_internal(items[i], -1);
+        pthread_mutex_unlock(&channel_graph);
+    }
+    for (int64_t i = 0; i < count; i++) rt_send_buffer_free(items[i]);
+    free(items);
+}
+
+static void channel_destroy(ParallelChannel* channel) {
+    int64_t count;
+    SendBuffer** items = channel_take_items(channel, &count);
+    free(channel->items);
+    pthread_mutex_destroy(&channel->lock);
+    free(channel);
+    __atomic_sub_fetch(&channels_live, 1, __ATOMIC_ACQ_REL);
+    channel_free_items(items, count);
+}
+
+static void channel_collect(ParallelChannel* start);
 
 void* rt_channel_new(int64_t capacity) {
     if (capacity < 0) rt_panic("a channel's capacity cannot be negative");
@@ -404,6 +497,7 @@ void* rt_channel_new(int64_t capacity) {
     pthread_mutex_init(&channel->lock, NULL);
     channel->refs = 1;
     channel->capacity = capacity;
+    __atomic_add_fetch(&channels_live, 1, __ATOMIC_ACQ_REL);
     return channel;
 }
 
@@ -413,16 +507,77 @@ void rt_channel_retain(void* pointer) {
 
 void rt_channel_release(void* pointer) {
     ParallelChannel* channel = pointer;
-    if (!channel || __atomic_sub_fetch(&channel->refs, 1, __ATOMIC_ACQ_REL)) return;
-    for (int64_t i = 0; i < channel->count; i++) rt_send_buffer_free(channel->items[(channel->head + i) % channel->slots]);
-    free(channel->items);
-    pthread_mutex_destroy(&channel->lock);
-    free(channel);
+    if (!channel) return;
+    int left = __atomic_sub_fetch(&channel->refs, 1, __ATOMIC_ACQ_REL);
+    if (left == 0) channel_destroy(channel);
+    else if (left == __atomic_load_n(&channel->internal, __ATOMIC_ACQUIRE)) channel_collect(channel);
 }
 
-/* A handle encoded for another thread: an owned reference as a number. */
-int64_t rt_channel_share(void* pointer) { rt_channel_retain(pointer); return (int64_t)(intptr_t)pointer; }
-void* rt_channel_from_shared(int64_t id) { return (void*)(intptr_t)id; }
+/* Frees the channels reachable from `start` through queued values when
+ * nothing outside them refers to any of them. */
+static void channel_collect(ParallelChannel* start) {
+    rt_channel_retain(start);   /* keeps it alive while checking */
+    pthread_mutex_lock(&channel_graph);
+    unsigned epoch = ++channel_epoch;
+    ParallelChannel** set = malloc(16 * sizeof(*set));
+    if (!set) rt_panic("channel allocation failed");
+    size_t count = 0, capacity = 16;
+    start->mark = epoch; start->incoming = 0; set[count++] = start;
+    for (size_t at = 0; at < count; at++) {
+        ParallelChannel* channel = set[at];
+        pthread_mutex_lock(&channel->lock);
+        for (int64_t i = 0; i < channel->count; i++) {
+            SendBuffer* item = channel->items[(channel->head + i) % channel->slots];
+            for (int32_t k = 0; k < item->channel_count; k++) {
+                ParallelChannel* target = item->channels[k];
+                if (!target) continue;
+                if (target->mark != epoch) {
+                    if (count == capacity) {
+                        capacity *= 2;
+                        ParallelChannel** grown = realloc(set, capacity * sizeof(*set));
+                        if (!grown) rt_panic("channel allocation failed");
+                        set = grown;
+                    }
+                    target->mark = epoch; target->incoming = 0; set[count++] = target;
+                }
+                target->incoming++;
+            }
+        }
+        pthread_mutex_unlock(&channel->lock);
+    }
+    /* Garbage when every reference to the set comes from inside it (plus
+     * this check's own reference to `start`): nothing else can reach it. */
+    int garbage = 1;
+    for (size_t i = 0; i < count && garbage; i++) {
+        int refs = __atomic_load_n(&set[i]->refs, __ATOMIC_ACQUIRE) - (set[i] == start);
+        garbage = refs == set[i]->incoming;
+    }
+    SendBuffer*** taken = NULL;
+    int64_t* taken_counts = NULL;
+    if (garbage) {
+        taken = calloc(count, sizeof(*taken));
+        taken_counts = calloc(count, sizeof(*taken_counts));
+        if (!taken || !taken_counts) rt_panic("channel allocation failed");
+        for (size_t i = 0; i < count; i++) {
+            pthread_mutex_lock(&set[i]->lock);
+            set[i]->closed = 1;
+            taken[i] = channel_take_items(set[i], &taken_counts[i]);
+            pthread_mutex_unlock(&set[i]->lock);
+            for (int64_t k = 0; k < taken_counts[i]; k++) channel_count_internal(taken[i][k], -1);
+        }
+    }
+    pthread_mutex_unlock(&channel_graph);
+    /* Freeing the values drops the set's references to itself. */
+    if (garbage) {
+        for (size_t i = 0; i < count; i++) {
+            for (int64_t k = 0; k < taken_counts[i]; k++) rt_send_buffer_free(taken[i][k]);
+            free(taken[i]);
+        }
+        free(taken); free(taken_counts);
+    }
+    free(set);
+    if (__atomic_sub_fetch(&start->refs, 1, __ATOMIC_ACQ_REL) == 0) channel_destroy(start);
+}
 
 static void wait_release(ChannelWait* wait) {
     if (__atomic_sub_fetch(&wait->owners, 1, __ATOMIC_ACQ_REL)) return;
@@ -465,9 +620,15 @@ static void channel_waits_deliver(ChannelWait* wait) {
 int32_t rt_channel_try_send(void* pointer, void* writer) {
     ParallelChannel* channel = pointer;
     SendBuffer* source = writer;
+    int holding = source->channel_count > 0;
+    if (holding) pthread_mutex_lock(&channel_graph);
     pthread_mutex_lock(&channel->lock);
-    if (channel->closed) { pthread_mutex_unlock(&channel->lock); return -1; }
-    if (channel->capacity && channel->count >= channel->capacity) { pthread_mutex_unlock(&channel->lock); return 0; }
+    int status = channel->closed ? -1 : (channel->capacity && channel->count >= channel->capacity) ? 0 : 1;
+    if (status != 1) {
+        pthread_mutex_unlock(&channel->lock);
+        if (holding) pthread_mutex_unlock(&channel_graph);
+        return status;
+    }
     if (channel->count == channel->slots) {
         int64_t slots = channel->slots ? channel->slots * 2 : 16;
         SendBuffer** items = malloc((size_t)slots * sizeof(*items));
@@ -483,21 +644,37 @@ int32_t rt_channel_try_send(void* pointer, void* writer) {
     memset(source, 0, sizeof(*source));
     channel->items[(channel->head + channel->count) % channel->slots] = item;
     channel->count++;
+    if (holding) channel_count_internal(item, 1);
     channel_signal(channel, 1, 0);
     pthread_mutex_unlock(&channel->lock);
+    if (holding) pthread_mutex_unlock(&channel_graph);
     return 1;
 }
 
 /* The oldest value, as a reader that owns it, or NULL when empty. */
 void* rt_channel_try_receive(void* pointer) {
     ParallelChannel* channel = pointer;
+    int holding = 0;
     pthread_mutex_lock(&channel->lock);
-    if (channel->count == 0) { pthread_mutex_unlock(&channel->lock); return NULL; }
+    while (channel->count && channel->items[channel->head]->channel_count > 0 && !holding) {
+        /* The value holds channels: take the graph lock first, then look again. */
+        pthread_mutex_unlock(&channel->lock);
+        pthread_mutex_lock(&channel_graph);
+        holding = 1;
+        pthread_mutex_lock(&channel->lock);
+    }
+    if (channel->count == 0) {
+        pthread_mutex_unlock(&channel->lock);
+        if (holding) pthread_mutex_unlock(&channel_graph);
+        return NULL;
+    }
     SendBuffer* item = channel->items[channel->head];
     channel->head = (channel->head + 1) % channel->slots;
     channel->count--;
+    if (item->channel_count > 0) channel_count_internal(item, -1);
     channel_signal(channel, 0, 0);
     pthread_mutex_unlock(&channel->lock);
+    if (holding) pthread_mutex_unlock(&channel_graph);
     item->read_at = 0;
     return item;
 }
@@ -610,9 +787,8 @@ void* rt_parallel_result(TaskHandle* task) { (void)task; return NULL; }
 int32_t rt_parallel_on_worker(void) { return 0; }
 void* rt_channel_new(int64_t capacity) { (void)capacity; rt_panic("channels need POSIX threads"); return NULL; }
 void rt_channel_retain(void* channel) { (void)channel; }
+int64_t rt_channel_live_count(void) { return 0; }
 void rt_channel_release(void* channel) { (void)channel; }
-int64_t rt_channel_share(void* channel) { (void)channel; return 0; }
-void* rt_channel_from_shared(int64_t id) { (void)id; return NULL; }
 int32_t rt_channel_try_send(void* channel, void* writer) { (void)channel; (void)writer; return -1; }
 void* rt_channel_try_receive(void* channel) { (void)channel; return NULL; }
 int32_t rt_channel_drained(void* channel) { (void)channel; return 1; }

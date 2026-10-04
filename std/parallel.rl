@@ -37,8 +37,8 @@ pub extern "C" def rt_parallel_on_worker() -> i32;
 pub extern "C" def rt_task_detach(task: RawPtr) -> Void;
 pub extern "C" def rt_channel_new(capacity: i64) -> RawPtr;
 pub extern "C" def rt_channel_release(channel: RawPtr) -> Void;
-pub extern "C" def rt_channel_share(channel: RawPtr) -> i64;
-pub extern "C" def rt_channel_from_shared(id: i64) -> RawPtr;
+pub extern "C" def rt_send_put_channel(buffer: RawPtr, channel: RawPtr) -> Void;
+pub extern "C" def rt_send_get_channel(buffer: RawPtr) -> RawPtr;
 pub extern "C" def rt_channel_try_send(channel: RawPtr, writer: RawPtr) -> i32;
 pub extern "C" def rt_channel_try_receive(channel: RawPtr) -> RawPtr;
 pub extern "C" def rt_channel_drained(channel: RawPtr) -> i32;
@@ -202,9 +202,9 @@ pub extension<T> Channel<T> {
     }
 }
 pub extension<T> Channel<T>: Sendable {
-    pub def send_encode(out: SendWriter) -> Void { unsafe { out.put_int(rt_channel_share(self.handle)); } }
+    pub def send_encode(out: SendWriter) -> Void { unsafe { rt_send_put_channel(out.handle, self.handle); } }
     pub static def send_decode(input: SendReader) -> Channel<T> {
-        unsafe { return Channel<T> { handle: rt_channel_from_shared(input.int()) }; }
+        unsafe { return Channel<T> { handle: rt_send_get_channel(input.handle) }; }
     }
 }
 
