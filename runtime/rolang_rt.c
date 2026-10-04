@@ -23,4 +23,6 @@
 #include "../std/async_io.c"
 #include "../std/tls.c"
 #include "../std/subprocess.c"
+#include "../std/encoding.c"
+#include "../std/crypto.c"
 #include "entry.c"

@@ -1,0 +1,18 @@
+6869 C3BF00 hi true true
+|Zg==|Zm8=|Zm9v|Zm9vYg==|Zm9vYmE=|Zm9vYmFy|
+w7_Dvg foob foob true true
+md5 900150983cd24fb0d6963f7d28e17f72
+sha1 a9993e364706816aba3e25717850c26c9cd0d89d
+sha256 ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+sha512 ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f
+sha3-256 3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532
+blake2s256 508c5e8c327c14e2e1a72ba34eeb452f37458b209ed63a294d999b4c86675982
+ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843
+ea6c014dc72d6f8ccd1ed92ace1d41f0d8de8957
+32 false
+aes-256-gcm 30 attack at dawn true the message failed authentication
+chacha20-poly1305 30 attack at dawn true the message failed authentication
+aes-128-gcm 30 attack at dawn true the message failed authentication
+aes-256-gcm needs a 32-byte key
+true false false

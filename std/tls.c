@@ -30,6 +30,7 @@ enum {
 
 static struct {
     int state; /* 0 not tried, 1 loaded, -1 unavailable */
+    void* library; /* libssl, through which std.crypto also finds libcrypto */
     void* (*TLS_client_method)(void);
     void* (*TLS_server_method)(void);
     void* (*SSL_CTX_new)(void*);
@@ -145,6 +146,7 @@ static int tls_load(void) {
     TLS_SYMBOL(SSL_get0_alpn_selected) TLS_SYMBOL(SSL_get_version)
     TLS_SYMBOL(ERR_get_error) TLS_SYMBOL(ERR_peek_error) TLS_SYMBOL(ERR_error_string_n) TLS_SYMBOL(ERR_reason_error_string) TLS_SYMBOL(ERR_clear_error)
 #undef TLS_SYMBOL
+    tls.library = library;
 #ifndef __APPLE__
     /* OpenSSL writes with write(2), which raises SIGPIPE on a closed
      * connection; macOS sockets already set SO_NOSIGPIPE. */
