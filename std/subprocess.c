@@ -157,6 +157,7 @@ void* rt_child_spawn(void* program_string, void* arguments, void* environment, i
     char** envp = child_environment(overrides, override_count, cleared, &envc);
     int modes[3] = { in_mode, out_mode, err_mode };
     int pairs[3][2] = { { -1, -1 }, { -1, -1 }, { -1, -1 } };
+    AsyncStream* adopted[3] = { NULL, NULL, NULL };
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
     posix_spawnattr_t attributes;
@@ -179,6 +180,13 @@ void* rt_child_spawn(void* program_string, void* arguments, void* environment, i
 #endif
         } else if (modes[stream] == 1) {
             status = child_socketpair(pairs[stream]);
+            if (!status) {
+                /* Configure the parent's end while the child's end is open: once a
+                 * short-lived child exits, macOS refuses socket options on it. */
+                adopted[stream] = rl_stream_adopt(pairs[stream][0]);
+                pairs[stream][0] = -1;
+                if (!adopted[stream]) status = errno ? errno : EIO;
+            }
             if (!status) {
                 posix_spawn_file_actions_adddup2(&actions, pairs[stream][1], stream);
             }
@@ -205,13 +213,10 @@ void* rt_child_spawn(void* program_string, void* arguments, void* environment, i
     free(program); free(cwd);
     for (int stream = 0; stream < 3; stream++) if (pairs[stream][1] >= 0) close(pairs[stream][1]);
     if (status) {
-        for (int stream = 0; stream < 3; stream++) if (pairs[stream][0] >= 0) close(pairs[stream][0]);
+        for (int stream = 0; stream < 3; stream++) rl_stream_release(adopted[stream]);
         *error = status; return NULL;
     }
-    for (int stream = 0; stream < 3; stream++) if (pairs[stream][0] >= 0) {
-        *streams[stream] = rl_stream_adopt(pairs[stream][0]);
-        if (!*streams[stream]) rt_panic("subprocess stream setup failed");
-    }
+    for (int stream = 0; stream < 3; stream++) *streams[stream] = adopted[stream];
     ChildJob* job = calloc(1, sizeof(*job));
     if (!job) rt_panic("subprocess allocation failed");
     pthread_mutex_init(&job->lock, NULL);
